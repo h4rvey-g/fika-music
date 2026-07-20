@@ -1,6 +1,6 @@
 # Fika Music
 
-Fika Music is a local-first music player that combines a personal music library with compatible online music source scripts.
+Fika Music is a local-first music player that combines a personal music library with LX-compatible online music source providers.
 
 ## Language
 
@@ -24,9 +24,21 @@ _Avoid_: Collection, database
 An ordered collection of tracks owned locally or by an online music service.
 _Avoid_: List, queue
 
-**Source Script**:
-A JavaScript integration module compatible with the LX Music-style source model.
-_Avoid_: Scraper, provider script
+**Source Provider**:
+A Rust-native online music source module loaded by Fika's **Source Runtime**.
+_Avoid_: Original LX JavaScript script, plugin, scraper
+
+**LX Compatibility**:
+Fika's core ability to model LX Music-style source actions and data contracts through Rust-native **Source Providers**.
+_Avoid_: Running original LX JavaScript, plugin feature, plugin compatibility
+
+**Plugin**:
+A packaged, installable or bundled unit that contains a manifest and one or more Source Providers/assets.
+_Avoid_: Source Runtime, LX Compatibility
+
+**Plugin System**:
+The app layer that installs, validates, enables/disables, permission-reviews, updates, and diagnoses Plugins.
+_Avoid_: Source Runtime, LX Compatibility
 
 **Connector**:
 A built-in integration with an online music service.
@@ -37,19 +49,19 @@ The upstream `NeteaseCloudMusicApiEnhanced/api-enhanced` project used as the ref
 _Avoid_: Official NetEase API
 
 **Service Bridge**:
-A host-managed integration component that gives Source Scripts controlled access to app-provided service behavior.
+A host-managed integration component that gives Source Providers controlled access to app-provided service behavior.
 _Avoid_: Plugin sidecar, script daemon
 
 **Source Runtime**:
-The JavaScript execution environment used to run Source Scripts.
-_Avoid_: Node runtime, browser runtime
+The core Rust dispatcher used to initialize Source Providers, enforce Capabilities, collect diagnostics, and provide **LX Compatibility**.
+_Avoid_: JavaScript runtime, Plugin runtime, Node runtime, browser runtime
 
 **Account Ref**:
 An opaque reference to a stored online-service account session.
 _Avoid_: Cookie, token, password
 
 **Capability**:
-A permission category granted to a source script or connector.
+A permission category granted to a Source Provider or Connector.
 _Avoid_: Access flag, scope
 
 ## Relationships
@@ -57,18 +69,21 @@ _Avoid_: Access flag, scope
 - A **Library** contains zero or more **Tracks**.
 - A **Playlist** contains zero or more ordered **Tracks**.
 - A **Track** may be a **Local Track** or a **Remote Track**.
-- A **Source Script** exposes online music source behavior through granted **Capabilities**.
-- A **Source Script** does not access local files directly; local file IO belongs to the app core.
-- A **Source Script** may call a **Service Bridge** only through app-provided APIs.
-- A **Source Script** may receive an **Account Ref**, but not raw account secrets.
+- A **Source Provider** exposes online music source behavior through granted **Capabilities**.
+- A **Source Provider** does not access local files directly; local file IO belongs to the app core.
+- A **Source Provider** may call a **Service Bridge** only through app-provided APIs.
+- A **Source Provider** may receive an **Account Ref**, but not raw account secrets.
+- **LX Compatibility** is a core app capability provided by the **Source Runtime**, not a plugin feature.
+- A **Plugin** may package one or more **Source Providers** plus metadata, assets, and declared **Capabilities**.
+- The **Plugin System** manages **Plugins**, but it does not implement **LX Compatibility** itself.
 - A **Connector** integrates one online music service without being user-installed.
-- A **Service Bridge** is managed by the app, not bundled or launched by a **Source Script**.
+- A **Service Bridge** is managed by the app, not bundled or launched by a **Source Provider**.
 
 ## Example Dialogue
 
-> **Dev:** "When a **Source Script** returns a **Remote Track**, do we add it to the **Library** automatically?"
+> **Dev:** "When a **Source Provider** returns a **Remote Track**, do we add it to the **Library** automatically?"
 > **Domain expert:** "No. It becomes part of the **Library** only when the user saves it, adds it to a **Playlist**, or plays it through a persisted history feature."
 
 ## Flagged Ambiguities
 
-- "JS sources similar to LX Music" is resolved as direct LX Music-style **Source Script** compatibility for the first plugin platform.
+- "LX compatibility" is resolved as Rust-native **Source Provider** implementations that follow LX Music-style actions and data contracts, not execution of original LX JavaScript.

@@ -11,6 +11,7 @@ import {
   Play,
   RefreshCw,
   Volume2,
+  X,
 } from "@lucide/vue";
 
 type LocalTrack = {
@@ -51,6 +52,53 @@ type MediaSource = {
   mimeType: string;
 };
 
+type RemoteMediaSource = {
+  url: string;
+  mimeType: string;
+  diagnostics: Array<{
+    sourceId: string;
+    level: string;
+    message: string;
+  }>;
+};
+
+type RemoteCommandError = {
+  message: string;
+  diagnostics?: Array<{
+    sourceId: string;
+    level: string;
+    message: string;
+  }>;
+};
+
+type RemoteSearchResult = {
+  id: string;
+  source: string;
+  title: string;
+  artist: string;
+  album: string | null;
+  durationSeconds: number | null;
+  coverUrl: string | null;
+  rawInfo: Record<string, unknown>;
+};
+
+type RemoteSearchResults = {
+  isEnd: boolean;
+  total: number | null;
+  list: RemoteSearchResult[];
+  diagnostics: Array<{
+    sourceId: string;
+    level: string;
+    message: string;
+  }>;
+};
+
+type PlaybackSource = {
+  filePath?: string;
+  url?: string;
+  mimeType: string;
+};
+
 const emptyScanStatus: ScanStatus = {
   isRunning: false,
   folderPath: null,
@@ -68,7 +116,8 @@ const tracks = ref<LocalTrack[]>([]);
 const scanStatus = ref<ScanStatus>({ ...emptyScanStatus });
 const selectedFolder = ref<string | null>(null);
 const activeTrack = ref<LocalTrack | null>(null);
-const activeSource = ref<MediaSource | null>(null);
+const activeRemoteTitle = ref<string | null>(null);
+const activeSource = ref<PlaybackSource | null>(null);
 const audioUrl = ref<string | null>(null);
 const isPlaying = ref(false);
 const volume = ref(0.8);
@@ -76,9 +125,21 @@ const isLoadingTracks = ref(false);
 const isChoosingFolder = ref(false);
 const isStartingScan = ref(false);
 const isPreparingPlayback = ref(false);
+const isResolvingRemote = ref(false);
 const appError = ref<string | null>(null);
 const scanMessage = ref<string | null>(null);
 const audioElement = ref<HTMLAudioElement | null>(null);
+const remoteFamily = ref("nianxin");
+const remoteSource = ref("wy");
+const remoteQuality = ref("128k");
+const remoteTrackId = ref("");
+const remoteDiagnostics = ref<string[]>([]);
+const remoteSearchKeyword = ref("");
+const remoteSearchResults = ref<RemoteSearchResult[]>([]);
+const remoteSearchTotal = ref<number | null>(null);
+const isSearchingRemote = ref(false);
+const activeRemoteRequestId = ref<string | null>(null);
+const isCancellingRemoteRequest = ref(false);
 
 let unlistenScanProgress: UnlistenFn | null = null;
 
@@ -103,6 +164,15 @@ const libraryDuration = computed(() => {
 
   return formatLongDuration(totalSeconds);
 });
+const nowPlayingTitle = computed(() => activeTrack.value?.title || activeRemoteTitle.value || "Nothing playing");
+const nowPlayingSubtitle = computed(() => {
+  if (activeTrack.value) {
+    return trackSubtitle(activeTrack.value);
+  }
+
+  return activeRemoteTitle.value ? "Remote LX template source" : "Select a local or remote track";
+});
+const hasActiveRemoteRequest = computed(() => activeRemoteRequestId.value !== null);
 
 onMounted(async () => {
   await Promise.all([loadTracks(), loadScanStatus(), bindScanProgress()]);
@@ -110,7 +180,30 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unlistenScanProgress?.();
+  void cancelActiveRemoteRequest();
 });
+
+function beginRemoteRequest() {
+  const requestId = crypto.randomUUID();
+  activeRemoteRequestId.value = requestId;
+  return requestId;
+}
+
+async function cancelActiveRemoteRequest() {
+  const requestId = activeRemoteRequestId.value;
+  if (!requestId || isCancellingRemoteRequest.value) {
+    return;
+  }
+
+  isCancellingRemoteRequest.value = true;
+  try {
+    await invoke("cancel_source_request", { requestId });
+  } catch (error) {
+    appError.value = normalizeError(error);
+  } finally {
+    isCancellingRemoteRequest.value = false;
+  }
+}
 
 async function bindScanProgress() {
   unlistenScanProgress = await listen<ScanProgressEvent>("library:scan-progress", async (event) => {
@@ -187,6 +280,7 @@ async function playTrack(track: LocalTrack) {
     });
 
     activeTrack.value = track;
+    activeRemoteTitle.value = null;
     activeSource.value = source;
     audioUrl.value = convertFileSrc(source.filePath);
 
@@ -201,6 +295,130 @@ async function playTrack(track: LocalTrack) {
     isPlaying.value = false;
   } finally {
     isPreparingPlayback.value = false;
+  }
+}
+
+async function playRemoteTrack() {
+  if (hasActiveRemoteRequest.value) {
+    return;
+  }
+  if (!remoteTrackId.value.trim()) {
+    appError.value = "Enter a remote track id first.";
+    return;
+  }
+
+  isResolvingRemote.value = true;
+  isPreparingPlayback.value = true;
+  appError.value = null;
+  remoteDiagnostics.value = [];
+  const requestId = beginRemoteRequest();
+
+  try {
+    const source = await invoke<RemoteMediaSource>("resolve_imported_lx_template_music_url", {
+      family: remoteFamily.value,
+      source: remoteSource.value,
+      trackId: remoteTrackId.value.trim(),
+      quality: remoteQuality.value,
+      requestId,
+    });
+
+    activeTrack.value = null;
+    activeRemoteTitle.value = `${remoteFamily.value}:${remoteSource.value}:${remoteTrackId.value.trim()}`;
+    activeSource.value = { url: source.url, mimeType: source.mimeType };
+    audioUrl.value = source.url;
+    remoteDiagnostics.value = source.diagnostics.map((diagnostic) => diagnostic.message);
+
+    await nextTick();
+    if (audioElement.value) {
+      audioElement.value.volume = volume.value;
+      await audioElement.value.play();
+      isPlaying.value = true;
+    }
+  } catch (error) {
+    appError.value = normalizeRemoteError(error);
+    isPlaying.value = false;
+  } finally {
+    isPreparingPlayback.value = false;
+    isResolvingRemote.value = false;
+    if (activeRemoteRequestId.value === requestId) {
+      activeRemoteRequestId.value = null;
+    }
+  }
+}
+
+async function searchRemoteMusic() {
+  if (hasActiveRemoteRequest.value) {
+    return;
+  }
+  if (!remoteSearchKeyword.value.trim()) {
+    appError.value = "Enter a search keyword first.";
+    return;
+  }
+
+  isSearchingRemote.value = true;
+  appError.value = null;
+  remoteDiagnostics.value = [];
+  const requestId = beginRemoteRequest();
+
+  try {
+    const response = await invoke<RemoteSearchResults>("search_qishui_music", {
+      keyword: remoteSearchKeyword.value.trim(),
+      page: 1,
+      pageSize: 20,
+      requestId,
+    });
+
+    remoteSearchResults.value = response.list;
+    remoteSearchTotal.value = response.total;
+    remoteDiagnostics.value = response.diagnostics.map((diagnostic) => diagnostic.message);
+  } catch (error) {
+    appError.value = normalizeRemoteError(error);
+  } finally {
+    isSearchingRemote.value = false;
+    if (activeRemoteRequestId.value === requestId) {
+      activeRemoteRequestId.value = null;
+    }
+  }
+}
+
+async function playRemoteSearchResult(result: RemoteSearchResult) {
+  if (hasActiveRemoteRequest.value) {
+    return;
+  }
+  isResolvingRemote.value = true;
+  isPreparingPlayback.value = true;
+  appError.value = null;
+  remoteDiagnostics.value = [];
+  const requestId = beginRemoteRequest();
+
+  try {
+    const source = await invoke<RemoteMediaSource>("resolve_qishui_music_url", {
+      musicInfo: result.rawInfo,
+      quality: remoteQuality.value,
+      requestId,
+    });
+
+    activeTrack.value = null;
+    activeRemoteTitle.value = `${result.title} - ${result.artist}`;
+    activeSource.value = { url: source.url, mimeType: source.mimeType };
+    audioUrl.value = source.url;
+    remoteDiagnostics.value = source.diagnostics.map((diagnostic) => diagnostic.message);
+
+    await nextTick();
+    if (audioElement.value) {
+      audioElement.value.volume = volume.value;
+      await audioElement.value.play();
+      isPlaying.value = true;
+    }
+  } catch (error) {
+    appError.value = normalizeRemoteError(error);
+    isPlaying.value = false;
+  } finally {
+    isPreparingPlayback.value = false;
+    isResolvingRemote.value = false;
+    if (activeRemoteRequestId.value === requestId) {
+      activeRemoteRequestId.value = null;
+    }
   }
 }
 
@@ -246,7 +464,7 @@ function onAudioPlay() {
 
 function onAudioError() {
   isPlaying.value = false;
-  appError.value = "Playback failed for the selected local track.";
+  appError.value = "Playback failed for the selected track.";
 }
 
 function formatDuration(seconds: number | null) {
@@ -296,6 +514,36 @@ function normalizeError(error: unknown) {
   }
 
   return "Unexpected application error.";
+}
+
+function normalizeRemoteError(error: unknown) {
+  const remoteError = parseRemoteCommandError(error);
+  if (remoteError) {
+    remoteDiagnostics.value = (remoteError.diagnostics ?? [])
+      .map((diagnostic) => diagnostic.message)
+      .filter(Boolean);
+    return remoteError.message;
+  }
+
+  return normalizeError(error);
+}
+
+function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
+  let candidate: unknown = error;
+  if (typeof candidate === "string") {
+    try {
+      candidate = JSON.parse(candidate);
+    } catch {
+      return null;
+    }
+  }
+
+  if (!candidate || typeof candidate !== "object") {
+    return null;
+  }
+
+  const value = candidate as Partial<RemoteCommandError>;
+  return typeof value.message === "string" ? (value as RemoteCommandError) : null;
 }
 </script>
 
@@ -454,16 +702,138 @@ function normalizeError(error: unknown) {
           </section>
 
           <section class="rounded border border-base-300 bg-base-100 p-4">
+            <h2 class="text-base font-semibold">Remote LX template</h2>
+            <p class="mt-1 text-sm text-base-content/65">
+              Search through the Rust qsvip port, or resolve a known platform ID through bundled LX templates.
+            </p>
+
+            <div class="mt-4 flex gap-2">
+              <input
+                v-model="remoteSearchKeyword"
+                class="input input-sm min-w-0 flex-1"
+                type="text"
+                placeholder="Search remote music"
+                @keyup.enter="searchRemoteMusic"
+              />
+              <button
+                class="btn btn-sm"
+                type="button"
+                :disabled="hasActiveRemoteRequest || !remoteSearchKeyword.trim()"
+                @click="searchRemoteMusic"
+              >
+                <RefreshCw v-if="isSearchingRemote" class="animate-spin" :size="16" aria-hidden="true" />
+                <span v-else>Search</span>
+              </button>
+            </div>
+
+            <div v-if="remoteSearchResults.length" class="mt-3 rounded border border-base-300 bg-base-200/50">
+              <div class="border-b border-base-300 px-3 py-2 text-xs text-base-content/65">
+                qsvip results<span v-if="remoteSearchTotal !== null"> · {{ remoteSearchTotal }}</span>
+              </div>
+              <ul class="list max-h-72 overflow-y-auto">
+                <li v-for="result in remoteSearchResults" :key="result.id" class="list-row px-3 py-2">
+                  <button
+                    class="btn btn-square btn-ghost btn-sm"
+                    type="button"
+                    :disabled="isPreparingPlayback || hasActiveRemoteRequest"
+                    :aria-label="`Play ${result.title}`"
+                    @click="playRemoteSearchResult(result)"
+                  >
+                    <Play :size="15" aria-hidden="true" />
+                  </button>
+                  <div class="min-w-0">
+                    <div class="truncate text-sm font-medium">{{ result.title }}</div>
+                    <div class="truncate text-xs text-base-content/65">
+                      {{ result.artist }}<span v-if="result.album"> · {{ result.album }}</span>
+                    </div>
+                  </div>
+                  <div class="text-right text-xs tabular-nums text-base-content/60">
+                    {{ formatDuration(result.durationSeconds) }}
+                  </div>
+                </li>
+              </ul>
+            </div>
+
+            <div class="mt-4 grid grid-cols-2 gap-2">
+              <label class="flex flex-col gap-1 text-xs">
+                <span>Family</span>
+                <select v-model="remoteFamily" class="select select-sm w-full">
+                  <option value="nianxin">念心</option>
+                  <option value="changqing">长青</option>
+                </select>
+              </label>
+              <label class="flex flex-col gap-1 text-xs">
+                <span>Source</span>
+                <select v-model="remoteSource" class="select select-sm w-full">
+                  <option value="wy">网易云</option>
+                  <option value="tx">QQ</option>
+                  <option value="kw">酷我</option>
+                  <option value="kg">酷狗</option>
+                  <option value="mg">咪咕</option>
+                </select>
+              </label>
+              <label class="flex flex-col gap-1 text-xs">
+                <span>Quality</span>
+                <select v-model="remoteQuality" class="select select-sm w-full">
+                  <option value="128k">128k</option>
+                  <option value="320k">320k</option>
+                  <option value="flac">flac</option>
+                  <option value="flac24bit">flac24bit</option>
+                </select>
+              </label>
+              <label class="flex flex-col gap-1 text-xs">
+                <span>Track ID</span>
+                <input
+                  v-model="remoteTrackId"
+                  class="input input-sm w-full"
+                  type="text"
+                  placeholder="e.g. 347230"
+                  @keyup.enter="playRemoteTrack"
+                />
+              </label>
+            </div>
+
+            <button
+              class="btn btn-primary btn-sm mt-3 w-full"
+              type="button"
+              :disabled="hasActiveRemoteRequest || !remoteTrackId.trim()"
+              @click="playRemoteTrack"
+            >
+              <RefreshCw v-if="isResolvingRemote" class="animate-spin" :size="16" aria-hidden="true" />
+              <Play v-else :size="16" aria-hidden="true" />
+              Resolve & play
+            </button>
+
+            <button
+              v-if="hasActiveRemoteRequest"
+              class="btn btn-ghost btn-sm mt-2 w-full"
+              type="button"
+              :disabled="isCancellingRemoteRequest"
+              title="Cancel remote request"
+              @click="cancelActiveRemoteRequest"
+            >
+              <RefreshCw v-if="isCancellingRemoteRequest" class="animate-spin" :size="16" aria-hidden="true" />
+              <X v-else :size="16" aria-hidden="true" />
+              Cancel request
+            </button>
+
+            <div v-if="remoteDiagnostics.length" role="alert" class="alert alert-info alert-soft mt-3">
+              <AlertCircle :size="18" aria-hidden="true" />
+              <div class="text-xs">
+                <div v-for="message in remoteDiagnostics" :key="message">{{ message }}</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="rounded border border-base-300 bg-base-100 p-4">
             <h2 class="text-base font-semibold">Now Playing</h2>
             <div class="mt-4 flex items-start gap-3">
               <div class="flex size-12 shrink-0 items-center justify-center rounded bg-base-200">
                 <Music2 :size="24" aria-hidden="true" />
               </div>
               <div class="min-w-0">
-                <div class="truncate font-medium">{{ activeTrack?.title || "Nothing playing" }}</div>
-                <div class="truncate text-sm text-base-content/65">
-                  {{ activeTrack ? trackSubtitle(activeTrack) : "Select a local track" }}
-                </div>
+                <div class="truncate font-medium">{{ nowPlayingTitle }}</div>
+                <div class="truncate text-sm text-base-content/65">{{ nowPlayingSubtitle }}</div>
               </div>
             </div>
 
@@ -484,7 +854,7 @@ function normalizeError(error: unknown) {
               <button
                 class="btn btn-square"
                 type="button"
-                :disabled="isPreparingPlayback || (!activeTrack && !tracks.length)"
+                :disabled="isPreparingPlayback || (!activeTrack && !activeRemoteTitle && !tracks.length)"
                 :aria-label="isPlaying ? 'Pause playback' : 'Play playback'"
                 @click="togglePlayback"
               >

@@ -2,7 +2,7 @@
 
 Status: accepted
 
-Fika Music v0.1 will not ship or launch a Node.js runtime for the NetEase integration. Instead, the built-in NetEase Service Bridge will use a build-time bundled, QuickJS-compatible subset of `NeteaseCloudMusicApiEnhanced/api-enhanced`, while Rust provides host-owned polyfills for HTTP, credentials/cookies, selected Buffer/crypto/zlib behavior, logging, and mutation audit.
+Fika Music v0.1 will not ship or launch a Node.js runtime for the NetEase integration. Fika will also avoid a QuickJS-compatible JavaScript bridge bundle. The selected NetEase endpoint behavior will be rewritten in Rust, with `NeteaseCloudMusicApiEnhanced/api-enhanced` used as the behavioral/API reference.
 
 **Considered Options**
 
@@ -14,6 +14,6 @@ Fika Music v0.1 will not ship or launch a Node.js runtime for the NetEase integr
 **Consequences**
 
 - The app preserves the low-resource Rust/Tauri architecture and avoids a long-lived Node sidecar.
-- The bridge build must remove Express server code, dynamic `require` scanning, arbitrary filesystem access, and Node-specific process assumptions.
+- The Rust bridge implementation must remove Express server code, dynamic `require` scanning, arbitrary filesystem access, and Node-specific process assumptions from the upstream reference behavior.
 - The bridge should pin upstream `api-enhanced` behavior and include tests comparing selected endpoint behavior where feasible.
-- Host polyfills are part of the trusted app core, not supplied by user-installed Source Scripts.
+- Host HTTP, credential, crypto/zlib, logging, and audit support are part of the trusted app core, not supplied by user-installed Source Providers.

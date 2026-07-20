@@ -1,14 +1,19 @@
+use crate::source_runtime::SourceProvider;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::{Accessor, Tag};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use walkdir::WalkDir;
+
+pub mod lx_js_importer;
+pub mod source_runtime;
 
 const SCAN_PROGRESS_EVENT: &str = "library:scan-progress";
 
@@ -78,6 +83,52 @@ struct MediaSource {
     mime_type: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteMediaSource {
+    url: String,
+    mime_type: String,
+    diagnostics: Vec<source_runtime::SourceDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteSearchResults {
+    is_end: bool,
+    total: Option<u64>,
+    list: Vec<source_runtime::SourceSearchResult>,
+    diagnostics: Vec<source_runtime::SourceDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteCommandError {
+    message: String,
+    diagnostics: Vec<source_runtime::SourceDiagnostic>,
+}
+
+type RemoteCommandResult<T> = Result<T, RemoteCommandError>;
+
+fn remote_error(message: impl Into<String>) -> RemoteCommandError {
+    RemoteCommandError {
+        message: message.into(),
+        diagnostics: Vec::new(),
+    }
+}
+
+fn remote_source_error(error: source_runtime::SourceRuntimeError) -> RemoteCommandError {
+    let message = error.to_string();
+    let diagnostics = error.into_diagnostics();
+    RemoteCommandError {
+        message,
+        diagnostics,
+    }
+}
+
+fn remote_runtime() -> source_runtime::SourceRuntime {
+    source_runtime::SourceRuntime::new()
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ScanStatus {
@@ -103,6 +154,8 @@ struct ScanProgressEvent {
 struct AppState {
     db: Mutex<Connection>,
     scan_status: Mutex<ScanStatus>,
+    source_requests: Mutex<BTreeMap<String, source_runtime::SourceCancellationToken>>,
+    source_runtime: Arc<source_runtime::SourceRuntime>,
 }
 
 #[derive(Debug, Default)]
@@ -123,8 +176,84 @@ impl AppState {
         Ok(Self {
             db: Mutex::new(connection),
             scan_status: Mutex::new(ScanStatus::default()),
+            source_requests: Mutex::new(BTreeMap::new()),
+            source_runtime: Arc::new(remote_runtime()),
         })
     }
+}
+
+fn register_source_request(
+    state: &AppState,
+    request_id: Option<&str>,
+) -> RemoteCommandResult<source_runtime::SourceCancellationToken> {
+    let cancellation = source_runtime::SourceCancellationToken::default();
+    let Some(request_id) = request_id
+        .map(str::trim)
+        .filter(|request_id| !request_id.is_empty())
+    else {
+        return Ok(cancellation);
+    };
+
+    let mut requests = state
+        .source_requests
+        .lock()
+        .map_err(|_| remote_error("source request registry lock was poisoned"))?;
+    if requests.contains_key(request_id) {
+        return Err(remote_error(format!(
+            "source request id is already active: {request_id}"
+        )));
+    }
+    requests.insert(request_id.to_owned(), cancellation.clone());
+    Ok(cancellation)
+}
+
+fn unregister_source_request(state: &AppState, request_id: Option<&str>) {
+    let Some(request_id) = request_id
+        .map(str::trim)
+        .filter(|request_id| !request_id.is_empty())
+    else {
+        return;
+    };
+    if let Ok(mut requests) = state.source_requests.lock() {
+        requests.remove(request_id);
+    }
+}
+
+async fn run_remote_request<T, F>(
+    state: &AppState,
+    request_id: Option<&str>,
+    task: F,
+    task_failure_message: &'static str,
+) -> RemoteCommandResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(source_runtime::SourceCancellationToken) -> RemoteCommandResult<T> + Send + 'static,
+{
+    let cancellation = register_source_request(state, request_id)?;
+    let result = tauri::async_runtime::spawn_blocking(move || task(cancellation)).await;
+    unregister_source_request(state, request_id);
+
+    match result {
+        Ok(result) => result,
+        Err(error) => Err(remote_error(format!("{task_failure_message}: {error}"))),
+    }
+}
+
+#[tauri::command]
+fn cancel_source_request(state: State<'_, AppState>, request_id: String) -> CommandResult<bool> {
+    let request_id = request_id.trim();
+    if request_id.is_empty() {
+        return Ok(false);
+    }
+    let requests = state
+        .source_requests
+        .lock()
+        .map_err(|_| "source request registry lock was poisoned".to_owned())?;
+    let Some(cancellation) = requests.get(request_id) else {
+        return Ok(false);
+    };
+    cancellation.cancel();
+    Ok(true)
 }
 
 #[tauri::command]
@@ -235,6 +364,214 @@ fn local_track_media_source(
     Ok(MediaSource {
         file_path,
         mime_type,
+    })
+}
+
+#[tauri::command]
+async fn resolve_imported_lx_template_music_url(
+    state: State<'_, AppState>,
+    family: String,
+    source: String,
+    track_id: String,
+    quality: Option<String>,
+    request_id: Option<String>,
+) -> RemoteCommandResult<RemoteMediaSource> {
+    let runtime = Arc::clone(&state.source_runtime);
+    run_remote_request(
+        state.inner(),
+        request_id.as_deref(),
+        move |cancellation| {
+            resolve_imported_lx_template_music_url_inner(
+                family,
+                source,
+                track_id,
+                quality,
+                runtime,
+                cancellation,
+            )
+        },
+        "remote source resolver task failed",
+    )
+    .await
+}
+
+fn resolve_imported_lx_template_music_url_inner(
+    family: String,
+    source: String,
+    track_id: String,
+    quality: Option<String>,
+    runtime: Arc<source_runtime::SourceRuntime>,
+    cancellation: source_runtime::SourceCancellationToken,
+) -> RemoteCommandResult<RemoteMediaSource> {
+    let report = lx_js_importer::analyze_lx_js_source(
+        "quantouya-aggregate-v4.1.js",
+        include_str!("../fixtures/lx-js-sources/quantouya-aggregate-v4.1.js"),
+    )
+    .map_err(|error| remote_error(error.to_string()))?;
+    let provider = lx_js_importer::ImportedLxTemplateProvider::from_report(&report, &family)
+        .map_err(|error| remote_error(error.to_string()))?;
+    runtime
+        .ensure_provider_granted_capabilities(
+            provider.id(),
+            [source_runtime::SourceCapability::NetworkAny],
+        )
+        .map_err(remote_source_error)?;
+    let quality = quality.as_deref().unwrap_or("128k");
+    let quality = source_runtime::SourceQuality::from_lx_str(quality)
+        .ok_or_else(|| remote_error(format!("unsupported source quality: {quality}")))?;
+    let request = source_runtime::SourceRequest::MusicUrl {
+        source,
+        music_info: serde_json::json!({ "id": track_id }),
+        quality,
+    };
+    let init_report = runtime
+        .initialize_provider_with_cancellation(&provider, cancellation.clone())
+        .map_err(remote_source_error)?;
+    let outcome = runtime
+        .dispatch_request_with_cancellation(&provider, request, cancellation)
+        .map_err(remote_source_error)?;
+
+    let source_runtime::SourceResponse::MusicUrl(url) = outcome.response else {
+        return Err(remote_error("source provider did not return a musicUrl"));
+    };
+    let mime_type = mime_guess::from_path(url.split('?').next().unwrap_or(&url))
+        .first_or_octet_stream()
+        .essence_str()
+        .to_owned();
+
+    Ok(RemoteMediaSource {
+        url,
+        mime_type,
+        diagnostics: init_report
+            .diagnostics
+            .into_iter()
+            .chain(outcome.diagnostics)
+            .collect(),
+    })
+}
+
+#[tauri::command]
+async fn search_qishui_music(
+    state: State<'_, AppState>,
+    keyword: String,
+    page: Option<u64>,
+    page_size: Option<u64>,
+    request_id: Option<String>,
+) -> RemoteCommandResult<RemoteSearchResults> {
+    let runtime = Arc::clone(&state.source_runtime);
+    run_remote_request(
+        state.inner(),
+        request_id.as_deref(),
+        move |cancellation| {
+            search_qishui_music_inner(keyword, page, page_size, runtime, cancellation)
+        },
+        "qsvip search task failed",
+    )
+    .await
+}
+
+fn search_qishui_music_inner(
+    keyword: String,
+    page: Option<u64>,
+    page_size: Option<u64>,
+    runtime: Arc<source_runtime::SourceRuntime>,
+    cancellation: source_runtime::SourceCancellationToken,
+) -> RemoteCommandResult<RemoteSearchResults> {
+    let provider = lx_js_importer::QishuiRustProvider::new();
+    runtime
+        .ensure_provider_granted_capabilities(
+            provider.id(),
+            [source_runtime::SourceCapability::NetworkAny],
+        )
+        .map_err(remote_source_error)?;
+    let request = source_runtime::SourceRequest::MusicSearch {
+        source: "qsvip".to_owned(),
+        keyword,
+        page: page.unwrap_or(1),
+        page_size: page_size.unwrap_or(30),
+    };
+    let init_report = runtime
+        .initialize_provider_with_cancellation(&provider, cancellation.clone())
+        .map_err(remote_source_error)?;
+    let outcome = runtime
+        .dispatch_request_with_cancellation(&provider, request, cancellation)
+        .map_err(remote_source_error)?;
+    let source_runtime::SourceResponse::MusicSearch(response) = outcome.response else {
+        return Err(remote_error("qsvip provider did not return search results"));
+    };
+    Ok(RemoteSearchResults {
+        is_end: response.is_end,
+        total: response.total,
+        list: response.list,
+        diagnostics: init_report
+            .diagnostics
+            .into_iter()
+            .chain(outcome.diagnostics)
+            .collect(),
+    })
+}
+
+#[tauri::command]
+async fn resolve_qishui_music_url(
+    state: State<'_, AppState>,
+    music_info: serde_json::Value,
+    quality: Option<String>,
+    request_id: Option<String>,
+) -> RemoteCommandResult<RemoteMediaSource> {
+    let runtime = Arc::clone(&state.source_runtime);
+    run_remote_request(
+        state.inner(),
+        request_id.as_deref(),
+        move |cancellation| {
+            resolve_qishui_music_url_inner(music_info, quality, runtime, cancellation)
+        },
+        "qsvip resolver task failed",
+    )
+    .await
+}
+
+fn resolve_qishui_music_url_inner(
+    music_info: serde_json::Value,
+    quality: Option<String>,
+    runtime: Arc<source_runtime::SourceRuntime>,
+    cancellation: source_runtime::SourceCancellationToken,
+) -> RemoteCommandResult<RemoteMediaSource> {
+    let provider = lx_js_importer::QishuiRustProvider::new();
+    runtime
+        .ensure_provider_granted_capabilities(
+            provider.id(),
+            [source_runtime::SourceCapability::NetworkAny],
+        )
+        .map_err(remote_source_error)?;
+    let quality = quality.as_deref().unwrap_or("128k");
+    let quality = source_runtime::SourceQuality::from_lx_str(quality)
+        .ok_or_else(|| remote_error(format!("unsupported source quality: {quality}")))?;
+    let request = source_runtime::SourceRequest::MusicUrl {
+        source: "qsvip".to_owned(),
+        music_info,
+        quality,
+    };
+    let init_report = runtime
+        .initialize_provider_with_cancellation(&provider, cancellation.clone())
+        .map_err(remote_source_error)?;
+    let outcome = runtime
+        .dispatch_request_with_cancellation(&provider, request, cancellation)
+        .map_err(remote_source_error)?;
+    let source_runtime::SourceResponse::MusicUrl(url) = outcome.response else {
+        return Err(remote_error("qsvip provider did not return a musicUrl"));
+    };
+    let mime_type = mime_guess::from_path(url.split('?').next().unwrap_or(&url))
+        .first_or_octet_stream()
+        .essence_str()
+        .to_owned();
+    Ok(RemoteMediaSource {
+        url,
+        mime_type,
+        diagnostics: init_report
+            .diagnostics
+            .into_iter()
+            .chain(outcome.diagnostics)
+            .collect(),
     })
 }
 
@@ -617,7 +954,11 @@ pub fn run() {
             start_library_scan,
             get_scan_status,
             list_local_tracks,
-            local_track_media_source
+            local_track_media_source,
+            cancel_source_request,
+            resolve_imported_lx_template_music_url,
+            search_qishui_music,
+            resolve_qishui_music_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -626,7 +967,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
 
     static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -757,5 +1101,56 @@ mod tests {
             ),
             (1, "Alpha Revised", Some("Artist B"))
         );
+    }
+
+    #[test]
+    fn remote_request_helper_should_allow_in_flight_cancellation_and_cleanup() {
+        let root = temp_dir("remote-request");
+        let state = Arc::new(
+            AppState::new(&root.join("library.sqlite3")).expect("test app state should initialize"),
+        );
+        let started = Arc::new(AtomicBool::new(false));
+        let task_state = Arc::clone(&state);
+        let task_started = Arc::clone(&started);
+        let handle = thread::spawn(move || {
+            tauri::async_runtime::block_on(run_remote_request::<(), _>(
+                task_state.as_ref(),
+                Some("request-1"),
+                move |cancellation| {
+                    task_started.store(true, Ordering::Release);
+                    while !cancellation.is_cancelled() {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(remote_error("request cancelled in test"))
+                },
+                "remote task failed",
+            ))
+        });
+
+        for _ in 0..1_000 {
+            if started.load(Ordering::Acquire) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(started.load(Ordering::Acquire));
+
+        let cancellation = state
+            .source_requests
+            .lock()
+            .expect("request registry should not be poisoned")
+            .get("request-1")
+            .cloned()
+            .expect("in-flight request should be registered");
+        cancellation.cancel();
+
+        let result = handle.join().expect("remote request task should not panic");
+        assert!(result.is_err());
+        assert!(state
+            .source_requests
+            .lock()
+            .expect("request registry should not be poisoned")
+            .is_empty());
+        fs::remove_dir_all(root).expect("test temp directory should be removed");
     }
 }

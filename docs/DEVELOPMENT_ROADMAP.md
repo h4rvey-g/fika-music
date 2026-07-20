@@ -18,23 +18,23 @@ The project currently starts from the Tauri Vue TypeScript template:
 
 - Frontend: Vue 3, TypeScript, Vite, Tailwind CSS v4, daisyUI 5.
 - Backend: Rust, Tauri 2, minimal generated `greet` command.
-- No product domain model, plugin API, local music database, or playback engine exists yet.
+- No product domain model, Source Runtime API, local music database, or playback engine exists yet.
 
 ## Non-negotiable engineering goals
 
 1. **Performance first**
-   - Rust owns filesystem scanning, metadata parsing, indexing, playback coordination, plugin process supervision, and persistence.
+   - Rust owns filesystem scanning, metadata parsing, indexing, playback coordination, Source Runtime supervision, and persistence.
    - The frontend should render state, dispatch commands, and avoid heavy long-running work.
    - Large collections must use incremental indexing, pagination, lazy loading, and background jobs.
 
 2. **Low resource usage**
    - Avoid Electron-style always-heavy architecture; use Tauri for a small native shell.
-   - Avoid loading every track, artwork, lyric, and plugin result into the UI at once.
+   - Avoid loading every track, artwork, lyric, and source-provider result into the UI at once.
    - Cache intentionally with bounded size and eviction.
 
-3. **Safe extensibility**
-   - Plugins should not be trusted by default.
-   - Any JavaScript-source compatibility must be sandboxed, permissioned, versioned, and observable.
+3. **Safe LX compatibility and extensibility**
+   - Source Providers should not be trusted by default, whether bundled or user-installed.
+   - LX Music-style compatibility is a core app capability, and it must be permissioned, versioned, and observable.
    - Network, filesystem, credential, and playlist-write capabilities should be explicitly granted.
 
 4. **Cross-platform behavior**
@@ -42,7 +42,7 @@ The project currently starts from the Tauri Vue TypeScript template:
    - Keep OS-specific media-key, tray, filesystem watching, and audio-backend behavior behind Rust traits/adapters so macOS, Windows, and Linux can be promoted later without rewriting the core.
 
 5. **Legal and account-safety boundary**
-   - Integrations should prefer official APIs, user-owned accounts, user-owned local files, and source plugins that respect service terms.
+   - Integrations should prefer official APIs, user-owned accounts, user-owned local files, and Source Providers that respect service terms.
    - Do not design around DRM bypass, credential theft, or unauthorized redistribution.
 
 ## Proposed architecture
@@ -54,7 +54,7 @@ The project currently starts from the Tauri Vue TypeScript template:
 |                                                               |
 | - Library views                                               |
 | - Playback queue UI                                           |
-| - Plugin management UI                                        |
+| - Source Provider management UI                                |
 | - NetEase recommendation and playlist management UI           |
 | - Settings, permissions, theming, diagnostics                 |
 +-----------------------------+---------------------------------+
@@ -70,7 +70,7 @@ The project currently starts from the Tauri Vue TypeScript template:
 | - Playback orchestration                                      |
 | - Queue/session state                                         |
 | - Playlist model                                              |
-| - Plugin registry and capability enforcement                  |
+| - Source Provider registry and capability enforcement          |
 | - Sync jobs                                                   |
 |                                                               |
 | Infrastructure:                                               |
@@ -78,10 +78,10 @@ The project currently starts from the Tauri Vue TypeScript template:
 | - Filesystem watcher                                          |
 | - Artwork/cache store                                         |
 | - Audio engine adapter                                        |
-| - Plugin runtime/sandbox adapter                              |
+| - Source Runtime/provider adapter                             |
 | - Service Bridge registry                                     |
 | - Built-in netease-api-enhanced bridge                        |
-| - Bundled NetEase Source Script                               |
+| - Bundled NetEase Source Provider                             |
 +-----------------------------+---------------------------------+
                               |
                               | controlled capabilities
@@ -91,7 +91,7 @@ The project currently starts from the Tauri Vue TypeScript template:
 |                                                               |
 | - Local filesystem music folders                              |
 | - NetEase Cloud Music account/API                             |
-| - User-installed source plugins                               |
+| - User-installed Source Providers                             |
 +---------------------------------------------------------------+
 ```
 
@@ -99,22 +99,27 @@ The project currently starts from the Tauri Vue TypeScript template:
 
 The canonical glossary now lives in [`../CONTEXT.md`](../CONTEXT.md). The most important resolved term is:
 
-- **Source Script**: a JavaScript integration module compatible with the LX Music-style source model.
+- **Source Provider**: a Rust-native online music source module loaded by Fika's Source Runtime.
+- **LX Compatibility**: Fika's core ability to model LX Music-style source actions and data contracts through Rust-native Source Providers.
+- **Plugin**: a packaged, installable or bundled unit that contains a manifest and one or more Source Providers/assets.
+- **Plugin System**: the app layer that installs, validates, enables/disables, permission-reviews, updates, and diagnoses Plugins.
 
 Earlier provisional terms such as **Track**, **Library**, **Playlist**, **Connector**, and **Capability** have also been recorded there and should be refined as the product model gets sharper.
 
 ## Decision log
 
 - ADR 0001: [Direct LX Music-style source compatibility](./adr/0001-direct-lx-music-style-source-compatibility.md).
-- ADR 0002: [Bundled NetEase source script](./adr/0002-bundled-netease-source-script.md).
+- ADR 0002: [Bundled NetEase Plugin](./adr/0002-bundled-netease-plugin.md).
 - ADR 0003: [Constrained source script runtime](./adr/0003-constrained-source-script-runtime.md).
 - ADR 0004: [Arbitrary network access for source scripts](./adr/0004-arbitrary-network-access-for-source-scripts.md).
 - ADR 0005: [No direct local file access for source scripts](./adr/0005-no-direct-local-file-access-for-source-scripts.md).
 - ADR 0006: [NetEase API Enhanced as API basis](./adr/0006-netease-api-enhanced-as-api-basis.md).
 - ADR 0007: [Host-provided service bridges for v0.1](./adr/0007-host-provided-service-bridges-for-v0-1.md).
-- ADR 0008: [rquickjs source script runtime](./adr/0008-rquickjs-source-script-runtime.md).
+- ADR 0008: [Rust-native source provider runtime](./adr/0008-rquickjs-source-script-runtime.md).
 - ADR 0009: [No Node runtime for the NetEase bridge](./adr/0009-no-node-runtime-for-netease-bridge.md).
 - ADR 0010: [Opaque account refs for source scripts](./adr/0010-opaque-account-refs-for-source-scripts.md).
+- ADR 0011: [Core LX-compatible Source Runtime MVP structure](./adr/0011-core-lx-compatible-source-runtime-mvp.md).
+- ADR 0012: [Plugin System built on the Source Runtime](./adr/0012-plugin-system-built-on-source-runtime.md).
 
 ## Earlier provisional domain terms
 
@@ -122,12 +127,13 @@ These were the first working definitions before the glossary was created:
 
 - **Track**: a playable audio item, whether local or provided by an integration.
 - **Local Track**: a track backed by a file on the user's device.
-- **Remote Track**: a track represented by an online service or plugin.
+- **Remote Track**: a track represented by an online service or Source Provider.
 - **Library**: the user's indexed collection of known tracks and playlists.
 - **Playlist**: an ordered track collection that can be local-only or synced to an external service.
-- **Source Plugin**: a user-installed integration module that can search, resolve metadata, and optionally perform authorized account actions.
+- **Source Provider**: a Rust-native integration module that can search, resolve metadata, and optionally perform authorized account actions.
+- **Plugin**: a package that can carry one or more Source Providers and supporting metadata/assets.
 - **Connector**: a built-in or first-party integration implemented in Rust or tightly controlled code.
-- **Capability**: a permission granted to a plugin or connector, such as network access, playlist write, credential access, or local file read.
+- **Capability**: a permission granted to a Source Provider or Connector, such as network access, playlist write, credential access, or local file read.
 
 Future changes should update `CONTEXT.md` first, then this roadmap only when delivery plans change.
 
@@ -140,37 +146,37 @@ Future changes should update `CONTEXT.md` first, then this roadmap only when del
 | Frontend | Vue 3 + TypeScript | Already scaffolded; strong reactive UI model. |
 | UI library | Tailwind CSS v4 + daisyUI 5 | Already installed; fast themed UI composition. |
 | Persistence | SQLite via Rust | Local-first, portable, reliable, low operational overhead. |
-| Async runtime | Tokio | Needed for network, indexing, plugin supervision, filesystem jobs. |
+| Async runtime | Tokio | Needed for network, indexing, Source Runtime supervision, filesystem jobs. |
 | Metadata parsing | Rust crates behind an adapter | Keeps parser choice replaceable. |
-| Source runtime | rquickjs | Runs LX Music-style Source Scripts inside the Rust architecture without a full Node.js environment. |
-| Plugin manifests | JSON/TOML manifest with semver | Supports permission review and compatibility checks. |
+| Source runtime | Rust-native Source Provider dispatcher | Keeps LX-compatible source behavior in audited Rust code instead of executing original LX JavaScript. |
+| Source Provider manifests | JSON/TOML manifest with semver | Supports permission review and compatibility checks. |
 | API contracts | TypeScript types generated from Rust models or shared schemas | Reduces Tauri command drift. |
 
 ## Major architectural decisions
 
-1. **JavaScript source compatibility model — decided**
-   - Decision: direct compatibility with LX Music-style source scripts.
-   - Rationale: reuse of existing source behavior is central to the product direction.
-   - Constraint: compatibility does not imply unconstrained execution; source scripts still need sandboxing, timeouts, declared capabilities, host-mediated network access, and host-mediated credential/playlist access.
+1. **LX source compatibility model — decided**
+   - Decision: Rust-native Source Providers implement LX Music-style actions and data contracts.
+   - Rationale: reuse the LX interaction model while keeping executable source behavior in audited Rust code.
+   - Constraint: compatibility does not imply unconstrained execution; Source Providers still need declared capabilities, host-mediated network access, diagnostics, and host-mediated credential/playlist access.
 
-2. **Plugin runtime — boundary decided**
-   - Decision: constrained JavaScript with host-mediated APIs.
+2. **Source Runtime — boundary decided**
+   - Decision: Rust-native Source Provider dispatch with host-mediated APIs.
    - Sensitive access must go through host capabilities: network, filesystem, credentials, cache, and playlist mutation.
-   - Network decision: Source Scripts may make arbitrary network requests through the host-mediated network API; requests must still be timeout-bound, logged, cancellable, and visible in diagnostics.
-   - Filesystem decision: Source Scripts have no direct local file access; Rust owns local library scanning and file IO, while scripts use host-mediated cache APIs and app-provided metadata.
-   - Service Bridge decision: v0.1 Source Scripts can only use host-provided Service Bridges; they cannot bundle, install, or launch arbitrary Node/native sidecars.
-   - Source runtime decision: use `rquickjs` for Source Scripts.
-   - Still open: exact process/isolation boundary around `rquickjs` execution.
+   - Network decision: Source Providers may make arbitrary network requests through the host-mediated network API; requests must still be timeout-bound, logged, cancellable, and visible in diagnostics.
+   - Filesystem decision: Source Providers have no direct local file access; Rust owns local library scanning and file IO, while providers use host-mediated cache APIs and app-provided metadata.
+   - Service Bridge decision: v0.1 Source Providers can only use host-provided Service Bridges; they cannot bundle, install, or launch arbitrary Node/native sidecars.
+   - Source runtime decision: do not execute original LX JavaScript; rewrite LX-compatible behavior as Rust Source Providers.
+   - Plugin System decision: installable/bundled Plugin package lifecycle is built above the Source Runtime; LX Compatibility remains core runtime behavior.
 
 3. **NetEase delivery model — decided**
-   - Decision: NetEase ships as a bundled LX Music-style compatible Source Script.
-   - Rationale: this proves the compatibility runtime while keeping the first integration pinned, reviewed, tested, and permissioned as first-party code.
+   - Decision: NetEase ships as a bundled Plugin containing an LX Music-style compatible Rust Source Provider.
+   - Rationale: this proves the Source Runtime and Plugin System together while keeping the first integration pinned, reviewed, tested, and permissioned as first-party code.
    - API basis decided: use `NeteaseCloudMusicApiEnhanced/api-enhanced` as the NetEase API basis.
-   - Service Bridge decision: `api-enhanced` is a host-managed built-in bridge behind the Rust Plugin Host, not the plugin itself.
+   - Service Bridge decision: `api-enhanced` is a host-managed built-in bridge behind the Source Runtime host, not the Source Provider itself.
    - Bridge implementation decided: no Node runtime for v0.1.
-   - The built-in NetEase Service Bridge uses a build-time bundled, QuickJS-compatible subset of `api-enhanced` endpoint behavior.
-   - Rust owns host polyfills for HTTP, credentials/cookies, selected Buffer/crypto/zlib behavior, logging, and mutation audit.
-   - Credential decision: Source Scripts receive opaque account/session references only; the trusted NetEase Service Bridge attaches stored secrets internally for approved operations.
+   - The built-in NetEase Service Bridge rewrites the needed `api-enhanced` endpoint behavior in Rust.
+   - Rust owns HTTP, credentials/cookies, selected crypto/zlib behavior, logging, and mutation audit.
+   - Credential decision: Source Providers receive opaque account/session references only; the trusted NetEase Service Bridge attaches stored secrets internally for approved operations.
 
 4. **Playback engine scope — decided for v0.1**
    - Required formats: MP3, FLAC, and M4A/AAC playback and metadata.
@@ -187,8 +193,8 @@ Future changes should update `CONTEXT.md` first, then this roadmap only when del
    - Deferred: automatic one-way sync, two-way sync, bulk destructive operations, and reorder unless needed after add/remove works.
 
 7. **Customization boundary — decided for v0.1**
-   - v0.1 includes themes, layout density, configurable sidebar sections, keyboard shortcuts, and source-script management.
-   - Deferred: arbitrary plugin UI, full UI extension panels, playback DSP plugins, and plugin-defined settings pages beyond standard manifest/capability controls.
+   - v0.1 includes themes, layout density, configurable sidebar sections, keyboard shortcuts, and Source Provider management.
+   - Deferred: arbitrary Source Provider UI, full UI extension panels, playback DSP extensions, and provider-defined settings pages beyond standard manifest/capability controls.
 
 ## Roadmap phases
 
@@ -196,12 +202,12 @@ Future changes should update `CONTEXT.md` first, then this roadmap only when del
 
 Goal: answer the high-risk questions before building irreversible foundations.
 
-Current v0.1 sequence decision: **hybrid: local playback foundation, then NetEase read through the bundled source script, then NetEase playlist write**.
+Current v0.1 sequence decision: **local playback foundation, then LX Compatibility in the core Source Runtime, then the Plugin System, then the bundled NetEase Plugin**.
 
 Deliverables:
 
-- Confirm what "JS sources similar to LX Music" means.
-- Confirm plugin threat model and allowed capabilities.
+- Confirm what "LX-compatible source behavior" means.
+- Confirm Source Runtime threat model and allowed capabilities.
 - Confirm NetEase account/API strategy and acceptable maintenance/legal risk.
 - Confirm MVP playback scope and codec expectations.
 - Maintain `CONTEXT.md` glossary as terms are settled.
@@ -210,7 +216,7 @@ Deliverables:
 Exit criteria:
 
 - The project has a clear MVP boundary.
-- Plugin and NetEase integration risks are explicit.
+- Source Runtime, Plugin System, and NetEase Plugin risks are explicit.
 - The first implementation slice can be built without guessing.
 
 ### Phase 1 — App foundation
@@ -219,7 +225,7 @@ Goal: replace the starter template with a real application shell.
 
 Deliverables:
 
-- App layout with daisyUI-based navigation, library area, queue/player area, plugin/settings area.
+- App layout with daisyUI-based navigation, library area, queue/player area, Source Provider/settings area.
 - Typed Tauri command/event layer.
 - Rust module structure for domain, infrastructure, application commands, and adapters.
 - Logging/tracing setup with a user-accessible diagnostics view.
@@ -236,12 +242,12 @@ src-tauri/src/
     track.rs
     playlist.rs
     library.rs
-    plugin.rs
+    source_runtime.rs
   infrastructure/
     db/
     filesystem/
     audio/
-    plugins/
+    source_runtime/
     netease/
   jobs/
   events.rs
@@ -282,30 +288,35 @@ Performance targets to validate:
 
 Exit criteria:
 
-- A user can manage and play a local music collection without plugins.
+- A user can manage and play a local music collection without online Source Providers.
 
-### Phase 3 — Plugin platform MVP
+### Phase 3 — Core LX-compatible Source Runtime MVP *(Completed)*
 
-Goal: define the smallest safe plugin system that can run LX Music-style source scripts without giving them unrestricted app access.
+Goal: define the smallest safe core Source Runtime that can initialize and dispatch LX Music-style Rust Source Providers without giving them unrestricted app access.
 
 Deliverables:
 
-- LX Music-style source compatibility surface inventory, including `globalThis.lx`, `EVENT_NAMES`, `on`, `send`, `request`, and required `utils`.
-- Fika extension surface for behavior LX does not model, including recommendations, account connection, playlist list/read, and playlist mutation.
-- Compatibility adapter for the subset needed by the first NetEase source script.
-- Host-provided Service Bridge registry.
+- LX Music-style source compatibility surface inventory, including source keys, actions, qualities, request payloads, and response shapes.
+- Rust-native Source Provider trait and dispatcher prototype.
+- Host-mediated bindings for the implemented search and URL-resolution paths; metadata lookup and recommendation fetch remain follow-up contracts until their LX response shapes are finalized.
+- Minimal mock Rust Source Providers compiled only for runtime tests, not full Plugin packaging.
+- Provider error isolation: provider failures do not crash the app.
+- Provider diagnostics visible to the user.
+- Source Runtime API versioning and compatibility checks.
+
+Deferred to the Plugin System phase:
+
+- Install/remove/enable/disable flow.
+- Plugin package manifest format and version update flow.
+- Capability review UI for installed Plugins.
+- User-installed provider package directories and trust prompts.
+
+Deferred to the NetEase Plugin phase:
+
 - Built-in `netease-api-enhanced` Service Bridge using no Node runtime.
 - Build-time bundling pipeline for selected `api-enhanced` endpoint modules.
-- Host-owned polyfills for the bridge: HTTP client, cookie jar, credential references, Buffer subset, crypto subset, zlib subset where needed, timers/cancellation, and logging.
-- Removal or replacement of Node-only assumptions from the bridge bundle: Express server code, dynamic `require` scanning, arbitrary filesystem access, process globals, and Node HTTP agents.
-- Plugin/source manifest format: id, name, version, author, entrypoint, compatibility target, required capabilities, supported API version, required host bridges.
-- Plugin install/remove/enable/disable flow.
-- Capability review UI.
-- Sandboxed runtime prototype.
-- Host APIs, Service Bridge calls, and compatibility shims for search, metadata lookup, recommendation fetch, and optional playlist-write operations.
-- Source-script error isolation: crashes and timeouts do not crash the app.
-- Source-script logs visible to the user.
-- Plugin API versioning and compatibility checks.
+- Host-owned bridge polyfills for NetEase-specific HTTP/cookie/crypto/zlib behavior.
+- Account connection, playlist list/read, and playlist mutation.
 
 Initial capabilities:
 
@@ -316,23 +327,56 @@ Initial capabilities:
 - `metadata:read`
 - `cache:read-write`
 - `bridge:netease-api-enhanced`
-- No `filesystem:*` capability for Source Scripts in v0.1.
-- No `sidecar:*` capability for Source Scripts in v0.1.
+- No `filesystem:*` capability for Source Providers in v0.1.
+- No `sidecar:*` capability for Source Providers in v0.1.
 
 Exit criteria:
 
-- A compatible source script can search or recommend tracks through controlled host APIs.
-- Source-script permissions are inspectable and revocable.
+- A compatible Rust Source Provider can search or recommend tracks through controlled host APIs.
+- Runtime capability checks, diagnostics, and errors are validated with mock Source Providers.
 
-### Phase 4 — NetEase Cloud Music integration
+Implementation notes for the completed Slice 2 runtime:
 
-Goal: ship the first real integration around recommendations and playlist operations.
+- Source Providers declare capabilities separately from host-granted capabilities; grants can be scoped and revoked per Provider, and only the intersection is exposed through `SourceRuntimeContext`.
+- Network, cache, and account-reference access go through host-owned bindings with bounded responses/cache storage, timeouts, Provider-scoped opaque refs, sanitized network targets in diagnostics, and cooperative cancellation.
+- Provider API `1.0` compatibility, initialized catalogs, typed LX request/response envelopes, invalid catalog/request handling, provider errors and panics, response validation, and in-flight cancellation are covered by Rust tests.
+- Tauri remote-source commands are asynchronous blocking tasks, return structured diagnostics, accept cancellable request IDs, and the frontend displays diagnostics for both successful and failed remote requests.
+- The current Rust-native Providers are reviewed in-process code. Capability checks are not an operating-system sandbox for arbitrary native binaries; installable untrusted native Providers remain outside the v0.1 trust model.
+
+### Phase 4 — Plugin System MVP
+
+Goal: add the installable/bundled Plugin layer on top of the core Source Runtime without changing the LX compatibility core.
 
 Deliverables:
 
+- Plugin package manifest format: id, name, version, author, provider entrypoints, compatibility target, declared capabilities, supported API version, required host bridges.
+- Plugin registry for bundled and user-installed Plugin packages.
+- Plugin install/remove/enable/disable flow.
+- Capability review UI and permission persistence.
+- Plugin diagnostics view using Source Runtime logs and security events.
+- Plugin API versioning, compatibility checks, and unsupported-plugin error states.
+- User-installed Plugin storage directory and import validation.
+- Clear separation between Plugin package lifecycle and Source Provider dispatch.
+
+Exit criteria:
+
+- A user or bundled package can install, inspect, enable, disable, and diagnose a Plugin that runs through the Source Runtime.
+- Plugin permissions are inspectable and revocable.
+
+### Phase 5 — NetEase Cloud Music Plugin
+
+Goal: ship the first real Plugin on top of the core LX-compatible Source Runtime and Plugin System.
+
+Deliverables:
+
+- Bundled NetEase Plugin package.
+- Bundled NetEase Rust Source Provider loaded through the Plugin System.
+- Node-free Rust implementation of the selected `netease-api-enhanced` behavior.
+- Rust host services for HTTP client, cookie jar, credential references, crypto/zlib behavior where needed, timers/cancellation, and logging.
+- Removal or replacement of Node-only assumptions from the upstream reference: Express server code, dynamic `require` scanning, arbitrary filesystem access, process globals, and Node HTTP agents.
 - NetEase account connection flow.
 - Token/session storage strategy using OS credential storage where feasible, with encrypted app storage only as a fallback.
-- Opaque Account Ref model for Source Script and Service Bridge calls.
+- Opaque Account Ref model for Source Provider and Service Bridge calls.
 - Recommendation fetch.
 - Playlist list/read.
 - Save selected supported track to a selected NetEase playlist.
@@ -344,10 +388,10 @@ Deliverables:
 
 Important constraints:
 
-- Delivery model decided: bundled compatible Source Script.
+- Delivery model decided: bundled NetEase Plugin containing a compatible Rust Source Provider.
 - API basis decided: `NeteaseCloudMusicApiEnhanced/api-enhanced`.
-- Service Bridge model decided: `api-enhanced` is host-managed and not bundled/launched by the Source Script.
-- Bridge implementation decided: no Node runtime; build-time bundled QuickJS-compatible endpoint subset with Rust-owned host polyfills.
+- Service Bridge model decided: `api-enhanced` is host-managed and not bundled/launched by the Source Provider.
+- Bridge implementation decided: no Node runtime and no QuickJS bundle; selected endpoint behavior is rewritten in Rust.
 - The permitted v0.1 API surface should stay limited to recommendations, playlist list/read, add selected track, and remove selected track.
 - Account-safety policy still needs operational detail for NetEase login/session expiry and upstream API breakage.
 
@@ -355,7 +399,7 @@ Exit criteria:
 
 - A user can view recommendations and save supported tracks to selected NetEase playlists.
 
-### Phase 5 — Advanced library and sync
+### Phase 6 — Advanced library and sync
 
 Goal: make local and remote music management feel coherent.
 
@@ -374,7 +418,7 @@ Exit criteria:
 
 - Users can organize local and NetEase-backed collections without losing track of source ownership or sync state.
 
-### Phase 6 — Customization and polish
+### Phase 7 — Customization and polish
 
 Goal: make the app highly customizable without compromising performance or safety.
 
@@ -385,8 +429,8 @@ Deliverables:
 - Keyboard shortcut editor.
 - Command palette.
 - Configurable sidebar sections.
-- Source-script management through standard app UI only.
-- Deferred plugin-provided commands or views until the plugin security model supports them.
+- Source Provider management through standard app UI only.
+- Deferred Source Provider-provided commands or views until the Source Runtime security model supports them.
 - Accessibility pass.
 - Localization infrastructure.
 
@@ -394,7 +438,7 @@ Exit criteria:
 
 - Users can personalize the app while the core app remains stable and resource-efficient.
 
-### Phase 7 — Packaging, updates, and hardening
+### Phase 8 — Packaging, updates, and hardening
 
 Goal: prepare for real distribution.
 
@@ -405,8 +449,8 @@ Deliverables:
 - Auto-update strategy.
 - Crash/error reporting strategy, opt-in if telemetry is used.
 - Backup/restore of local database and settings.
-- Plugin trust model documentation.
-- Security review of plugin sandbox and credential handling.
+- Source Provider trust model documentation.
+- Security review of Source Runtime capability enforcement and credential handling.
 - Performance benchmarks and regression tests.
 
 Exit criteria:
@@ -415,7 +459,7 @@ Exit criteria:
 
 ## Suggested v0.1 implementation sequence
 
-Decision: build the hybrid sequence.
+Decision: build LX compatibility first, then the Plugin System, then the NetEase Plugin.
 
 ### Slice 1 — Local playback foundation
 
@@ -427,45 +471,55 @@ Decision: build the hybrid sequence.
 6. Play one local track.
 7. Show indexing progress and errors.
 
-This validates Tauri commands, Rust jobs, database, UI state, and performance assumptions before investing in plugin complexity.
+This validates Tauri commands, Rust jobs, database, UI state, and performance assumptions before investing in Source Runtime complexity. *(Completed)*
 
-### Slice 2 — NetEase read path
+### Slice 2 — Core LX-compatible Source Runtime MVP *(Completed)*
 
-1. Add the minimal source-script runtime needed by the bundled NetEase Source Script.
-2. Load the bundled script with a pinned compatibility target.
-3. Grant only recommendation-read and required network capabilities.
-4. Fetch recommendations and normalize them into **Remote Track** results.
-5. Display recommendations without writing to NetEase playlists.
+1. **Rust Source Provider Runtime**: Define a Rust trait and dispatcher for LX-style source initialization and request handling.
+2. **Capability Framework**: Implement runtime permission checking and restriction (e.g. `network:any`, `account:ref`, `cache:read-write`) to prevent unauthorized platform actions.
+3. **LX Compatibility Model**: Represent LX Music-style source keys, actions, qualities, request payloads, response shapes, and diagnostics in Rust types.
+4. **Mock Rust Source Providers**: Run in-repo mock providers directly through the Source Runtime without plugin package/install semantics.
+5. **Runtime Verification**: Validate LX compatibility, capability enforcement, provider error handling, and diagnostic capture.
 
-This validates LX Music-style compatibility without exposing playlist mutation yet.
+This ensures the core LX provider model and safety boundaries are validated before adding package lifecycle, installation, or NetEase-specific endpoint code.
 
-### Slice 3 — NetEase playlist write path
+### Slice 3 — Plugin System MVP
 
-1. Add account connection and credential storage.
-2. Add host-mediated playlist list/read capabilities.
-3. Add explicit playlist-write capability review.
-4. Save a selected supported track to a selected NetEase playlist.
-5. Add mutation audit logs and clear error states for unsupported tracks or API failures.
+1. **Plugin Package Manifest**: Define package metadata, Source Provider entrypoints, capabilities, compatibility target, and required host bridges.
+2. **Plugin Registry**: Scan bundled and user-installed Plugin locations, validate manifests, and expose Plugin state to the frontend.
+3. **Lifecycle Management**: Add install/remove/enable/disable flows and persistence.
+4. **Capability Review UI**: Let users inspect and revoke Plugin capabilities before the Plugin's Source Providers run.
+5. **Diagnostics**: Surface Source Runtime logs, security denials, load errors, and compatibility failures per Plugin.
 
-This validates the highest-risk account action only after local playback and read-only source compatibility work.
+This adds a user-visible Plugin System on top of the core LX-compatible Source Runtime without redefining LX compatibility as a plugin feature.
+
+### Slice 4 — NetEase Plugin
+
+1. **Bundled NetEase Plugin Package**: Package the NetEase Rust Source Provider and manifest as a bundled Plugin.
+2. **NetEase Service Bridge**: Build the Node-free Rust Service Bridge for the selected `netease-api-enhanced` behavior.
+3. **Read Path**: Fetch recommendation feeds and normalize them into **Remote Track** results in the frontend.
+4. **Account & Playlist Path**: Add account connection, Account Refs, playlist list/read, and explicit playlist mutations.
+5. **Audit & Error States**: Add mutation audit logs and clear errors for unsupported tracks, credential expiry, bridge failures, and API failures.
+
+This validates the first production Plugin after both the core LX-compatible Source Runtime and the Plugin System exist.
 
 ## Grill backlog
 
 These should be answered one at a time:
 
 1. What exactly should "JS sources similar to LX Music" mean for compatibility, permissions, and legal boundaries?
-2. Should NetEase be a built-in connector or the first plugin? — resolved: bundled compatible Source Script.
-3. What is the MVP: local playback first, NetEase recommendations first, or plugin runtime first? — resolved: hybrid sequence, local playback → NetEase read → playlist write.
+2. Should NetEase be a built-in connector or a bundled Plugin? — resolved: bundled NetEase Plugin containing a compatible Rust Source Provider.
+3. What is the MVP: local playback first, NetEase recommendations first, Source Runtime first, or Plugin System first? — resolved: local playback → LX Compatibility → Plugin System → NetEase Plugin.
 4. Which platforms are release blockers: macOS, Windows, Linux, or all three? — resolved: current dev platform first only for v0.1.
 5. What audio formats and playback features are mandatory for v0.1? — resolved: MP3, FLAC, M4A/AAC plus play/pause/seek/next/previous/volume.
 6. How large should the target local library be for performance testing? — resolved: 50,000 tracks for v0.1 benchmarks.
-7. Are plugins allowed to run arbitrary JavaScript, or only a constrained API? — resolved: constrained JavaScript with host-mediated APIs.
-8. Can plugins make arbitrary network requests, or only declared hosts? — resolved: arbitrary network requests through the host-mediated network API.
-9. Can plugins access local files directly, or only through host-mediated APIs? — resolved: no direct local file access; host-mediated cache and app-provided metadata only.
-10. How should credentials be stored and exposed to plugins/connectors? — resolved: Source Scripts receive opaque Account Refs only; the trusted Service Bridge attaches secrets internally.
+7. Are Source Providers allowed to run arbitrary JavaScript? — resolved: no; LX-compatible behavior is rewritten as Rust Source Providers.
+8. Can Source Providers make arbitrary network requests, or only declared hosts? — resolved: arbitrary network requests through the host-mediated network API.
+9. Can Source Providers access local files directly, or only through host-mediated APIs? — resolved: no direct local file access; host-mediated cache and app-provided metadata only.
+10. How should credentials be stored and exposed to Source Providers/connectors? — resolved: Source Providers receive opaque Account Refs only; the trusted Service Bridge attaches secrets internally.
 11. Should external playlist modification be one-way, two-way, or manual only? — resolved: manual remote playlist operations only for v0.1.
 12. What customization is required for v0.1 versus later? — resolved: core customization only for v0.1.
 
 ## Immediate next step
 
-Next step after this roadmap: start Slice 1, the local playback foundation, after validating dependency choices for SQLite, metadata parsing, and audio playback.
+Next step after this roadmap: begin Slice 3 with the Plugin Package Manifest and registry, keeping Provider execution behind the completed Source Runtime boundary.

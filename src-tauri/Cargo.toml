@@ -28,4 +28,8 @@ walkdir = "2.5.0"
 thiserror = "2.0.18"
 rfd = "0.17.2"
 mime_guess = "2.0.5"
+oxc_allocator = "0.138.0"
+oxc_parser = "0.138.0"
+oxc_span = "0.138.0"
+reqwest = { version = "0.13.4", features = ["blocking", "json"] }
 
