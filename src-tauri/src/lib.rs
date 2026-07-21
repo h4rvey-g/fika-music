@@ -1,6 +1,7 @@
 use crate::source_runtime::SourceProvider;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::{Accessor, Tag};
+use plugin_system::{PluginDiagnostic, PluginRecord, PluginRegistry, PluginSystemError};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -13,6 +14,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use walkdir::WalkDir;
 
 pub mod lx_js_importer;
+pub mod plugin_system;
 pub mod source_runtime;
 
 const SCAN_PROGRESS_EVENT: &str = "library:scan-progress";
@@ -35,6 +37,8 @@ enum AppError {
     },
     #[error("internal state lock was poisoned: {0}")]
     StatePoisoned(&'static str),
+    #[error("plugin system error: {0}")]
+    Plugin(#[from] PluginSystemError),
     #[error("music folder does not exist or is not a directory: {0}")]
     InvalidMusicFolder(String),
     #[error("a library scan is already running")]
@@ -156,6 +160,7 @@ struct AppState {
     scan_status: Mutex<ScanStatus>,
     source_requests: Mutex<BTreeMap<String, source_runtime::SourceCancellationToken>>,
     source_runtime: Arc<source_runtime::SourceRuntime>,
+    plugin_registry: Mutex<PluginRegistry>,
 }
 
 #[derive(Debug, Default)]
@@ -165,19 +170,44 @@ struct DiscoveredAudioFiles {
 }
 
 impl AppState {
+    #[cfg(test)]
     fn new(db_path: &Path) -> AppResult<Self> {
+        let app_data_dir = db_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        Self::new_with_plugin_dirs(
+            db_path,
+            app_data_dir.join("plugins"),
+            app_data_dir.join("bundled-plugins"),
+        )
+    }
+
+    fn new_with_plugin_dirs(
+        db_path: &Path,
+        user_plugins_dir: PathBuf,
+        bundled_plugins_dir: PathBuf,
+    ) -> AppResult<Self> {
         if let Some(parent) = db_path.parent() {
             fs::create_dir_all(parent)?;
         }
 
         let connection = Connection::open(db_path)?;
         initialize_database(&connection)?;
+        let source_runtime = Arc::new(remote_runtime());
+        let mut plugin_registry = PluginRegistry::new(
+            user_plugins_dir,
+            bundled_plugins_dir,
+            Arc::clone(&source_runtime),
+        );
+        plugin_registry.refresh(&connection)?;
 
         Ok(Self {
             db: Mutex::new(connection),
             scan_status: Mutex::new(ScanStatus::default()),
             source_requests: Mutex::new(BTreeMap::new()),
-            source_runtime: Arc::new(remote_runtime()),
+            source_runtime,
+            plugin_registry: Mutex::new(plugin_registry),
         })
     }
 }
@@ -254,6 +284,234 @@ fn cancel_source_request(state: State<'_, AppState>, request_id: String) -> Comm
     };
     cancellation.cancel();
     Ok(true)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginCommandError {
+    message: String,
+    diagnostics: Vec<PluginDiagnostic>,
+}
+
+impl From<PluginSystemError> for PluginCommandError {
+    fn from(error: PluginSystemError) -> Self {
+        Self {
+            message: error.to_string(),
+            diagnostics: error.diagnostics(),
+        }
+    }
+}
+
+fn plugin_lock_error(name: &'static str) -> PluginCommandError {
+    PluginCommandError {
+        message: format!("plugin {name} lock was poisoned"),
+        diagnostics: Vec::new(),
+    }
+}
+
+fn plugin_command_error(message: impl Into<String>) -> PluginCommandError {
+    PluginCommandError {
+        message: message.into(),
+        diagnostics: Vec::new(),
+    }
+}
+
+#[tauri::command]
+fn list_plugins(state: State<'_, AppState>) -> Result<Vec<PluginRecord>, PluginCommandError> {
+    let registry = state
+        .plugin_registry
+        .lock()
+        .map_err(|_| plugin_lock_error("registry"))?;
+    Ok(registry.records())
+}
+
+#[tauri::command]
+async fn select_plugin_package() -> Result<Option<String>, PluginCommandError> {
+    let folder = rfd::AsyncFileDialog::new()
+        .set_title("Choose a Plugin package")
+        .pick_folder()
+        .await;
+    Ok(folder.map(|handle| handle.path().to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+fn refresh_plugins(state: State<'_, AppState>) -> Result<Vec<PluginRecord>, PluginCommandError> {
+    let db = state.db.lock().map_err(|_| plugin_lock_error("database"))?;
+    let mut registry = state
+        .plugin_registry
+        .lock()
+        .map_err(|_| plugin_lock_error("registry"))?;
+    registry.refresh(&db).map_err(Into::into)
+}
+
+#[tauri::command]
+fn install_plugin_package(
+    state: State<'_, AppState>,
+    package_path: String,
+) -> Result<PluginRecord, PluginCommandError> {
+    let package_path = package_path.trim();
+    if package_path.is_empty() {
+        return Err(PluginCommandError {
+            message: "Plugin package path must not be empty".to_owned(),
+            diagnostics: Vec::new(),
+        });
+    }
+    let db = state.db.lock().map_err(|_| plugin_lock_error("database"))?;
+    let mut registry = state
+        .plugin_registry
+        .lock()
+        .map_err(|_| plugin_lock_error("registry"))?;
+    registry
+        .install(&db, Path::new(package_path))
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn set_plugin_capabilities(
+    state: State<'_, AppState>,
+    plugin_id: String,
+    capabilities: Vec<String>,
+    reviewed: bool,
+) -> Result<PluginRecord, PluginCommandError> {
+    let capabilities =
+        plugin_system::parse_capabilities(&capabilities).map_err(|message| PluginCommandError {
+            message,
+            diagnostics: Vec::new(),
+        })?;
+    let db = state.db.lock().map_err(|_| plugin_lock_error("database"))?;
+    let mut registry = state
+        .plugin_registry
+        .lock()
+        .map_err(|_| plugin_lock_error("registry"))?;
+    registry
+        .set_capabilities(&db, &plugin_id, capabilities, reviewed)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn set_plugin_enabled(
+    state: State<'_, AppState>,
+    plugin_id: String,
+    enabled: bool,
+) -> Result<PluginRecord, PluginCommandError> {
+    let db = state.db.lock().map_err(|_| plugin_lock_error("database"))?;
+    let mut registry = state
+        .plugin_registry
+        .lock()
+        .map_err(|_| plugin_lock_error("registry"))?;
+    registry
+        .set_enabled(&db, &plugin_id, enabled)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn remove_plugin(
+    state: State<'_, AppState>,
+    plugin_id: String,
+) -> Result<Vec<PluginRecord>, PluginCommandError> {
+    let db = state.db.lock().map_err(|_| plugin_lock_error("database"))?;
+    let mut registry = state
+        .plugin_registry
+        .lock()
+        .map_err(|_| plugin_lock_error("registry"))?;
+    registry.remove(&db, &plugin_id).map_err(Into::into)
+}
+
+#[tauri::command]
+fn clear_plugin_diagnostics(
+    state: State<'_, AppState>,
+    plugin_id: String,
+) -> Result<PluginRecord, PluginCommandError> {
+    let db = state.db.lock().map_err(|_| plugin_lock_error("database"))?;
+    let mut registry = state
+        .plugin_registry
+        .lock()
+        .map_err(|_| plugin_lock_error("registry"))?;
+    registry
+        .clear_diagnostics(&db, &plugin_id)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn dispatch_plugin_request(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    plugin_id: String,
+    request: source_runtime::SourceRequest,
+    request_id: Option<String>,
+) -> Result<source_runtime::SourceRequestOutcome, PluginCommandError> {
+    let plugin_id = plugin_id.trim().to_owned();
+    if plugin_id.is_empty() {
+        return Err(plugin_command_error("Plugin id must not be empty"));
+    }
+    let cancellation =
+        register_source_request(state.inner(), request_id.as_deref()).map_err(|error| {
+            PluginCommandError {
+                message: error.message,
+                diagnostics: Vec::new(),
+            }
+        })?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        dispatch_plugin_request_inner(&state, &plugin_id, request, cancellation)
+    })
+    .await;
+    unregister_source_request(state.inner(), request_id.as_deref());
+
+    match result {
+        Ok(result) => result,
+        Err(error) => Err(plugin_command_error(format!(
+            "Plugin request task failed: {error}"
+        ))),
+    }
+}
+
+fn dispatch_plugin_request_inner(
+    state: &AppState,
+    plugin_id: &str,
+    request: source_runtime::SourceRequest,
+    cancellation: source_runtime::SourceCancellationToken,
+) -> Result<source_runtime::SourceRequestOutcome, PluginCommandError> {
+    dispatch_plugin_request_with(
+        state,
+        plugin_id,
+        request,
+        cancellation,
+        |dispatch, request, cancellation| dispatch.execute(request, cancellation),
+    )
+}
+
+fn dispatch_plugin_request_with<F>(
+    state: &AppState,
+    plugin_id: &str,
+    request: source_runtime::SourceRequest,
+    cancellation: source_runtime::SourceCancellationToken,
+    execute: F,
+) -> Result<source_runtime::SourceRequestOutcome, PluginCommandError>
+where
+    F: FnOnce(
+        &plugin_system::PreparedPluginRequest,
+        source_runtime::SourceRequest,
+        source_runtime::SourceCancellationToken,
+    ) -> Result<source_runtime::SourceRequestOutcome, PluginSystemError>,
+{
+    let dispatch = {
+        let registry = state
+            .plugin_registry
+            .lock()
+            .map_err(|_| plugin_lock_error("registry"))?;
+        registry.prepare_dispatch(plugin_id, &request)?
+    };
+
+    let result = execute(&dispatch, request, cancellation);
+
+    if let Ok(db) = state.db.lock() {
+        if let Ok(mut registry) = state.plugin_registry.lock() {
+            registry.complete_dispatch_best_effort(&db, &dispatch, &result);
+        }
+    }
+
+    result.map_err(Into::into)
 }
 
 #[tauri::command]
@@ -601,6 +859,7 @@ fn initialize_database(connection: &Connection) -> AppResult<()> {
         CREATE INDEX IF NOT EXISTS idx_local_tracks_album ON local_tracks(album);
         ",
     )?;
+    plugin_system::initialize_plugin_database(connection)?;
 
     Ok(())
 }
@@ -945,7 +1204,18 @@ pub fn run() {
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             let db_path = app_data_dir.join("fika-library.sqlite3");
-            let state = AppState::new(&db_path)?;
+            let resource_plugins_dir = app.path().resource_dir()?.join("plugins");
+            let source_plugins_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins");
+            let bundled_plugins_dir = if resource_plugins_dir.is_dir() {
+                resource_plugins_dir
+            } else {
+                source_plugins_dir
+            };
+            let state = AppState::new_with_plugin_dirs(
+                &db_path,
+                app_data_dir.join("plugins"),
+                bundled_plugins_dir,
+            )?;
             app.manage(state);
             Ok(())
         })
@@ -956,6 +1226,15 @@ pub fn run() {
             list_local_tracks,
             local_track_media_source,
             cancel_source_request,
+            list_plugins,
+            select_plugin_package,
+            refresh_plugins,
+            install_plugin_package,
+            set_plugin_capabilities,
+            set_plugin_enabled,
+            remove_plugin,
+            clear_plugin_diagnostics,
+            dispatch_plugin_request,
             resolve_imported_lx_template_music_url,
             search_qishui_music,
             resolve_qishui_music_url
@@ -1151,6 +1430,182 @@ mod tests {
             .lock()
             .expect("request registry should not be poisoned")
             .is_empty());
+        fs::remove_dir_all(root).expect("test temp directory should be removed");
+    }
+
+    #[test]
+    fn plugin_request_helper_should_dispatch_through_the_enabled_registry_provider() {
+        let root = temp_dir("plugin-request");
+        let bundled_package = root.join("bundled-plugins/runtime-demo");
+        fs::create_dir_all(&bundled_package).expect("bundled Plugin directory should be created");
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins/runtime-demo/plugin.json"),
+            bundled_package.join("plugin.json"),
+        )
+        .expect("bundled Plugin manifest should be copied");
+        let state =
+            AppState::new(&root.join("library.sqlite3")).expect("test app state should initialize");
+        {
+            let db = state.db.lock().expect("database should not be poisoned");
+            let mut registry = state
+                .plugin_registry
+                .lock()
+                .expect("registry should not be poisoned");
+            registry
+                .set_capabilities(
+                    &db,
+                    "fika.runtime-demo",
+                    [source_runtime::SourceCapability::NetworkAny],
+                    true,
+                )
+                .expect("Plugin capabilities should be reviewed");
+            registry
+                .set_enabled(&db, "fika.runtime-demo", true)
+                .expect("Plugin should enable");
+        }
+
+        let outcome = dispatch_plugin_request_inner(
+            &state,
+            "fika.runtime-demo",
+            source_runtime::SourceRequest::MusicSearch {
+                source: source_runtime::LX_SOURCE_WY.to_owned(),
+                keyword: "integration".to_owned(),
+                page: 1,
+                page_size: 10,
+            },
+            source_runtime::SourceCancellationToken::default(),
+        )
+        .expect("Plugin request should dispatch");
+        let source_runtime::SourceResponse::MusicSearch(response) = outcome.response else {
+            panic!("Plugin should return music search results");
+        };
+
+        assert_eq!(response.list[0].title, "Demo result for integration");
+        fs::remove_dir_all(root).expect("test temp directory should be removed");
+    }
+
+    #[test]
+    fn plugin_request_execution_should_not_hold_app_state_locks() {
+        let root = temp_dir("plugin-request-locks");
+        let bundled_package = root.join("bundled-plugins/runtime-demo");
+        fs::create_dir_all(&bundled_package).expect("bundled Plugin directory should be created");
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins/runtime-demo/plugin.json"),
+            bundled_package.join("plugin.json"),
+        )
+        .expect("bundled Plugin manifest should be copied");
+        let state =
+            AppState::new(&root.join("library.sqlite3")).expect("test app state should initialize");
+        {
+            let db = state.db.lock().expect("database should not be poisoned");
+            let mut registry = state
+                .plugin_registry
+                .lock()
+                .expect("registry should not be poisoned");
+            registry
+                .set_capabilities(
+                    &db,
+                    "fika.runtime-demo",
+                    [source_runtime::SourceCapability::NetworkAny],
+                    true,
+                )
+                .expect("Plugin capabilities should be reviewed");
+            registry
+                .set_enabled(&db, "fika.runtime-demo", true)
+                .expect("Plugin should enable");
+        }
+
+        let outcome = dispatch_plugin_request_with(
+            &state,
+            "fika.runtime-demo",
+            source_runtime::SourceRequest::MusicSearch {
+                source: source_runtime::LX_SOURCE_WY.to_owned(),
+                keyword: "unlocked".to_owned(),
+                page: 1,
+                page_size: 10,
+            },
+            source_runtime::SourceCancellationToken::default(),
+            |dispatch, request, cancellation| {
+                assert!(state.db.try_lock().is_ok());
+                assert!(state.plugin_registry.try_lock().is_ok());
+                dispatch.execute(request, cancellation)
+            },
+        )
+        .expect("Plugin request should dispatch without AppState locks");
+
+        assert!(matches!(
+            outcome.response,
+            source_runtime::SourceResponse::MusicSearch(_)
+        ));
+        fs::remove_dir_all(root).expect("test temp directory should be removed");
+    }
+
+    #[test]
+    fn plugin_request_should_return_provider_result_when_diagnostic_persistence_fails() {
+        let root = temp_dir("plugin-request-diagnostic-failure");
+        let bundled_package = root.join("bundled-plugins/runtime-demo");
+        fs::create_dir_all(&bundled_package).expect("bundled Plugin directory should be created");
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins/runtime-demo/plugin.json"),
+            bundled_package.join("plugin.json"),
+        )
+        .expect("bundled Plugin manifest should be copied");
+        let state =
+            AppState::new(&root.join("library.sqlite3")).expect("test app state should initialize");
+        {
+            let db = state.db.lock().expect("database should not be poisoned");
+            let mut registry = state
+                .plugin_registry
+                .lock()
+                .expect("registry should not be poisoned");
+            registry
+                .set_capabilities(
+                    &db,
+                    "fika.runtime-demo",
+                    [source_runtime::SourceCapability::NetworkAny],
+                    true,
+                )
+                .expect("Plugin capabilities should be reviewed");
+            registry
+                .set_enabled(&db, "fika.runtime-demo", true)
+                .expect("Plugin should enable");
+            db.execute_batch(
+                "CREATE TRIGGER fail_dispatch_diagnostic_insert
+                 BEFORE INSERT ON plugin_diagnostics
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced diagnostic persistence failure');
+                 END;",
+            )
+            .expect("diagnostic failure trigger should be created");
+        }
+
+        let outcome = dispatch_plugin_request_inner(
+            &state,
+            "fika.runtime-demo",
+            source_runtime::SourceRequest::MusicSearch {
+                source: source_runtime::LX_SOURCE_WY.to_owned(),
+                keyword: "diagnostics".to_owned(),
+                page: 1,
+                page_size: 10,
+            },
+            source_runtime::SourceCancellationToken::default(),
+        )
+        .expect("diagnostic persistence must not replace the provider result");
+
+        assert!(matches!(
+            outcome.response,
+            source_runtime::SourceResponse::MusicSearch(_)
+        ));
+        let diagnostics = state
+            .plugin_registry
+            .lock()
+            .expect("registry should not be poisoned")
+            .record("fika.runtime-demo")
+            .expect("Plugin should remain registered")
+            .diagnostics;
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "diagnostic-persistence"));
         fs::remove_dir_all(root).expect("test temp directory should be removed");
     }
 }

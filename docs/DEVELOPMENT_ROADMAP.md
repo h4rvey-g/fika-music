@@ -343,7 +343,7 @@ Implementation notes for the completed Slice 2 runtime:
 - Tauri remote-source commands are asynchronous blocking tasks, return structured diagnostics, accept cancellable request IDs, and the frontend displays diagnostics for both successful and failed remote requests.
 - The current Rust-native Providers are reviewed in-process code. Capability checks are not an operating-system sandbox for arbitrary native binaries; installable untrusted native Providers remain outside the v0.1 trust model.
 
-### Phase 4 — Plugin System MVP
+### Phase 4 — Plugin System MVP *(Completed)*
 
 Goal: add the installable/bundled Plugin layer on top of the core Source Runtime without changing the LX compatibility core.
 
@@ -362,6 +362,16 @@ Exit criteria:
 
 - A user or bundled package can install, inspect, enable, disable, and diagnose a Plugin that runs through the Source Runtime.
 - Plugin permissions are inspectable and revocable.
+
+Implementation notes for the completed Slice 3 Plugin System:
+
+- Plugin packages use a validated `plugin.json` manifest with package metadata, provider entrypoints, declared capabilities, a compatibility target, supported Source Runtime API version, and required host bridges.
+- The registry scans bundled resources and the platform app-data Plugin directory, rejects malformed or colliding packages, persists lifecycle state and capability approvals in SQLite, and keeps bundled packages non-removable.
+- Provider initialization is routed through the existing Source Runtime lifecycle and capability intersection. The MVP accepts symbolic built-in provider entrypoints only; it does not load untrusted native libraries or sidecars from user packages.
+- Persisted enabled Plugins reinitialize their Providers on application startup and registry refresh. Permission state is bound to a SHA-256 digest of the normalized manifest. Refresh, removal, permission, and lifecycle changes use SQLite transactions or savepoints with package, in-memory, and Source Runtime compensation when persistence fails, and entrypoint-only capabilities remain scoped to their declaring Provider.
+- Tauri commands expose discovery, package installation, permission review, capability revocation, lifecycle changes, typed `SourceRequest` dispatch with cancellable request IDs, and bounded per-Plugin diagnostics. Provider requests execute without holding the application database or Plugin registry mutex. Completion persistence is best-effort and cannot replace the Provider result. The frontend provides the corresponding inspection and management view through a typed Plugin API boundary.
+- Package replacement uses a non-overlapping staged copy, manifest revalidation, SQLite transaction, and filesystem rollback so a failed refresh cannot silently discard the previous package. Removal uses a same-filesystem quarantine and restores the package and active Provider state when deletion fails.
+- Rust coverage includes startup/refresh reactivation, failed-refresh and failed-removal compensation, Provider capability isolation, failed Provider initialization cleanup, replacement and containment safety, best-effort diagnostic completion, unlocked request execution, and an AppState-to-SourceRuntime dispatch path; frontend coverage verifies Plugin command payloads and permission review interaction. CI runs dependency audit, frontend tests/build, Rust formatting, Clippy, and the full Rust suite.
 
 ### Phase 5 — NetEase Cloud Music Plugin
 
@@ -483,7 +493,7 @@ This validates Tauri commands, Rust jobs, database, UI state, and performance as
 
 This ensures the core LX provider model and safety boundaries are validated before adding package lifecycle, installation, or NetEase-specific endpoint code.
 
-### Slice 3 — Plugin System MVP
+### Slice 3 — Plugin System MVP *(Completed)*
 
 1. **Plugin Package Manifest**: Define package metadata, Source Provider entrypoints, capabilities, compatibility target, and required host bridges.
 2. **Plugin Registry**: Scan bundled and user-installed Plugin locations, validate manifests, and expose Plugin state to the frontend.
@@ -522,4 +532,4 @@ These should be answered one at a time:
 
 ## Immediate next step
 
-Next step after this roadmap: begin Slice 3 with the Plugin Package Manifest and registry, keeping Provider execution behind the completed Source Runtime boundary.
+Next step after this roadmap: begin Slice 4 with the bundled NetEase Plugin, keeping its Rust Source Provider and Service Bridge behind the completed Plugin System and Source Runtime boundaries.

@@ -32,4 +32,5 @@ oxc_allocator = "0.138.0"
 oxc_parser = "0.138.0"
 oxc_span = "0.138.0"
 reqwest = { version = "0.13.4", features = ["blocking", "json"] }
+sha2 = "0.10.9"
 

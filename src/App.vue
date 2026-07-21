@@ -13,6 +13,7 @@ import {
   Volume2,
   X,
 } from "@lucide/vue";
+import PluginManager from "./components/PluginManager.vue";
 
 type LocalTrack = {
   id: number;
@@ -876,6 +877,10 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
           </section>
         </aside>
       </div>
+    </section>
+
+    <section class="mx-auto w-full max-w-7xl px-4 pb-5 lg:px-6">
+      <PluginManager />
     </section>
   </main>
 </template>

@@ -1,0 +1,22 @@
+{
+  "manifestVersion": 1,
+  "id": "fika.runtime-demo",
+  "name": "Fika Runtime Demo",
+  "version": "0.1.0",
+  "description": "A bundled Source Provider used to verify Plugin lifecycle and runtime permissions.",
+  "author": "Fika Music",
+  "providerEntrypoints": [
+    {
+      "id": "fika-runtime-demo",
+      "entrypoint": "builtin:runtime-demo",
+      "capabilities": ["network:any"]
+    }
+  ],
+  "capabilities": ["network:any"],
+  "compatibilityTarget": "fika-music",
+  "supportedApiVersion": {
+    "major": 1,
+    "minor": 0
+  },
+  "requiredHostBridges": []
+}
