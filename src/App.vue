@@ -1,19 +1,33 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   AlertCircle,
+  AudioLines,
   FolderOpen,
+  Gauge,
+  Headphones,
   Library,
+  Menu,
   Music2,
   Pause,
+  Palette,
   Play,
+  Plug,
   RefreshCw,
+  RotateCcw,
+  Settings,
   Volume2,
   X,
 } from "@lucide/vue";
 import PluginManager from "./components/PluginManager.vue";
+import {
+  DEFAULT_UI_PREFERENCES,
+  loadUiPreferences,
+  saveUiPreferences,
+  type ThemePreference,
+} from "./lib/ui-preferences";
 
 type LocalTrack = {
   id: number;
@@ -113,15 +127,53 @@ const emptyScanStatus: ScanStatus = {
   finishedAt: null,
 };
 
+const mainSections = [
+  {
+    id: "local",
+    label: "Local Music",
+    description: "Browse and index music stored on this device",
+    icon: Library,
+  },
+  {
+    id: "sources",
+    label: "Audio Sources",
+    description: "Search providers or resolve a known track ID",
+    icon: AudioLines,
+  },
+  {
+    id: "plugins",
+    label: "Plugins",
+    description: "Review installed packages and their permissions",
+    icon: Plug,
+  },
+] as const;
+
+const settingsSection = {
+  id: "settings",
+  label: "Settings",
+  description: "Manage appearance and playback defaults",
+  icon: Settings,
+} as const;
+
+const sections = [...mainSections, settingsSection];
+type AppSection = (typeof sections)[number]["id"];
+
+const savedUiPreferences = loadUiPreferences();
 const tracks = ref<LocalTrack[]>([]);
 const scanStatus = ref<ScanStatus>({ ...emptyScanStatus });
 const selectedFolder = ref<string | null>(null);
+const activeSection = ref<AppSection>("local");
+const sidebarOpen = ref(false);
 const activeTrack = ref<LocalTrack | null>(null);
 const activeRemoteTitle = ref<string | null>(null);
 const activeSource = ref<PlaybackSource | null>(null);
 const audioUrl = ref<string | null>(null);
 const isPlaying = ref(false);
-const volume = ref(0.8);
+const playbackPosition = ref(0);
+const playbackDuration = ref(0);
+const volume = ref(savedUiPreferences.volume);
+const themePreference = ref(savedUiPreferences.theme);
+const layoutDensity = ref(savedUiPreferences.density);
 const isLoadingTracks = ref(false);
 const isChoosingFolder = ref(false);
 const isStartingScan = ref(false);
@@ -132,7 +184,7 @@ const scanMessage = ref<string | null>(null);
 const audioElement = ref<HTMLAudioElement | null>(null);
 const remoteFamily = ref("nianxin");
 const remoteSource = ref("wy");
-const remoteQuality = ref("128k");
+const remoteQuality = ref(savedUiPreferences.streamQuality);
 const remoteTrackId = ref("");
 const remoteDiagnostics = ref<string[]>([]);
 const remoteSearchKeyword = ref("");
@@ -146,6 +198,9 @@ let unlistenScanProgress: UnlistenFn | null = null;
 
 const hasTracks = computed(() => tracks.value.length > 0);
 const visibleTracks = computed(() => tracks.value.slice(0, 200));
+const currentSection = computed(
+  () => sections.find((section) => section.id === activeSection.value) ?? mainSections[0],
+);
 const canScan = computed(
   () => Boolean(selectedFolder.value) && !scanStatus.value.isRunning && !isStartingScan.value,
 );
@@ -174,6 +229,22 @@ const nowPlayingSubtitle = computed(() => {
   return activeRemoteTitle.value ? "Remote LX template source" : "Select a local or remote track";
 });
 const hasActiveRemoteRequest = computed(() => activeRemoteRequestId.value !== null);
+const volumePercent = computed(() => Math.round(volume.value * 100));
+
+watch(themePreference, applyTheme, { immediate: true });
+watch(volume, updateVolume);
+watch(audioUrl, () => {
+  playbackPosition.value = 0;
+  playbackDuration.value = 0;
+});
+watch([themePreference, layoutDensity, remoteQuality, volume], () => {
+  saveUiPreferences({
+    theme: themePreference.value,
+    density: layoutDensity.value,
+    streamQuality: remoteQuality.value,
+    volume: volume.value,
+  });
+});
 
 onMounted(async () => {
   await Promise.all([loadTracks(), loadScanStatus(), bindScanProgress()]);
@@ -188,6 +259,31 @@ function beginRemoteRequest() {
   const requestId = crypto.randomUUID();
   activeRemoteRequestId.value = requestId;
   return requestId;
+}
+
+function selectSection(section: AppSection) {
+  activeSection.value = section;
+  sidebarOpen.value = false;
+}
+
+function applyTheme(theme: ThemePreference) {
+  if (typeof document === "undefined") {
+    return;
+  }
+
+  if (theme === "system") {
+    document.documentElement.removeAttribute("data-theme");
+    return;
+  }
+
+  document.documentElement.dataset.theme = theme;
+}
+
+function resetUiPreferences() {
+  themePreference.value = DEFAULT_UI_PREFERENCES.theme;
+  layoutDensity.value = DEFAULT_UI_PREFERENCES.density;
+  remoteQuality.value = DEFAULT_UI_PREFERENCES.streamQuality;
+  volume.value = DEFAULT_UI_PREFERENCES.volume;
 }
 
 async function cancelActiveRemoteRequest() {
@@ -453,6 +549,7 @@ function updateVolume() {
 
 function onAudioEnded() {
   isPlaying.value = false;
+  playbackPosition.value = playbackDuration.value;
 }
 
 function onAudioPause() {
@@ -463,9 +560,48 @@ function onAudioPlay() {
   isPlaying.value = true;
 }
 
+function onAudioLoadedMetadata() {
+  syncPlaybackTimeline();
+}
+
+function onAudioTimeUpdate() {
+  syncPlaybackTimeline();
+}
+
+function syncPlaybackTimeline() {
+  const audio = audioElement.value;
+  if (!audio) {
+    return;
+  }
+
+  playbackPosition.value = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+  playbackDuration.value = Number.isFinite(audio.duration) ? audio.duration : 0;
+}
+
+function seekPlayback(event: Event) {
+  const audio = audioElement.value;
+  if (!audio || playbackDuration.value <= 0) {
+    return;
+  }
+
+  const nextPosition = Number((event.currentTarget as HTMLInputElement).value);
+  audio.currentTime = nextPosition;
+  playbackPosition.value = nextPosition;
+}
+
 function onAudioError() {
   isPlaying.value = false;
   appError.value = "Playback failed for the selected track.";
+}
+
+function formatPlaybackTime(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return "--:--";
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Math.floor(seconds % 60);
+  return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
 }
 
 function formatDuration(seconds: number | null) {
@@ -549,18 +685,38 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
 </script>
 
 <template>
-  <main class="min-h-screen bg-base-200 text-base-content">
-    <div class="navbar border-b border-base-300 bg-base-100 px-4 lg:px-6">
-      <div class="navbar-start gap-3">
-        <div class="flex size-10 items-center justify-center rounded bg-neutral text-neutral-content">
-          <Music2 :size="22" aria-hidden="true" />
+  <div
+    class="drawer min-h-screen bg-base-200 text-base-content md:drawer-open"
+    :data-density="layoutDensity"
+  >
+    <input id="app-sidebar" v-model="sidebarOpen" type="checkbox" class="drawer-toggle" />
+
+    <div class="drawer-content flex min-h-screen min-w-0 flex-col">
+      <header class="navbar sticky top-0 z-30 min-h-16 border-b border-base-300 bg-base-100 px-3 sm:px-4 lg:px-6">
+        <div class="navbar-start min-w-0 flex-1 gap-2 sm:gap-3">
+          <label
+            for="app-sidebar"
+            class="btn btn-square btn-ghost btn-sm drawer-button md:hidden"
+            role="button"
+            tabindex="0"
+            aria-label="Open navigation"
+            title="Open navigation"
+            @keydown.enter.prevent="sidebarOpen = true"
+            @keydown.space.prevent="sidebarOpen = true"
+          >
+            <Menu :size="19" aria-hidden="true" />
+          </label>
+          <div class="min-w-0">
+            <h1 class="truncate text-base font-semibold leading-tight sm:text-lg">
+              {{ currentSection.label }}
+            </h1>
+            <p class="hidden truncate text-xs text-base-content/60 xl:block">
+              {{ currentSection.description }}
+            </p>
+          </div>
         </div>
-        <div>
-          <h1 class="text-lg font-semibold leading-tight">Fika Music</h1>
-          <p class="text-xs text-base-content/65">Local-first library</p>
-        </div>
-      </div>
-      <div class="navbar-end gap-2">
+
+        <div v-if="activeSection === 'local'" class="navbar-end w-auto gap-2">
         <button
           class="btn btn-sm"
           type="button"
@@ -579,12 +735,47 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
           <RefreshCw :class="{ 'animate-spin': scanStatus.isRunning }" :size="16" aria-hidden="true" />
           Index
         </button>
-      </div>
-    </div>
+        </div>
 
-    <section class="mx-auto flex w-full max-w-7xl flex-col gap-5 px-4 py-5 lg:px-6">
-      <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
-        <section class="flex min-h-[28rem] flex-col overflow-hidden rounded border border-base-300 bg-base-100">
+        <div v-else-if="activeSection === 'settings'" class="navbar-end w-auto">
+          <button class="btn btn-ghost btn-sm" type="button" @click="resetUiPreferences">
+            <RotateCcw :size="16" aria-hidden="true" />
+            Reset
+          </button>
+        </div>
+      </header>
+
+      <main class="flex-1">
+        <section
+          v-if="activeSection === 'local' || activeSection === 'sources'"
+          class="mx-auto flex w-full max-w-7xl flex-col"
+          :class="layoutDensity === 'compact' ? 'gap-3 px-3 py-3 lg:px-4' : 'gap-5 px-4 py-5 lg:px-6'"
+        >
+          <div v-if="appError" role="alert" class="alert alert-error">
+            <AlertCircle :size="18" aria-hidden="true" />
+            <span class="min-w-0 flex-1">{{ appError }}</span>
+            <button
+              class="btn btn-square btn-ghost btn-sm"
+              type="button"
+              aria-label="Dismiss error"
+              title="Dismiss error"
+              @click="appError = null"
+            >
+              <X :size="16" aria-hidden="true" />
+            </button>
+          </div>
+
+          <div
+            :class="
+              activeSection === 'local'
+                ? 'grid gap-4 xl:grid-cols-[minmax(0,1fr)_18rem]'
+                : 'block'
+            "
+          >
+            <section
+              v-if="activeSection === 'local'"
+              class="flex min-h-[28rem] flex-col overflow-hidden rounded border border-base-300 bg-base-100"
+            >
           <div class="flex flex-col gap-3 border-b border-base-300 p-4 md:flex-row md:items-center md:justify-between">
             <div>
               <h2 class="flex items-center gap-2 text-base font-semibold">
@@ -604,11 +795,6 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
             </button>
           </div>
 
-          <div v-if="appError" role="alert" class="alert alert-error m-4">
-            <AlertCircle :size="18" aria-hidden="true" />
-            <span>{{ appError }}</span>
-          </div>
-
           <div v-if="!hasTracks && !isLoadingTracks" class="grid flex-1 place-items-center p-8 text-center">
             <div class="max-w-sm">
               <div class="mx-auto mb-4 flex size-14 items-center justify-center rounded border border-base-300 bg-base-200">
@@ -622,7 +808,10 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
           </div>
 
           <div v-else class="overflow-x-auto">
-            <table class="table table-sm table-zebra">
+            <table
+              class="table table-zebra"
+              :class="layoutDensity === 'compact' ? 'table-xs' : 'table-sm'"
+            >
               <thead>
                 <tr>
                   <th class="w-12"></th>
@@ -665,8 +854,14 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
           </div>
         </section>
 
-        <aside class="flex flex-col gap-4">
-          <section class="rounded border border-base-300 bg-base-100 p-4">
+          <aside
+            class="flex flex-col gap-4"
+            :class="activeSection === 'sources' ? 'mx-auto w-full max-w-3xl' : ''"
+          >
+          <section
+            v-if="activeSection === 'local'"
+            class="rounded border border-base-300 bg-base-100 p-4"
+          >
             <h2 class="text-base font-semibold">Indexing</h2>
             <p class="mt-1 truncate text-sm text-base-content/65">
               {{ selectedFolder || "No folder selected" }}
@@ -702,7 +897,10 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
             </div>
           </section>
 
-          <section class="rounded border border-base-300 bg-base-100 p-4">
+          <section
+            v-if="activeSection === 'sources'"
+            class="rounded border border-base-300 bg-base-100 p-4"
+          >
             <h2 class="text-base font-semibold">Remote LX template</h2>
             <p class="mt-1 text-sm text-base-content/65">
               Search through the Rust qsvip port, or resolve a known platform ID through bundled LX templates.
@@ -826,61 +1024,283 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
             </div>
           </section>
 
-          <section class="rounded border border-base-300 bg-base-100 p-4">
-            <h2 class="text-base font-semibold">Now Playing</h2>
-            <div class="mt-4 flex items-start gap-3">
-              <div class="flex size-12 shrink-0 items-center justify-center rounded bg-base-200">
-                <Music2 :size="24" aria-hidden="true" />
-              </div>
-              <div class="min-w-0">
-                <div class="truncate font-medium">{{ nowPlayingTitle }}</div>
-                <div class="truncate text-sm text-base-content/65">{{ nowPlayingSubtitle }}</div>
-              </div>
-            </div>
-
-            <audio
-              v-if="audioUrl"
-              ref="audioElement"
-              class="mt-4 w-full"
-              controls
-              :src="audioUrl"
-              :type="activeSource?.mimeType"
-              @ended="onAudioEnded"
-              @pause="onAudioPause"
-              @play="onAudioPlay"
-              @error="onAudioError"
-            ></audio>
-
-            <div class="mt-4 flex items-center gap-3">
-              <button
-                class="btn btn-square"
-                type="button"
-                :disabled="isPreparingPlayback || (!activeTrack && !activeRemoteTitle && !tracks.length)"
-                :aria-label="isPlaying ? 'Pause playback' : 'Play playback'"
-                @click="togglePlayback"
-              >
-                <Pause v-if="isPlaying" :size="18" aria-hidden="true" />
-                <Play v-else :size="18" aria-hidden="true" />
-              </button>
-              <Volume2 :size="18" aria-hidden="true" />
-              <input
-                v-model.number="volume"
-                class="range range-sm"
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                aria-label="Volume"
-                @input="updateVolume"
-              />
-            </div>
-          </section>
         </aside>
       </div>
     </section>
 
-    <section class="mx-auto w-full max-w-7xl px-4 pb-5 lg:px-6">
-      <PluginManager />
-    </section>
-  </main>
+        <section
+          v-if="activeSection === 'plugins'"
+          class="mx-auto w-full max-w-7xl"
+          :class="layoutDensity === 'compact' ? 'px-3 py-3 lg:px-4' : 'px-4 py-5 lg:px-6'"
+        >
+          <PluginManager />
+        </section>
+
+        <section
+          v-if="activeSection === 'settings'"
+          class="mx-auto flex w-full max-w-4xl flex-col"
+          :class="layoutDensity === 'compact' ? 'gap-3 px-3 py-3 lg:px-4' : 'gap-4 px-4 py-5 lg:px-6'"
+        >
+          <section class="overflow-hidden rounded border border-base-300 bg-base-100">
+            <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
+              <Palette :size="18" aria-hidden="true" />
+              <h2 class="text-base font-semibold">Appearance</h2>
+            </div>
+            <div class="divide-y divide-base-300">
+              <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <label for="theme-preference" class="min-w-0">
+                  <span class="block text-sm font-medium">Theme</span>
+                  <span class="block text-xs text-base-content/60">Use the device theme or choose an override</span>
+                </label>
+                <select
+                  id="theme-preference"
+                  v-model="themePreference"
+                  class="select select-sm w-full sm:w-44"
+                >
+                  <option value="system">System</option>
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select>
+              </div>
+
+              <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <label for="layout-density" class="flex min-w-0 items-start gap-3">
+                  <Gauge class="mt-0.5 shrink-0 text-base-content/60" :size="17" aria-hidden="true" />
+                  <span>
+                    <span class="block text-sm font-medium">Layout density</span>
+                    <span class="block text-xs text-base-content/60">Adjust page spacing and library rows</span>
+                  </span>
+                </label>
+                <select
+                  id="layout-density"
+                  v-model="layoutDensity"
+                  class="select select-sm w-full sm:w-44"
+                >
+                  <option value="comfortable">Comfortable</option>
+                  <option value="compact">Compact</option>
+                </select>
+              </div>
+            </div>
+          </section>
+
+          <section class="overflow-hidden rounded border border-base-300 bg-base-100">
+            <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
+              <Headphones :size="18" aria-hidden="true" />
+              <h2 class="text-base font-semibold">Playback</h2>
+            </div>
+            <div class="divide-y divide-base-300">
+              <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <label for="stream-quality" class="min-w-0">
+                  <span class="block text-sm font-medium">Default stream quality</span>
+                  <span class="block text-xs text-base-content/60">Used when resolving tracks from Audio Sources</span>
+                </label>
+                <select
+                  id="stream-quality"
+                  v-model="remoteQuality"
+                  class="select select-sm w-full sm:w-44"
+                >
+                  <option value="128k">128 kbps</option>
+                  <option value="320k">320 kbps</option>
+                  <option value="flac">FLAC</option>
+                  <option value="flac24bit">FLAC 24-bit</option>
+                </select>
+              </div>
+
+              <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <label for="default-volume" class="min-w-0">
+                  <span class="block text-sm font-medium">Volume</span>
+                  <span class="block text-xs text-base-content/60">Applied to the current and next track</span>
+                </label>
+                <div class="flex w-full items-center gap-3 sm:w-64">
+                  <Volume2 :size="17" aria-hidden="true" />
+                  <input
+                    id="default-volume"
+                    v-model.number="volume"
+                    class="range range-sm min-w-0 flex-1"
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    @input="updateVolume"
+                  />
+                  <output class="w-10 text-right text-xs tabular-nums text-base-content/65">
+                    {{ volumePercent }}%
+                  </output>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="overflow-hidden rounded border border-base-300 bg-base-100">
+            <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
+              <FolderOpen :size="18" aria-hidden="true" />
+              <h2 class="text-base font-semibold">Library</h2>
+            </div>
+            <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+              <div class="min-w-0">
+                <div class="text-sm font-medium">Music folder</div>
+                <div class="truncate text-xs text-base-content/60" :title="selectedFolder || undefined">
+                  {{ selectedFolder || "No folder selected" }}
+                </div>
+              </div>
+              <button
+                class="btn btn-sm shrink-0"
+                type="button"
+                :disabled="isChoosingFolder || scanStatus.isRunning"
+                @click="chooseFolder"
+              >
+                <FolderOpen :size="16" aria-hidden="true" />
+                Change folder
+              </button>
+            </div>
+          </section>
+        </section>
+      </main>
+
+      <footer
+        class="sticky bottom-0 z-30 border-t border-base-300 bg-base-100/95 backdrop-blur"
+        aria-label="Playback bar"
+      >
+        <div
+          class="mx-auto grid w-full max-w-7xl grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 md:grid-cols-[minmax(0,1fr)_minmax(13rem,1.4fr)] lg:grid-cols-[minmax(0,1fr)_minmax(15rem,1.5fr)_minmax(7rem,1fr)]"
+          :class="layoutDensity === 'compact' ? 'px-3 py-2 lg:px-4' : 'px-4 py-3 lg:px-6'"
+        >
+          <div class="flex min-w-0 items-center gap-3">
+            <div class="flex size-10 shrink-0 items-center justify-center rounded bg-base-200 sm:size-11">
+              <Music2 :size="21" aria-hidden="true" />
+            </div>
+            <div class="min-w-0">
+              <div class="truncate text-sm font-medium">{{ nowPlayingTitle }}</div>
+              <div class="truncate text-xs text-base-content/60">{{ nowPlayingSubtitle }}</div>
+            </div>
+          </div>
+
+          <div
+            class="col-span-2 flex min-w-0 items-center gap-2 md:col-span-1 md:col-start-2 md:row-start-1"
+          >
+            <button
+              class="btn btn-circle btn-neutral btn-sm shrink-0"
+              type="button"
+              :disabled="isPreparingPlayback || (!activeTrack && !activeRemoteTitle && !tracks.length)"
+              :aria-label="isPlaying ? 'Pause playback' : 'Play playback'"
+              :title="isPlaying ? 'Pause' : 'Play'"
+              @click="togglePlayback"
+            >
+              <RefreshCw v-if="isPreparingPlayback" class="animate-spin" :size="17" aria-hidden="true" />
+              <Pause v-else-if="isPlaying" :size="17" aria-hidden="true" />
+              <Play v-else :size="17" aria-hidden="true" />
+            </button>
+
+            <span class="hidden w-9 text-right text-xs tabular-nums text-base-content/60 sm:block">
+              {{ formatPlaybackTime(playbackPosition) }}
+            </span>
+            <input
+              class="range range-xs min-w-0 flex-1"
+              type="range"
+              min="0"
+              :max="Math.max(playbackDuration, 1)"
+              step="0.1"
+              :value="playbackPosition"
+              :disabled="!audioUrl || playbackDuration <= 0"
+              aria-label="Seek playback"
+              :aria-valuetext="`${formatPlaybackTime(playbackPosition)} of ${formatPlaybackTime(playbackDuration)}`"
+              @input="seekPlayback"
+            />
+            <span class="hidden w-9 text-xs tabular-nums text-base-content/60 sm:block">
+              {{ formatPlaybackTime(playbackDuration) }}
+            </span>
+          </div>
+
+          <div class="hidden min-w-0 items-center justify-end gap-2 lg:col-start-3 lg:row-start-1 lg:flex">
+            <Volume2 class="shrink-0" :size="17" aria-hidden="true" />
+            <input
+              v-model.number="volume"
+              class="range range-xs min-w-0 max-w-32"
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              aria-label="Volume"
+              @input="updateVolume"
+            />
+          </div>
+
+          <audio
+            v-if="audioUrl"
+            ref="audioElement"
+            class="hidden"
+            :src="audioUrl"
+            :type="activeSource?.mimeType"
+            @durationchange="onAudioLoadedMetadata"
+            @ended="onAudioEnded"
+            @loadedmetadata="onAudioLoadedMetadata"
+            @pause="onAudioPause"
+            @play="onAudioPlay"
+            @timeupdate="onAudioTimeUpdate"
+            @error="onAudioError"
+          ></audio>
+        </div>
+      </footer>
+    </div>
+
+    <div class="drawer-side z-40">
+      <label for="app-sidebar" aria-label="Close navigation" class="drawer-overlay"></label>
+      <aside class="flex min-h-full w-60 flex-col border-r border-base-300 bg-base-100">
+        <div class="flex min-h-16 items-center gap-3 border-b border-base-300 px-4">
+          <div class="flex size-9 shrink-0 items-center justify-center rounded bg-neutral text-neutral-content">
+            <Music2 :size="20" aria-hidden="true" />
+          </div>
+          <div class="min-w-0">
+            <div class="truncate text-base font-semibold leading-tight">Fika Music</div>
+            <div class="truncate text-xs text-base-content/60">Local-first library</div>
+          </div>
+        </div>
+
+        <nav class="flex flex-1 flex-col p-3" aria-label="Primary navigation">
+          <ul
+            class="menu w-full gap-1 p-0"
+            :class="layoutDensity === 'compact' ? 'menu-sm' : 'menu-md'"
+          >
+            <li v-for="section in mainSections" :key="section.id">
+              <button
+                type="button"
+                :class="{ 'menu-active': activeSection === section.id }"
+                :aria-current="activeSection === section.id ? 'page' : undefined"
+                @click="selectSection(section.id)"
+              >
+                <component :is="section.icon" :size="18" aria-hidden="true" />
+                <span>{{ section.label }}</span>
+              </button>
+            </li>
+          </ul>
+
+          <ul
+            class="menu mt-auto w-full gap-1 p-0 pt-4"
+            :class="layoutDensity === 'compact' ? 'menu-sm' : 'menu-md'"
+          >
+            <li>
+              <button
+                type="button"
+                :class="{ 'menu-active': activeSection === settingsSection.id }"
+                :aria-current="activeSection === settingsSection.id ? 'page' : undefined"
+                @click="selectSection(settingsSection.id)"
+              >
+                <Settings :size="18" aria-hidden="true" />
+                <span>{{ settingsSection.label }}</span>
+              </button>
+            </li>
+          </ul>
+        </nav>
+
+        <div class="border-t border-base-300 px-4 py-3">
+          <div class="truncate text-xs text-base-content/60" :title="selectedFolder || undefined">
+            {{ selectedFolder || "No music folder" }}
+          </div>
+          <div class="mt-1 text-sm font-medium tabular-nums">
+            {{ tracks.length }} track{{ tracks.length === 1 ? "" : "s" }} indexed
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
 </template>
