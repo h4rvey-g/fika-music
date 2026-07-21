@@ -1,0 +1,28 @@
+{
+  "manifestVersion": 1,
+  "id": "fika.netease",
+  "name": "NetEase Cloud Music",
+  "version": "0.1.0",
+  "description": "Bundled NetEase recommendations, playback, and Playlist integration.",
+  "author": "Fika Music",
+  "homepage": "https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced",
+  "providerEntrypoints": [
+    {
+      "id": "fika-netease",
+      "entrypoint": "builtin:netease",
+      "capabilities": [
+        "account:ref",
+        "playlist:read",
+        "playlist:write",
+        "bridge:netease-api-enhanced"
+      ]
+    }
+  ],
+  "capabilities": [],
+  "compatibilityTarget": "fika-music",
+  "supportedApiVersion": {
+    "major": 1,
+    "minor": 1
+  },
+  "requiredHostBridges": ["netease-api-enhanced"]
+}

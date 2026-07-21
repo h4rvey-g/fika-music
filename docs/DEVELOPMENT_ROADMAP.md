@@ -367,13 +367,13 @@ Implementation notes for the completed Slice 3 Plugin System:
 
 - Plugin packages use a validated `plugin.json` manifest with package metadata, provider entrypoints, declared capabilities, a compatibility target, supported Source Runtime API version, and required host bridges.
 - The registry scans bundled resources and the platform app-data Plugin directory, rejects malformed or colliding packages, persists lifecycle state and capability approvals in SQLite, and keeps bundled packages non-removable.
-- Provider initialization is routed through the existing Source Runtime lifecycle and capability intersection. The MVP accepts symbolic built-in provider entrypoints only; it does not load untrusted native libraries or sidecars from user packages.
+- Provider initialization is routed through the existing Source Runtime lifecycle and capability intersection. Source requests route by both source and action, and overlapping Provider routes reject manifest validation or activation. The MVP accepts symbolic built-in provider entrypoints only; it does not load untrusted native libraries or sidecars from user packages.
 - Persisted enabled Plugins reinitialize their Providers on application startup and registry refresh. Permission state is bound to a SHA-256 digest of the normalized manifest. Refresh, removal, permission, and lifecycle changes use SQLite transactions or savepoints with package, in-memory, and Source Runtime compensation when persistence fails, and entrypoint-only capabilities remain scoped to their declaring Provider.
 - Tauri commands expose discovery, package installation, permission review, capability revocation, lifecycle changes, typed `SourceRequest` dispatch with cancellable request IDs, and bounded per-Plugin diagnostics. Provider requests execute without holding the application database or Plugin registry mutex. Completion persistence is best-effort and cannot replace the Provider result. The frontend provides the corresponding inspection and management view through a typed Plugin API boundary.
-- Package replacement uses a non-overlapping staged copy, manifest revalidation, SQLite transaction, and filesystem rollback so a failed refresh cannot silently discard the previous package. Removal uses a same-filesystem quarantine and restores the package and active Provider state when deletion fails.
+- Package replacement uses a non-overlapping staged copy, manifest revalidation, SQLite transaction, and filesystem rollback so a failed refresh cannot silently discard the previous package. Removal uses a same-filesystem quarantine and restores the package, persisted lifecycle state, and active Provider state when post-commit quarantine cleanup fails.
 - Rust coverage includes startup/refresh reactivation, failed-refresh and failed-removal compensation, Provider capability isolation, failed Provider initialization cleanup, replacement and containment safety, best-effort diagnostic completion, unlocked request execution, and an AppState-to-SourceRuntime dispatch path; frontend coverage verifies Plugin command payloads and permission review interaction. CI runs dependency audit, frontend tests/build, Rust formatting, Clippy, and the full Rust suite.
 
-### Phase 5 — NetEase Cloud Music Plugin
+### Phase 5 — NetEase Cloud Music Plugin *(Completed)*
 
 Goal: ship the first real Plugin on top of the core LX-compatible Source Runtime and Plugin System.
 
@@ -402,12 +402,45 @@ Important constraints:
 - API basis decided: `NeteaseCloudMusicApiEnhanced/api-enhanced`.
 - Service Bridge model decided: `api-enhanced` is host-managed and not bundled/launched by the Source Provider.
 - Bridge implementation decided: no Node runtime and no QuickJS bundle; selected endpoint behavior is rewritten in Rust.
-- The permitted v0.1 API surface should stay limited to recommendations, playlist list/read, add selected track, and remove selected track.
-- Account-safety policy still needs operational detail for NetEase login/session expiry and upstream API breakage.
+- The permitted v0.1 API surface stays limited to recommendations, playable URL
+  resolution for those Remote Tracks, Playlist list/read, add selected track,
+  and remove selected track. Search, lyrics, automatic sync, and bulk mutations
+  remain out of scope.
+- Account connection uses NetEase QR login. Sessions are stored in the OS
+  credential store and exposed to the Provider only as scoped Account Refs.
+  Missing/expired credentials fail closed and require reconnection.
+- Endpoint behavior is pinned to `api-enhanced` v4.32.1. Requests use bounded
+  timeouts; rate limits fail without automatic retries so the user controls the
+  next attempt.
 
 Exit criteria:
 
 - A user can view recommendations and save supported tracks to selected NetEase playlists.
+
+Implementation notes for the completed Slice 4 NetEase Plugin:
+
+- The bundled `fika.netease` package loads `builtin:netease` only when the
+  built-in `netease-api-enhanced` Service Bridge is available. Its Account Ref,
+  Playlist read/write, and bridge capabilities remain reviewable and revocable.
+- Runtime API 1.1 adds typed recommendation and Playlist requests. The Provider
+  normalizes upstream song objects into Remote Tracks and rejects non-NetEase
+  tracks before Playlist mutations.
+- The Node-free Rust bridge implements the selected v4.32.1 QR login,
+  recommendation, user Playlist, Playlist detail, playable song URL, and
+  Playlist manipulation behavior. No Express server, dynamic module loading,
+  sidecar, or raw credential parameter crosses the Provider boundary.
+- QR sessions are short-lived in memory. Successful session cookies are stored
+  in the OS credential store; SQLite stores only Account Ref/profile metadata.
+  The current dev platform fails closed if secure credential storage is
+  unavailable rather than using plaintext fallback storage.
+- Add/remove bridge outcomes write bounded, user-visible audit records,
+  including best-effort failure records. Unsupported tracks, read-only
+  Playlists, expired credentials, rate limits, malformed responses, bridge
+  failures, and API failures have distinct error states.
+- Rust tests use mock bridges and credential stores for response normalization,
+  Account Ref isolation, capability denial, dispatch, and audit persistence.
+  Frontend tests cover command payloads, permission gating, recommendations,
+  and confirmed mutations without live API traffic.
 
 ### Phase 6 — Advanced library and sync
 
@@ -503,7 +536,7 @@ This ensures the core LX provider model and safety boundaries are validated befo
 
 This adds a user-visible Plugin System on top of the core LX-compatible Source Runtime without redefining LX compatibility as a plugin feature.
 
-### Slice 4 — NetEase Plugin
+### Slice 4 — NetEase Plugin *(Completed)*
 
 1. **Bundled NetEase Plugin Package**: Package the NetEase Rust Source Provider and manifest as a bundled Plugin.
 2. **NetEase Service Bridge**: Build the Node-free Rust Service Bridge for the selected `netease-api-enhanced` behavior.
@@ -532,4 +565,6 @@ These should be answered one at a time:
 
 ## Immediate next step
 
-Next step after this roadmap: begin Slice 4 with the bundled NetEase Plugin, keeping its Rust Source Provider and Service Bridge behind the completed Plugin System and Source Runtime boundaries.
+Begin Phase 6 with coherent local/remote Playlist organization and track
+matching, keeping automatic remote sync deferred until manual operations have
+real-world usage evidence.

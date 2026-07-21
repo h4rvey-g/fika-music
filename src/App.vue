@@ -22,6 +22,8 @@ import {
   X,
 } from "@lucide/vue";
 import PluginManager from "./components/PluginManager.vue";
+import NeteaseSource from "./components/NeteaseSource.vue";
+import type { NeteasePlayback } from "./lib/netease-api";
 import {
   DEFAULT_UI_PREFERENCES,
   loadUiPreferences,
@@ -137,7 +139,7 @@ const mainSections = [
   {
     id: "sources",
     label: "Audio Sources",
-    description: "Search providers or resolve a known track ID",
+    description: "Browse NetEase recommendations, Playlists, and other providers",
     icon: AudioLines,
   },
   {
@@ -166,6 +168,7 @@ const activeSection = ref<AppSection>("local");
 const sidebarOpen = ref(false);
 const activeTrack = ref<LocalTrack | null>(null);
 const activeRemoteTitle = ref<string | null>(null);
+const activeRemoteProvider = ref<string | null>(null);
 const activeSource = ref<PlaybackSource | null>(null);
 const audioUrl = ref<string | null>(null);
 const isPlaying = ref(false);
@@ -226,7 +229,9 @@ const nowPlayingSubtitle = computed(() => {
     return trackSubtitle(activeTrack.value);
   }
 
-  return activeRemoteTitle.value ? "Remote LX template source" : "Select a local or remote track";
+  return activeRemoteTitle.value
+    ? activeRemoteProvider.value || "Remote Source Provider"
+    : "Select a local or remote track";
 });
 const hasActiveRemoteRequest = computed(() => activeRemoteRequestId.value !== null);
 const volumePercent = computed(() => Math.round(volume.value * 100));
@@ -378,6 +383,7 @@ async function playTrack(track: LocalTrack) {
 
     activeTrack.value = track;
     activeRemoteTitle.value = null;
+    activeRemoteProvider.value = null;
     activeSource.value = source;
     audioUrl.value = convertFileSrc(source.filePath);
 
@@ -421,6 +427,7 @@ async function playRemoteTrack() {
 
     activeTrack.value = null;
     activeRemoteTitle.value = `${remoteFamily.value}:${remoteSource.value}:${remoteTrackId.value.trim()}`;
+    activeRemoteProvider.value = "Remote LX template source";
     activeSource.value = { url: source.url, mimeType: source.mimeType };
     audioUrl.value = source.url;
     remoteDiagnostics.value = source.diagnostics.map((diagnostic) => diagnostic.message);
@@ -497,6 +504,7 @@ async function playRemoteSearchResult(result: RemoteSearchResult) {
 
     activeTrack.value = null;
     activeRemoteTitle.value = `${result.title} - ${result.artist}`;
+    activeRemoteProvider.value = "Qishui Source Provider";
     activeSource.value = { url: source.url, mimeType: source.mimeType };
     audioUrl.value = source.url;
     remoteDiagnostics.value = source.diagnostics.map((diagnostic) => diagnostic.message);
@@ -516,6 +524,32 @@ async function playRemoteSearchResult(result: RemoteSearchResult) {
     if (activeRemoteRequestId.value === requestId) {
       activeRemoteRequestId.value = null;
     }
+  }
+}
+
+async function playNeteasePlayback(playback: NeteasePlayback) {
+  isPreparingPlayback.value = true;
+  appError.value = null;
+  remoteDiagnostics.value = playback.diagnostics.map((diagnostic) => diagnostic.message);
+
+  try {
+    activeTrack.value = null;
+    activeRemoteTitle.value = `${playback.track.title} - ${playback.track.artist}`;
+    activeRemoteProvider.value = "NetEase Cloud Music";
+    activeSource.value = { url: playback.url, mimeType: playback.mimeType };
+    audioUrl.value = playback.url;
+
+    await nextTick();
+    if (audioElement.value) {
+      audioElement.value.volume = volume.value;
+      await audioElement.value.play();
+      isPlaying.value = true;
+    }
+  } catch (error) {
+    appError.value = normalizeError(error);
+    isPlaying.value = false;
+  } finally {
+    isPreparingPlayback.value = false;
   }
 }
 
@@ -856,7 +890,7 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
 
           <aside
             class="flex flex-col gap-4"
-            :class="activeSection === 'sources' ? 'mx-auto w-full max-w-3xl' : ''"
+            :class="activeSection === 'sources' ? 'mx-auto w-full max-w-6xl' : ''"
           >
           <section
             v-if="activeSection === 'local'"
@@ -897,11 +931,18 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
             </div>
           </section>
 
+          <NeteaseSource
+            v-if="activeSection === 'sources'"
+            :stream-quality="remoteQuality"
+            @playback-ready="playNeteasePlayback"
+            @open-plugins="selectSection('plugins')"
+          />
+
           <section
             v-if="activeSection === 'sources'"
             class="rounded border border-base-300 bg-base-100 p-4"
           >
-            <h2 class="text-base font-semibold">Remote LX template</h2>
+            <h2 class="text-base font-semibold">Other Source Providers</h2>
             <p class="mt-1 text-sm text-base-content/65">
               Search through the Rust qsvip port, or resolve a known platform ID through bundled LX templates.
             </p>

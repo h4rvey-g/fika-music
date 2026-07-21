@@ -460,6 +460,7 @@ impl SourceProvider for QishuiRustProvider {
             SourceRequest::Pic { source, .. } => {
                 Err(context.unsupported_action(source, SourceAction::Pic))
             }
+            request => Err(context.unsupported_action(request.source(), request.action())),
         }
     }
 }

@@ -23,6 +23,13 @@ vi.mock("./components/PluginManager.vue", () => ({
   },
 }));
 
+vi.mock("./components/NeteaseSource.vue", () => ({
+  default: {
+    name: "NeteaseSource",
+    template: '<div data-testid="netease-source">NetEase source</div>',
+  },
+}));
+
 describe("application shell", () => {
   beforeEach(() => {
     localStorage.clear();

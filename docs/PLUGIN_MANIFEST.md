@@ -27,7 +27,7 @@ arbitrary native code.
   "compatibilityTarget": "fika-music",
   "supportedApiVersion": {
     "major": 1,
-    "minor": 0
+    "minor": 1
   },
   "requiredHostBridges": []
 }
@@ -36,9 +36,11 @@ arbitrary native code.
 `version` uses semantic versioning. Provider IDs must be unique within the
 package and across bundled and user-installed packages; a colliding package is
 shown as invalid. Package IDs must also be unique across bundled and
-user-installed packages. The supported Source Runtime API version must be
-compatible with the host runtime. Unknown host bridges leave a package visible
-but incompatible.
+user-installed packages. Each `(source, action)` route must belong to exactly
+one Provider within a package; overlapping declared routes are rejected during
+manifest validation and overlapping runtime catalogs reject activation. The
+supported Source Runtime API version must be compatible with the host runtime.
+Unknown host bridges leave a package visible but incompatible.
 
 Provider capabilities can be declared at package level or entrypoint level;
 the effective declaration for a Provider is the union of package-level and that
@@ -48,10 +50,15 @@ Capabilities are never granted implicitly by installing a package, and an
 entrypoint-only capability is not exposed to sibling Providers.
 
 The MVP accepts symbolic built-in entrypoints (`builtin:runtime-demo`,
-`builtin:catalog`, and the existing `builtin:qishui` provider). User packages
-cannot load a dynamic library or launch a sidecar. This keeps package
-discovery, permission review, and lifecycle management in place without
-turning installation into an untrusted native-code execution boundary.
+`builtin:catalog`, `builtin:qishui`, and `builtin:netease`). The NetEase
+entrypoint is available only when the host provides the
+`netease-api-enhanced` Service Bridge. User packages cannot load a dynamic
+library or launch a sidecar. This keeps package discovery, permission review,
+and lifecycle management in place without turning installation into an
+untrusted native-code execution boundary.
+
+`builtin:netease` is reserved for package `fika.netease` and Provider
+`fika-netease`; another package cannot use that host bridge entrypoint.
 
 ## Locations and lifecycle
 
@@ -98,21 +105,28 @@ Enabled packages can receive typed Source Runtime requests through the
 }
 ```
 
-The request uses the serialized `SourceRequest` contract (`musicSearch`,
-`musicUrl`, `lyric`, or `pic`) and returns a typed `SourceRequestOutcome` with
-the response and runtime diagnostics. The request is rejected unless the
-package is enabled and its Provider exposes the requested source. A request
-ID can be cancelled with `cancel_source_request`; cancellation is cooperative
-and bounded by the host operation timeout. Database and Plugin registry locks
-are released while Provider code runs; completion diagnostics are attached only
-if the same Provider instance is still active. A diagnostic persistence failure
-is retained as an in-memory warning when possible and never replaces the
-Provider response or runtime error returned to the caller.
+The request uses the serialized `SourceRequest` contract. Runtime API 1.0
+includes `musicSearch`, `musicUrl`, `lyric`, and `pic`. Runtime API 1.1 adds
+`musicRecommendations`, `playlistList`, `playlistRead`, `playlistAddTrack`, and
+`playlistRemoveTrack`, with normalized Remote Track and Playlist response
+types. The request is rejected unless the package is enabled, its Provider
+exposes the requested source/action, and the required capabilities are granted.
+Playlist mutations require both `playlist:read` and `playlist:write` so the
+bridge can verify Playlist ownership before writing; account-backed calls
+resolve an opaque Account Ref through the Provider-scoped host boundary.
+
+A request ID can be cancelled with `cancel_source_request`; cancellation is
+cooperative and bounded by the host operation timeout. Database and Plugin
+registry locks are released while Provider code runs; completion diagnostics
+are attached only if the same Provider instance is still active. A diagnostic
+persistence failure is retained as an in-memory warning when possible and never
+replaces the Provider response or runtime error returned to the caller.
 
 Package replacement uses a non-overlapping staged copy and revalidates the
 manifest before activation. A source package that contains, or is contained by,
 the destination or staging workspace is rejected. The previous package and
 SQLite lifecycle state are restored if replacement or registry refresh fails.
 Removal first moves a user package to a same-filesystem quarantine; it deletes
-that quarantine only after the SQLite transaction commits and restores it if
-removal fails.
+that quarantine only after the SQLite transaction commits. If quarantine
+cleanup fails, the registry restores the package, persisted lifecycle state,
+and active Provider state before reporting the failed removal.

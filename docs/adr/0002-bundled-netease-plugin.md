@@ -15,4 +15,8 @@ Fika Music will deliver the first NetEase Cloud Music integration as a bundled P
 - The v0.1 Source Runtime must support enough LX-style compatibility for the NetEase Source Provider.
 - The v0.1 Plugin System must support enough bundled package lifecycle, capability review, diagnostics, and compatibility checks for the NetEase Plugin.
 - Credentials and playlist-write operations still need host-mediated capabilities rather than direct provider access.
-- The bundled Plugin should have tests, a pinned compatibility target, and a conservative update policy.
+- The bundled Plugin has tests and targets
+  `NeteaseCloudMusicApiEnhanced/api-enhanced` v4.32.1 at commit
+  `a366983e992fe83e03bc89057144fca6b230be3b`. Updating that target requires
+  contract review and explicit test changes rather than an unbounded upstream
+  update.

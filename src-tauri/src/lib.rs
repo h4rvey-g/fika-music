@@ -9,11 +9,12 @@ use std::convert::TryFrom;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use walkdir::WalkDir;
 
 pub mod lx_js_importer;
+pub mod netease;
 pub mod plugin_system;
 pub mod source_runtime;
 
@@ -39,6 +40,8 @@ enum AppError {
     StatePoisoned(&'static str),
     #[error("plugin system error: {0}")]
     Plugin(#[from] PluginSystemError),
+    #[error("NetEase service error: {0}")]
+    Netease(#[from] netease::NeteaseBridgeError),
     #[error("music folder does not exist or is not a directory: {0}")]
     InvalidMusicFolder(String),
     #[error("a library scan is already running")]
@@ -129,10 +132,6 @@ fn remote_source_error(error: source_runtime::SourceRuntimeError) -> RemoteComma
     }
 }
 
-fn remote_runtime() -> source_runtime::SourceRuntime {
-    source_runtime::SourceRuntime::new()
-}
-
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ScanStatus {
@@ -156,11 +155,12 @@ struct ScanProgressEvent {
 }
 
 struct AppState {
-    db: Mutex<Connection>,
+    db: Arc<Mutex<Connection>>,
     scan_status: Mutex<ScanStatus>,
     source_requests: Mutex<BTreeMap<String, source_runtime::SourceCancellationToken>>,
     source_runtime: Arc<source_runtime::SourceRuntime>,
     plugin_registry: Mutex<PluginRegistry>,
+    netease_bridge: Arc<netease::NeteaseServiceBridge>,
 }
 
 #[derive(Debug, Default)]
@@ -194,20 +194,37 @@ impl AppState {
 
         let connection = Connection::open(db_path)?;
         initialize_database(&connection)?;
-        let source_runtime = Arc::new(remote_runtime());
+        let db = Arc::new(Mutex::new(connection));
+        let source_host = Arc::new(source_runtime::DefaultSourceHost::new(
+            Duration::from_secs(8),
+            4 * 1024 * 1024,
+        ));
+        let runtime_host: Arc<dyn source_runtime::SourceHost> = source_host.clone();
+        let source_runtime = Arc::new(source_runtime::SourceRuntime::with_host(runtime_host, []));
+        let netease_bridge = Arc::new(netease::NeteaseServiceBridge::new(
+            Arc::clone(&db),
+            source_host,
+        )?);
+        let provider_bridge: Arc<dyn netease::NeteaseProviderBridge> = netease_bridge.clone();
         let mut plugin_registry = PluginRegistry::new(
             user_plugins_dir,
             bundled_plugins_dir,
             Arc::clone(&source_runtime),
-        );
-        plugin_registry.refresh(&connection)?;
+        )
+        .with_available_host_bridges([netease::NETEASE_HOST_BRIDGE_ID.to_owned()])
+        .with_netease_bridge(provider_bridge);
+        {
+            let connection = db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
+            plugin_registry.refresh(&connection)?;
+        }
 
         Ok(Self {
-            db: Mutex::new(connection),
+            db,
             scan_status: Mutex::new(ScanStatus::default()),
             source_requests: Mutex::new(BTreeMap::new()),
             source_runtime,
             plugin_registry: Mutex::new(plugin_registry),
+            netease_bridge,
         })
     }
 }
@@ -314,6 +331,90 @@ fn plugin_command_error(message: impl Into<String>) -> PluginCommandError {
         message: message.into(),
         diagnostics: Vec::new(),
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NeteaseCommandError {
+    code: String,
+    message: String,
+}
+
+impl From<netease::NeteaseBridgeError> for NeteaseCommandError {
+    fn from(error: netease::NeteaseBridgeError) -> Self {
+        Self {
+            code: error.code().to_owned(),
+            message: error.to_string(),
+        }
+    }
+}
+
+async fn run_netease_task<T, F>(task: F) -> Result<T, NeteaseCommandError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, netease::NeteaseBridgeError> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(task)
+        .await
+        .map_err(|error| NeteaseCommandError {
+            code: "bridge-failure".to_owned(),
+            message: format!("NetEase bridge task failed: {error}"),
+        })?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn start_netease_qr_login(
+    state: State<'_, AppState>,
+) -> Result<netease::NeteaseQrLoginStart, NeteaseCommandError> {
+    let bridge = Arc::clone(&state.netease_bridge);
+    run_netease_task(move || bridge.start_qr_login()).await
+}
+
+#[tauri::command]
+async fn poll_netease_qr_login(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<netease::NeteaseQrLoginPoll, NeteaseCommandError> {
+    let bridge = Arc::clone(&state.netease_bridge);
+    run_netease_task(move || bridge.poll_qr_login(session_id.trim())).await
+}
+
+#[tauri::command]
+async fn cancel_netease_qr_login(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), NeteaseCommandError> {
+    let bridge = Arc::clone(&state.netease_bridge);
+    run_netease_task(move || bridge.cancel_qr_login(session_id.trim())).await
+}
+
+#[tauri::command]
+fn list_netease_accounts(
+    state: State<'_, AppState>,
+) -> Result<Vec<netease::NeteaseAccount>, NeteaseCommandError> {
+    state.netease_bridge.accounts().map_err(Into::into)
+}
+
+#[tauri::command]
+async fn disconnect_netease_account(
+    state: State<'_, AppState>,
+    account_ref: String,
+) -> Result<(), NeteaseCommandError> {
+    let bridge = Arc::clone(&state.netease_bridge);
+    run_netease_task(move || bridge.disconnect_account(account_ref.trim())).await
+}
+
+#[tauri::command]
+fn list_netease_mutation_audit(
+    state: State<'_, AppState>,
+    account_ref: Option<String>,
+    limit: Option<u32>,
+) -> Result<Vec<netease::NeteaseMutationAudit>, NeteaseCommandError> {
+    state
+        .netease_bridge
+        .mutation_audit(account_ref.as_deref(), limit.unwrap_or(50))
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -860,6 +961,7 @@ fn initialize_database(connection: &Connection) -> AppResult<()> {
         ",
     )?;
     plugin_system::initialize_plugin_database(connection)?;
+    netease::initialize_database(connection)?;
 
     Ok(())
 }
@@ -1235,6 +1337,12 @@ pub fn run() {
             remove_plugin,
             clear_plugin_diagnostics,
             dispatch_plugin_request,
+            start_netease_qr_login,
+            poll_netease_qr_login,
+            cancel_netease_qr_login,
+            list_netease_accounts,
+            disconnect_netease_account,
+            list_netease_mutation_audit,
             resolve_imported_lx_template_music_url,
             search_qishui_music,
             resolve_qishui_music_url

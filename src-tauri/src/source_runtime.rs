@@ -25,7 +25,7 @@ pub const LX_SOURCE_WY: &str = "wy";
 pub const LX_SOURCE_MG: &str = "mg";
 pub const LX_SOURCE_LOCAL: &str = "local";
 
-pub const SOURCE_RUNTIME_API_VERSION: SourceRuntimeApiVersion = SourceRuntimeApiVersion::new(1, 0);
+pub const SOURCE_RUNTIME_API_VERSION: SourceRuntimeApiVersion = SourceRuntimeApiVersion::new(1, 1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,6 +107,11 @@ pub enum SourceAction {
     MusicUrl,
     Lyric,
     Pic,
+    MusicRecommendations,
+    PlaylistList,
+    PlaylistRead,
+    PlaylistAddTrack,
+    PlaylistRemoveTrack,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
@@ -200,6 +205,40 @@ pub enum SourceRequest {
         #[serde(rename = "musicInfo")]
         music_info: JsonValue,
     },
+    MusicRecommendations {
+        source: String,
+        #[serde(rename = "accountRef")]
+        account_ref: String,
+        limit: u64,
+    },
+    PlaylistList {
+        source: String,
+        #[serde(rename = "accountRef")]
+        account_ref: String,
+    },
+    PlaylistRead {
+        source: String,
+        #[serde(rename = "accountRef")]
+        account_ref: String,
+        #[serde(rename = "playlistId")]
+        playlist_id: String,
+    },
+    PlaylistAddTrack {
+        source: String,
+        #[serde(rename = "accountRef")]
+        account_ref: String,
+        #[serde(rename = "playlistId")]
+        playlist_id: String,
+        track: SourceTrackRef,
+    },
+    PlaylistRemoveTrack {
+        source: String,
+        #[serde(rename = "accountRef")]
+        account_ref: String,
+        #[serde(rename = "playlistId")]
+        playlist_id: String,
+        track: SourceTrackRef,
+    },
 }
 
 impl SourceRequest {
@@ -208,7 +247,12 @@ impl SourceRequest {
             Self::MusicSearch { source, .. }
             | Self::MusicUrl { source, .. }
             | Self::Lyric { source, .. }
-            | Self::Pic { source, .. } => source,
+            | Self::Pic { source, .. }
+            | Self::MusicRecommendations { source, .. }
+            | Self::PlaylistList { source, .. }
+            | Self::PlaylistRead { source, .. }
+            | Self::PlaylistAddTrack { source, .. }
+            | Self::PlaylistRemoveTrack { source, .. } => source,
         }
     }
 
@@ -218,6 +262,11 @@ impl SourceRequest {
             Self::MusicUrl { .. } => SourceAction::MusicUrl,
             Self::Lyric { .. } => SourceAction::Lyric,
             Self::Pic { .. } => SourceAction::Pic,
+            Self::MusicRecommendations { .. } => SourceAction::MusicRecommendations,
+            Self::PlaylistList { .. } => SourceAction::PlaylistList,
+            Self::PlaylistRead { .. } => SourceAction::PlaylistRead,
+            Self::PlaylistAddTrack { .. } => SourceAction::PlaylistAddTrack,
+            Self::PlaylistRemoveTrack { .. } => SourceAction::PlaylistRemoveTrack,
         }
     }
 
@@ -257,8 +306,76 @@ impl SourceRequest {
                     return Err("musicInfo must be a JSON object".to_owned());
                 }
             }
+            Self::MusicRecommendations {
+                account_ref, limit, ..
+            } => {
+                validate_account_ref(account_ref)?;
+                if !(1..=100).contains(limit) {
+                    return Err("musicRecommendations limit must be between 1 and 100".to_owned());
+                }
+            }
+            Self::PlaylistList { account_ref, .. } => validate_account_ref(account_ref)?,
+            Self::PlaylistRead {
+                account_ref,
+                playlist_id,
+                ..
+            } => {
+                validate_account_ref(account_ref)?;
+                validate_playlist_id(playlist_id)?;
+            }
+            Self::PlaylistAddTrack {
+                account_ref,
+                playlist_id,
+                track,
+                ..
+            }
+            | Self::PlaylistRemoveTrack {
+                account_ref,
+                playlist_id,
+                track,
+                ..
+            } => {
+                validate_account_ref(account_ref)?;
+                validate_playlist_id(playlist_id)?;
+                track.validate()?;
+            }
         }
 
+        Ok(())
+    }
+}
+
+fn validate_account_ref(account_ref: &str) -> Result<(), String> {
+    if account_ref.trim().is_empty() {
+        Err("accountRef must not be empty".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_playlist_id(playlist_id: &str) -> Result<(), String> {
+    if playlist_id.trim().is_empty() {
+        Err("playlistId must not be empty".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceTrackRef {
+    pub id: String,
+    pub source: String,
+}
+
+impl SourceTrackRef {
+    fn validate(&self) -> Result<(), String> {
+        if self.id.trim().is_empty() {
+            return Err("track id must not be empty".to_owned());
+        }
+        if self.source.trim().is_empty() {
+            return Err("track source must not be empty".to_owned());
+        }
         Ok(())
     }
 }
@@ -293,6 +410,50 @@ pub struct SourceSearchResponse {
     pub list: Vec<SourceSearchResult>,
 }
 
+pub type RemoteTrack = SourceSearchResult;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRecommendationsResponse {
+    pub list: Vec<RemoteTrack>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourcePlaylist {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub cover_url: Option<String>,
+    pub track_count: u64,
+    pub owner_name: String,
+    pub can_mutate: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourcePlaylistDetail {
+    pub playlist: SourcePlaylist,
+    pub tracks: Vec<RemoteTrack>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SourcePlaylistMutationKind {
+    Add,
+    Remove,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourcePlaylistMutation {
+    pub audit_id: i64,
+    pub operation: SourcePlaylistMutationKind,
+    pub playlist_id: String,
+    pub track_id: String,
+    pub occurred_at: i64,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "action", content = "data", rename_all = "camelCase")]
 pub enum SourceResponse {
@@ -300,6 +461,11 @@ pub enum SourceResponse {
     MusicUrl(String),
     Lyric(LyricResponse),
     Pic(String),
+    MusicRecommendations(SourceRecommendationsResponse),
+    PlaylistList(Vec<SourcePlaylist>),
+    PlaylistRead(SourcePlaylistDetail),
+    PlaylistAddTrack(SourcePlaylistMutation),
+    PlaylistRemoveTrack(SourcePlaylistMutation),
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -1401,6 +1567,7 @@ impl SourceRuntime {
         validate_request(&request, &source_info, &mut context)?;
         let action = request.action();
         let source_key = request.source().to_owned();
+        let request_contract = request.clone();
 
         let response = match catch_unwind(AssertUnwindSafe(|| {
             provider.handle_request(&mut context, request)
@@ -1417,7 +1584,13 @@ impl SourceRuntime {
                 ));
             }
         };
-        validate_response(&source_key, action, &response, &mut context)?;
+        validate_response(
+            &source_key,
+            action,
+            &request_contract,
+            &response,
+            &mut context,
+        )?;
 
         Ok(SourceRequestOutcome {
             response,
@@ -1840,6 +2013,7 @@ fn validate_request(
 fn validate_response(
     source_key: &str,
     action: SourceAction,
+    request: &SourceRequest,
     response: &SourceResponse,
     context: &mut SourceRuntimeContext,
 ) -> Result<(), SourceRuntimeError> {
@@ -1849,6 +2023,20 @@ fn validate_response(
             | (SourceAction::MusicUrl, SourceResponse::MusicUrl(_))
             | (SourceAction::Lyric, SourceResponse::Lyric(_))
             | (SourceAction::Pic, SourceResponse::Pic(_))
+            | (
+                SourceAction::MusicRecommendations,
+                SourceResponse::MusicRecommendations(_)
+            )
+            | (SourceAction::PlaylistList, SourceResponse::PlaylistList(_))
+            | (SourceAction::PlaylistRead, SourceResponse::PlaylistRead(_))
+            | (
+                SourceAction::PlaylistAddTrack,
+                SourceResponse::PlaylistAddTrack(_)
+            )
+            | (
+                SourceAction::PlaylistRemoveTrack,
+                SourceResponse::PlaylistRemoveTrack(_)
+            )
     );
     if !matches_action {
         return Err(context.provider_error(format!(
@@ -1862,6 +2050,71 @@ fn validate_response(
                 return Err(context.provider_error(
                     "musicSearch result source does not match the request source",
                 ));
+            }
+        }
+        SourceResponse::MusicRecommendations(recommendations) => {
+            if recommendations
+                .list
+                .iter()
+                .any(|item| item.source != source_key)
+            {
+                return Err(context
+                    .provider_error("recommendation source does not match the request source"));
+            }
+        }
+        SourceResponse::PlaylistList(playlists) => {
+            if playlists
+                .iter()
+                .any(|playlist| playlist.id.trim().is_empty() || playlist.name.trim().is_empty())
+            {
+                return Err(
+                    context.provider_error("provider returned a playlist without an id or name")
+                );
+            }
+        }
+        SourceResponse::PlaylistRead(detail) => {
+            let matches_playlist = matches!(
+                request,
+                SourceRequest::PlaylistRead { playlist_id, .. }
+                    if playlist_id == &detail.playlist.id
+            );
+            if detail.playlist.id.trim().is_empty()
+                || detail.playlist.name.trim().is_empty()
+                || !matches_playlist
+                || detail.tracks.iter().any(|track| track.source != source_key)
+            {
+                return Err(
+                    context.provider_error("provider returned an invalid playlist detail response")
+                );
+            }
+        }
+        SourceResponse::PlaylistAddTrack(mutation) => {
+            let matches_request = matches!(
+                request,
+                SourceRequest::PlaylistAddTrack {
+                    playlist_id,
+                    track,
+                    ..
+                } if playlist_id == &mutation.playlist_id && track.id == mutation.track_id
+            );
+            if mutation.operation != SourcePlaylistMutationKind::Add || !matches_request {
+                return Err(
+                    context.provider_error("provider returned a mismatched playlist add mutation")
+                );
+            }
+        }
+        SourceResponse::PlaylistRemoveTrack(mutation) => {
+            let matches_request = matches!(
+                request,
+                SourceRequest::PlaylistRemoveTrack {
+                    playlist_id,
+                    track,
+                    ..
+                } if playlist_id == &mutation.playlist_id && track.id == mutation.track_id
+            );
+            if mutation.operation != SourcePlaylistMutationKind::Remove || !matches_request {
+                return Err(context
+                    .provider_error("provider returned a mismatched playlist remove mutation"));
             }
         }
         SourceResponse::MusicUrl(url) | SourceResponse::Pic(url) => {
@@ -2008,6 +2261,7 @@ impl SourceProvider for MockRustSourceProvider {
             SourceRequest::Pic { source, .. } => Ok(SourceResponse::Pic(format!(
                 "https://example.invalid/{source}/cover.jpg"
             ))),
+            request => Err(context.unsupported_action(request.source(), request.action())),
         }
     }
 }

@@ -1,3 +1,6 @@
+use crate::netease::{
+    NeteaseProviderBridge, NeteaseSourceProvider, NETEASE_PLUGIN_ID, NETEASE_PROVIDER_ID,
+};
 use crate::source_runtime::{
     self, DiagnosticLevel, LyricResponse, SourceAction, SourceCapability, SourceInfo,
     SourceProvider, SourceRequest, SourceRequestOutcome, SourceResponse, SourceRuntime,
@@ -95,6 +98,7 @@ impl PluginManifest {
         }
 
         let mut provider_ids = BTreeSet::new();
+        let mut provider_routes = BTreeMap::new();
         for provider in &self.provider_entrypoints {
             if !valid_identifier(&provider.id) {
                 errors.push(format!(
@@ -142,6 +146,19 @@ impl PluginManifest {
                         "provider {} source {} must declare an action",
                         provider.id, source_id
                     ));
+                }
+                for action in &source.actions {
+                    let route = (source.id.clone(), *action);
+                    if let Some(existing_provider) =
+                        provider_routes.insert(route, provider.id.clone())
+                    {
+                        if existing_provider != provider.id {
+                            errors.push(format!(
+                                "source {} action {action:?} is exposed by both providers {} and {}",
+                                source.id, existing_provider, provider.id
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -552,10 +569,23 @@ impl PackageRemoval {
         self.restore().map_err(Into::into)
     }
 
-    fn keep(mut self) {
+    fn delete_with(
+        mut self,
+        delete: impl FnOnce(&Path) -> Result<(), std::io::Error>,
+    ) -> Result<(), PluginSystemError> {
+        if let Err(delete_error) = delete(&self.staged) {
+            return match self.restore() {
+                Ok(()) => Err(PluginSystemError::Io(delete_error)),
+                Err(restore_error) => Err(PluginSystemError::Package(format!(
+                    "deleting the quarantined Plugin package failed: {delete_error}; \
+                     restoring the package also failed: {restore_error}"
+                ))),
+            };
+        }
+
         self.restore_on_drop = false;
-        let _ = remove_path(&self.staged);
         let _ = remove_dir_if_empty(&self.staging_root);
+        Ok(())
     }
 
     fn restore(&mut self) -> Result<(), std::io::Error> {
@@ -583,6 +613,7 @@ pub struct PluginRegistry {
     bundled_plugins_dir: PathBuf,
     runtime: Arc<SourceRuntime>,
     available_host_bridges: BTreeSet<String>,
+    netease_bridge: Option<Arc<dyn NeteaseProviderBridge>>,
     plugins: BTreeMap<String, PluginEntryRuntime>,
 }
 
@@ -593,6 +624,7 @@ impl std::fmt::Debug for PluginRegistry {
             .field("user_plugins_dir", &self.user_plugins_dir)
             .field("bundled_plugins_dir", &self.bundled_plugins_dir)
             .field("available_host_bridges", &self.available_host_bridges)
+            .field("has_netease_bridge", &self.netease_bridge.is_some())
             .field("plugin_count", &self.plugins.len())
             .finish_non_exhaustive()
     }
@@ -609,6 +641,7 @@ impl PluginRegistry {
             bundled_plugins_dir: bundled_plugins_dir.into(),
             runtime,
             available_host_bridges: BTreeSet::new(),
+            netease_bridge: None,
             plugins: BTreeMap::new(),
         }
     }
@@ -618,6 +651,11 @@ impl PluginRegistry {
         bridges: impl IntoIterator<Item = String>,
     ) -> Self {
         self.available_host_bridges = bridges.into_iter().collect();
+        self
+    }
+
+    pub fn with_netease_bridge(mut self, bridge: Arc<dyn NeteaseProviderBridge>) -> Self {
+        self.netease_bridge = Some(bridge);
         self
     }
 
@@ -926,6 +964,15 @@ impl PluginRegistry {
         connection: &Connection,
         plugin_id: &str,
     ) -> Result<Vec<PluginRecord>, PluginSystemError> {
+        self.remove_with_package_cleanup(connection, plugin_id, remove_path)
+    }
+
+    fn remove_with_package_cleanup(
+        &mut self,
+        connection: &Connection,
+        plugin_id: &str,
+        cleanup: impl FnOnce(&Path) -> Result<(), std::io::Error>,
+    ) -> Result<Vec<PluginRecord>, PluginSystemError> {
         let Some(plugin) = self.plugins.get(plugin_id) else {
             return Err(PluginSystemError::NotFound(plugin_id.to_owned()));
         };
@@ -976,10 +1023,12 @@ impl PluginRegistry {
                 PluginSystemError::Database(error),
             ));
         }
-        self.plugins.remove(plugin_id);
         if let Some(staged_removal) = staged_removal {
-            staged_removal.keep();
+            if let Err(error) = staged_removal.delete_with(cleanup) {
+                return Err(self.restore_committed_removal(connection, previous, error));
+            }
         }
+        self.plugins.remove(plugin_id);
         Ok(self.records())
     }
 
@@ -1120,27 +1169,36 @@ impl PluginRegistry {
                 "plugin must be enabled before dispatch".to_owned(),
             ));
         }
-        let provider_id = plugin
-            .record
-            .providers
-            .iter()
-            .find(|provider| {
-                provider
-                    .sources
-                    .iter()
-                    .any(|source| source.id == request.source())
-            })
-            .map(|provider| provider.id.clone())
-            .or_else(|| {
-                (plugin.providers.len() == 1)
-                    .then(|| plugin.providers.keys().next().unwrap().clone())
-            })
-            .ok_or_else(|| {
-                PluginSystemError::Package(format!(
-                    "no provider in plugin {plugin_id} exposes source {}",
+        let action = request.action();
+        let mut matching_providers = plugin.record.providers.iter().filter(|provider| {
+            provider
+                .sources
+                .iter()
+                .any(|source| source.id == request.source() && source.actions.contains(&action))
+        });
+        let provider_id = match (matching_providers.next(), matching_providers.next()) {
+            (Some(provider), None) => provider.id.clone(),
+            (Some(first), Some(second)) => {
+                return Err(PluginSystemError::Package(format!(
+                    "plugin {plugin_id} has an ambiguous route for source {} action {action:?}: providers {} and {}",
+                    request.source(),
+                    first.id,
+                    second.id
+                )));
+            }
+            (None, _) if plugin.providers.len() == 1 => plugin
+                .providers
+                .keys()
+                .next()
+                .expect("single provider checked above")
+                .clone(),
+            (None, _) => {
+                return Err(PluginSystemError::Package(format!(
+                    "no provider in plugin {plugin_id} exposes source {} action {action:?}",
                     request.source()
-                ))
-            })?;
+                )));
+            }
+        };
         let provider = plugin.providers.get(&provider_id).cloned().ok_or_else(|| {
             PluginSystemError::InvalidState(
                 plugin_id.to_owned(),
@@ -1283,7 +1341,7 @@ impl PluginRegistry {
         let mut configured_provider_ids: Vec<String> = Vec::new();
 
         for entry in entries {
-            let provider = match build_provider(&manifest, &entry) {
+            let provider = match build_provider(&manifest, &entry, self.netease_bridge.clone()) {
                 Ok(provider) => provider,
                 Err(error) => {
                     clear_runtime_provider_state(&runtime, configured_provider_ids);
@@ -1331,6 +1389,11 @@ impl PluginRegistry {
                     return self.activation_failed(connection, plugin_id, provider_states, error);
                 }
             }
+        }
+
+        if let Err(error) = validate_provider_routes(plugin_id, &provider_states) {
+            clear_runtime_provider_state(&runtime, configured_provider_ids);
+            return self.activation_failed(connection, plugin_id, provider_states, error);
         }
 
         let mut candidate = self
@@ -1434,19 +1497,30 @@ impl PluginRegistry {
         connection: &Connection,
         plugin_id: &str,
     ) -> Result<PluginRecord, PluginSystemError> {
-        let Some(plugin) = self.plugins.get(plugin_id) else {
+        self.deactivate_plugin_with(connection, plugin_id, clear_runtime_entry)
+    }
+
+    fn deactivate_plugin_with(
+        &mut self,
+        connection: &Connection,
+        plugin_id: &str,
+        cleanup_runtime: impl FnOnce(
+            &SourceRuntime,
+            &PluginEntryRuntime,
+        ) -> Result<(), PluginSystemError>,
+    ) -> Result<PluginRecord, PluginSystemError> {
+        let Some(previous) = self.plugins.get(plugin_id).cloned() else {
             return Err(PluginSystemError::NotFound(plugin_id.to_owned()));
         };
-        if !plugin.record.enabled
+        if !previous.record.enabled
             && matches!(
-                plugin.record.state,
+                previous.record.state,
                 PluginState::Invalid | PluginState::Incompatible
             )
         {
-            return Ok(plugin.record.clone());
+            return Ok(previous.record);
         }
-        let provider_ids = plugin.providers.keys().cloned().collect::<Vec<_>>();
-        let mut candidate = plugin.record.clone();
+        let mut candidate = previous.record.clone();
         for provider in &mut candidate.providers {
             provider.initialized = false;
             provider.runtime_report = None;
@@ -1467,13 +1541,20 @@ impl PluginRegistry {
             ),
         );
         update_action_flags(&mut candidate);
-        persist_plugin(connection, &candidate)?;
 
-        for provider_id in provider_ids {
-            let _ = self.runtime.uninitialize_provider(&provider_id);
-            let _ = self
-                .runtime
-                .clear_provider_granted_capabilities(&provider_id);
+        if let Err(error) = cleanup_runtime(&self.runtime, &previous) {
+            return Err(restore_after_failed_deactivation(
+                &self.runtime,
+                &previous,
+                error,
+            ));
+        }
+        if let Err(error) = persist_plugin(connection, &candidate) {
+            return Err(restore_after_failed_deactivation(
+                &self.runtime,
+                &previous,
+                error,
+            ));
         }
         let plugin = self
             .plugins
@@ -1631,6 +1712,34 @@ impl PluginRegistry {
         }
         PluginSystemError::Package(format!(
             "removal failed: {removal_error}; {}",
+            failures.join("; ")
+        ))
+    }
+
+    fn restore_committed_removal(
+        &mut self,
+        connection: &Connection,
+        previous: PluginEntryRuntime,
+        removal_error: PluginSystemError,
+    ) -> PluginSystemError {
+        let database_error = persist_plugin(connection, &previous.record).err();
+        let runtime_error = restore_runtime_entry(&self.runtime, &previous).err();
+        let plugin_id = previous.record.id.clone();
+        self.plugins.insert(plugin_id, previous);
+
+        if database_error.is_none() && runtime_error.is_none() {
+            return removal_error;
+        }
+
+        let mut failures = Vec::new();
+        if let Some(error) = database_error {
+            failures.push(format!("database restore failed: {error}"));
+        }
+        if let Some(error) = runtime_error {
+            failures.push(format!("runtime restore failed: {error}"));
+        }
+        PluginSystemError::Package(format!(
+            "removal cleanup failed: {removal_error}; {}",
             failures.join("; ")
         ))
     }
@@ -1963,6 +2072,7 @@ fn update_action_flags(record: &mut PluginRecord) {
 fn build_provider(
     manifest: &PluginManifest,
     entrypoint: &PluginProviderEntrypoint,
+    netease_bridge: Option<Arc<dyn NeteaseProviderBridge>>,
 ) -> Result<Arc<dyn SourceProvider>, PluginSystemError> {
     let capabilities = provider_declared_capabilities(manifest, entrypoint);
     match entrypoint.entrypoint.as_str() {
@@ -1978,6 +2088,23 @@ fn build_provider(
         ))),
         "builtin:qishui" if entrypoint.id == "qsvip" => {
             Ok(Arc::new(crate::lx_js_importer::QishuiRustProvider::new()))
+        }
+        "builtin:netease"
+            if manifest.id == NETEASE_PLUGIN_ID && entrypoint.id == NETEASE_PROVIDER_ID =>
+        {
+            netease_bridge
+                .map(|bridge| {
+                    Arc::new(NeteaseSourceProvider::new(
+                        entrypoint.id.clone(),
+                        capabilities,
+                        bridge,
+                    )) as Arc<dyn SourceProvider>
+                })
+                .ok_or_else(|| PluginSystemError::ProviderLoad {
+                    plugin_id: manifest.id.clone(),
+                    entrypoint: entrypoint.entrypoint.clone(),
+                    message: "the NetEase Service Bridge is unavailable".to_owned(),
+                })
         }
         _ => Err(PluginSystemError::ProviderLoad {
             plugin_id: manifest.id.clone(),
@@ -2082,6 +2209,7 @@ impl SourceProvider for DemoSourceProvider {
             SourceRequest::Pic { source, .. } => Ok(SourceResponse::Pic(format!(
                 "https://example.invalid/{source}/cover.jpg"
             ))),
+            request => Err(context.unsupported_action(request.source(), request.action())),
         }
     }
 }
@@ -2144,6 +2272,27 @@ fn standard_actions() -> Vec<SourceAction> {
     ]
 }
 
+fn validate_provider_routes(
+    plugin_id: &str,
+    providers: &[PluginProviderState],
+) -> Result<(), PluginSystemError> {
+    let mut routes = BTreeMap::new();
+    for provider in providers {
+        for source in &provider.sources {
+            for action in &source.actions {
+                let route = (source.id.clone(), *action);
+                if let Some(existing_provider) = routes.insert(route, provider.id.clone()) {
+                    return Err(PluginSystemError::Package(format!(
+                        "plugin {plugin_id} has an ambiguous route for source {} action {action:?}: providers {} and {}",
+                        source.id, existing_provider, provider.id
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn clear_runtime_provider_state(
     runtime: &SourceRuntime,
     provider_ids: impl IntoIterator<Item = String>,
@@ -2154,20 +2303,16 @@ fn clear_runtime_provider_state(
     }
 }
 
-fn clear_runtime_entries(
+fn clear_runtime_provider_ids<'a>(
     runtime: &SourceRuntime,
-    entries: &BTreeMap<String, PluginEntryRuntime>,
+    provider_ids: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), PluginSystemError> {
-    let provider_ids = entries
-        .values()
-        .flat_map(|plugin| plugin.providers.keys().cloned())
-        .collect::<BTreeSet<_>>();
     let mut failures = Vec::new();
     for provider_id in provider_ids {
-        if let Err(error) = runtime.uninitialize_provider(&provider_id) {
+        if let Err(error) = runtime.uninitialize_provider(provider_id) {
             failures.push(format!("uninitializing {provider_id} failed: {error}"));
         }
-        if let Err(error) = runtime.clear_provider_granted_capabilities(&provider_id) {
+        if let Err(error) = runtime.clear_provider_granted_capabilities(provider_id) {
             failures.push(format!("clearing grants for {provider_id} failed: {error}"));
         }
     }
@@ -2176,6 +2321,24 @@ fn clear_runtime_entries(
     } else {
         Err(PluginSystemError::Package(failures.join("; ")))
     }
+}
+
+fn clear_runtime_entry(
+    runtime: &SourceRuntime,
+    entry: &PluginEntryRuntime,
+) -> Result<(), PluginSystemError> {
+    clear_runtime_provider_ids(runtime, entry.providers.keys().map(String::as_str))
+}
+
+fn clear_runtime_entries(
+    runtime: &SourceRuntime,
+    entries: &BTreeMap<String, PluginEntryRuntime>,
+) -> Result<(), PluginSystemError> {
+    let provider_ids = entries
+        .values()
+        .flat_map(|plugin| plugin.providers.keys().cloned())
+        .collect::<BTreeSet<_>>();
+    clear_runtime_provider_ids(runtime, provider_ids.iter().map(String::as_str))
 }
 
 fn restore_runtime_entries(
@@ -2222,6 +2385,20 @@ fn restore_runtime_entry(
         }
     }
     Ok(())
+}
+
+fn restore_after_failed_deactivation(
+    runtime: &SourceRuntime,
+    previous: &PluginEntryRuntime,
+    deactivation_error: PluginSystemError,
+) -> PluginSystemError {
+    match restore_runtime_entry(runtime, previous) {
+        Ok(()) => deactivation_error,
+        Err(restore_error) => PluginSystemError::Package(format!(
+            "deactivating plugin {} failed: {deactivation_error}; restoring its runtime state also failed: {restore_error}",
+            previous.record.id
+        )),
+    }
 }
 
 fn provider_declared_capabilities(
@@ -2443,41 +2620,7 @@ fn valid_entrypoint(value: &str) -> bool {
 }
 
 fn valid_semver(value: &str) -> bool {
-    let (without_build, build) = value
-        .split_once('+')
-        .map_or((value, None), |(core, build)| (core, Some(build)));
-    if let Some(build) = build {
-        if !valid_semver_identifiers(build) {
-            return false;
-        }
-    }
-    let (core, prerelease) = without_build
-        .split_once('-')
-        .map_or((without_build, None), |(core, prerelease)| {
-            (core, Some(prerelease))
-        });
-    if let Some(prerelease) = prerelease {
-        if !valid_semver_identifiers(prerelease) {
-            return false;
-        }
-    }
-    let parts = core.split('.').collect::<Vec<_>>();
-    parts.len() == 3
-        && parts.iter().all(|part| {
-            !part.is_empty()
-                && (part == &"0" || !part.starts_with('0'))
-                && part.bytes().all(|byte| byte.is_ascii_digit())
-        })
-}
-
-fn valid_semver_identifiers(value: &str) -> bool {
-    !value.is_empty()
-        && value.split('.').all(|identifier| {
-            !identifier.is_empty()
-                && identifier
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        })
+    semver::Version::parse(value).is_ok()
 }
 
 fn capability_from_str(value: &str) -> Option<SourceCapability> {
@@ -2525,6 +2668,7 @@ mod tests {
     use super::*;
     use crate::source_runtime::SourceQuality;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
 
     static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -2590,6 +2734,51 @@ mod tests {
     }
 
     #[test]
+    fn bundled_netease_manifest_should_validate() {
+        let manifest =
+            serde_json::from_str::<PluginManifest>(include_str!("../plugins/netease/plugin.json"))
+                .expect("bundled NetEase manifest should deserialize");
+
+        manifest
+            .validate()
+            .expect("bundled NetEase manifest should validate");
+        let connection = Connection::open_in_memory().expect("test database should open");
+        crate::netease::initialize_database(&connection)
+            .expect("NetEase test database should initialize");
+        let bridge: Arc<dyn NeteaseProviderBridge> = Arc::new(
+            crate::netease::NeteaseServiceBridge::new(
+                Arc::new(Mutex::new(connection)),
+                Arc::new(source_runtime::DefaultSourceHost::new(
+                    std::time::Duration::from_secs(1),
+                    1024,
+                )),
+            )
+            .expect("NetEase Service Bridge should initialize"),
+        );
+        let provider = build_provider(&manifest, &manifest.provider_entrypoints[0], Some(bridge))
+            .expect("bundled NetEase Provider should load through its Plugin entrypoint");
+
+        assert_eq!(provider.id(), crate::netease::NETEASE_PROVIDER_ID);
+    }
+
+    #[test]
+    fn builtin_netease_entrypoint_should_be_reserved_for_the_bundled_package() {
+        let mut impostor = manifest("user.netease", "builtin:netease", &[]);
+        impostor.provider_entrypoints[0].id = NETEASE_PROVIDER_ID.to_owned();
+
+        let error = match build_provider(&impostor, &impostor.provider_entrypoints[0], None) {
+            Ok(_) => panic!("a noncanonical package must not construct the NetEase Provider"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            PluginSystemError::ProviderLoad { message, .. }
+                if message.contains("only built-in provider entrypoints")
+        ));
+    }
+
+    #[test]
     fn manifest_validation_rejects_invalid_versions_and_duplicate_provider_ids() {
         let mut plugin = manifest("test.plugin", "builtin:runtime-demo", &[]);
         plugin.version = "1.0".to_owned();
@@ -2601,6 +2790,42 @@ mod tests {
 
         assert!(errors.iter().any(|error| error.contains("semver")));
         assert!(errors.iter().any(|error| error.contains("unique")));
+    }
+
+    #[test]
+    fn manifest_validation_rejects_numeric_prerelease_identifiers_with_leading_zeroes() {
+        let mut plugin = manifest("test.plugin", "builtin:runtime-demo", &[]);
+        plugin.version = "1.0.0-01".to_owned();
+
+        let errors = plugin.validate().expect_err("manifest should be invalid");
+
+        assert!(errors.iter().any(|error| error.contains("semver")));
+    }
+
+    #[test]
+    fn manifest_validation_rejects_duplicate_source_action_routes() {
+        let mut plugin = manifest("test.plugin", "builtin:runtime-demo", &[]);
+        let source = source_runtime::lx_music_source(
+            source_runtime::LX_SOURCE_WY,
+            "First Provider",
+            vec![SourceAction::MusicSearch],
+            Vec::new(),
+        );
+        plugin.provider_entrypoints[0]
+            .source_catalog
+            .insert(source.id.clone(), source.clone());
+        let mut second_provider = plugin.provider_entrypoints[0].clone();
+        second_provider.id = "test.plugin-second-provider".to_owned();
+        second_provider
+            .source_catalog
+            .insert(source.id.clone(), source);
+        plugin.provider_entrypoints.push(second_provider);
+
+        let errors = plugin.validate().expect_err("manifest should be invalid");
+
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("exposed by both providers")));
     }
 
     #[test]
@@ -2784,6 +3009,104 @@ mod tests {
             .iter()
             .all(|provider| provider.initialized));
         assert!(matches!(outcome.response, SourceResponse::MusicSearch(_)));
+        fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn dispatch_should_route_by_source_and_action_across_providers() {
+        let root = temp_dir("provider-action-routing");
+        let bundled = root.join("bundled");
+        let user = root.join("user");
+        fs::create_dir_all(&bundled).expect("bundled directory should be created");
+        fs::create_dir_all(&user).expect("user directory should be created");
+        let mut plugin = manifest("runtime.plugin", "builtin:runtime-demo", &[]);
+        plugin.provider_entrypoints[0].source_catalog.insert(
+            source_runtime::LX_SOURCE_WY.to_owned(),
+            source_runtime::lx_music_source(
+                source_runtime::LX_SOURCE_WY,
+                "Search Provider",
+                vec![SourceAction::MusicSearch],
+                Vec::new(),
+            ),
+        );
+        let mut lyric_provider = plugin.provider_entrypoints[0].clone();
+        lyric_provider.id = "runtime.plugin-lyric-provider".to_owned();
+        lyric_provider.source_catalog.insert(
+            source_runtime::LX_SOURCE_WY.to_owned(),
+            source_runtime::lx_music_source(
+                source_runtime::LX_SOURCE_WY,
+                "Lyric Provider",
+                vec![SourceAction::Lyric],
+                Vec::new(),
+            ),
+        );
+        let lyric_provider_id = lyric_provider.id.clone();
+        plugin.provider_entrypoints.push(lyric_provider);
+        write_package(&bundled, &plugin);
+
+        let connection = database();
+        let mut registry = PluginRegistry::new(&user, &bundled, Arc::new(SourceRuntime::new()));
+        registry
+            .refresh(&connection)
+            .expect("registry should refresh");
+        registry
+            .set_enabled(&connection, "runtime.plugin", true)
+            .expect("plugin should enable");
+        let request = SourceRequest::Lyric {
+            source: source_runtime::LX_SOURCE_WY.to_owned(),
+            music_info: json!({ "id": "track-1" }),
+        };
+        let dispatch = registry
+            .prepare_dispatch("runtime.plugin", &request)
+            .expect("lyric request should resolve to a provider");
+
+        assert_eq!(dispatch.provider_id, lyric_provider_id);
+        assert!(matches!(
+            dispatch
+                .execute(request, source_runtime::SourceCancellationToken::default())
+                .expect("lyric provider should handle the request")
+                .response,
+            SourceResponse::Lyric(_)
+        ));
+        fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn enable_should_reject_runtime_provider_route_collisions() {
+        let root = temp_dir("provider-route-collision");
+        let bundled = root.join("bundled");
+        let user = root.join("user");
+        fs::create_dir_all(&bundled).expect("bundled directory should be created");
+        fs::create_dir_all(&user).expect("user directory should be created");
+        let mut plugin = manifest("runtime.plugin", "builtin:runtime-demo", &[]);
+        let mut second_provider = plugin.provider_entrypoints[0].clone();
+        second_provider.id = "runtime.plugin-second-provider".to_owned();
+        plugin.provider_entrypoints.push(second_provider);
+        write_package(&bundled, &plugin);
+
+        let connection = database();
+        let runtime = Arc::new(SourceRuntime::new());
+        let mut registry = PluginRegistry::new(&user, &bundled, Arc::clone(&runtime));
+        registry
+            .refresh(&connection)
+            .expect("registry should refresh");
+
+        let error = registry
+            .set_enabled(&connection, "runtime.plugin", true)
+            .expect_err("overlapping runtime routes should reject activation");
+        let record = registry
+            .record("runtime.plugin")
+            .expect("plugin should remain registered");
+
+        assert!(error.to_string().contains("ambiguous route"));
+        assert_eq!(record.state, PluginState::Error);
+        assert!(!record.enabled);
+        for provider in &plugin.provider_entrypoints {
+            assert!(runtime
+                .granted_capabilities_for(&provider.id)
+                .expect("provider grants should remain readable")
+                .is_empty());
+        }
         fs::remove_dir_all(root).expect("test directory should be removed");
     }
 
@@ -3041,10 +3364,28 @@ mod tests {
             &[SourceCapability::NetworkAny],
         );
         plugin.capabilities.clear();
+        plugin.provider_entrypoints[0].source_catalog.insert(
+            source_runtime::LX_SOURCE_WY.to_owned(),
+            source_runtime::lx_music_source(
+                source_runtime::LX_SOURCE_WY,
+                "Network Provider",
+                vec![SourceAction::MusicUrl],
+                source_runtime::standard_lx_qualities(),
+            ),
+        );
         let network_provider_id = plugin.provider_entrypoints[0].id.clone();
         let mut cache_provider = plugin.provider_entrypoints[0].clone();
         cache_provider.id = "runtime.plugin-cache-provider".to_owned();
         cache_provider.capabilities = [SourceCapability::CacheReadWrite].into_iter().collect();
+        cache_provider.source_catalog.insert(
+            source_runtime::LX_SOURCE_WY.to_owned(),
+            source_runtime::lx_music_source(
+                source_runtime::LX_SOURCE_WY,
+                "Cache Provider",
+                vec![SourceAction::MusicSearch],
+                Vec::new(),
+            ),
+        );
         let cache_provider_id = cache_provider.id.clone();
         plugin.provider_entrypoints.push(cache_provider);
         write_package(&bundled, &plugin);
@@ -3184,6 +3525,70 @@ mod tests {
 
         assert!(record.enabled);
         assert_eq!(record.state, PluginState::Enabled);
+        assert!(matches!(outcome.response, SourceResponse::MusicSearch(_)));
+        fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn disable_should_restore_runtime_when_cleanup_fails_after_partial_teardown() {
+        let root = temp_dir("disable-runtime-rollback");
+        let bundled = root.join("bundled");
+        let user = root.join("user");
+        fs::create_dir_all(&bundled).expect("bundled directory should be created");
+        fs::create_dir_all(&user).expect("user directory should be created");
+        write_package(
+            &bundled,
+            &manifest("runtime.plugin", "builtin:runtime-demo", &[]),
+        );
+
+        let connection = database();
+        let mut registry = PluginRegistry::new(&user, &bundled, Arc::new(SourceRuntime::new()));
+        registry
+            .refresh(&connection)
+            .expect("registry should refresh");
+        registry
+            .set_enabled(&connection, "runtime.plugin", true)
+            .expect("plugin should enable");
+
+        let error = registry
+            .deactivate_plugin_with(&connection, "runtime.plugin", |runtime, previous| {
+                let provider_id = previous
+                    .providers
+                    .keys()
+                    .next()
+                    .expect("enabled plugin should have a provider");
+                runtime
+                    .uninitialize_provider(provider_id)
+                    .expect("partial teardown should uninitialize the provider");
+                runtime
+                    .clear_provider_granted_capabilities(provider_id)
+                    .expect("partial teardown should clear provider grants");
+                Err(PluginSystemError::Package(
+                    "forced runtime cleanup failure".to_owned(),
+                ))
+            })
+            .expect_err("runtime cleanup failure should reject disable");
+        let record = registry
+            .record("runtime.plugin")
+            .expect("plugin should remain registered");
+        let persisted = load_persisted_states(&connection).expect("state should load");
+        let outcome = registry
+            .dispatch_request(
+                &connection,
+                "runtime.plugin",
+                SourceRequest::MusicSearch {
+                    source: source_runtime::LX_SOURCE_WY.to_owned(),
+                    keyword: "rollback".to_owned(),
+                    page: 1,
+                    page_size: 10,
+                },
+                source_runtime::SourceCancellationToken::default(),
+            )
+            .expect("restored provider should remain dispatchable");
+
+        assert!(error.to_string().contains("forced runtime cleanup failure"));
+        assert!(record.enabled);
+        assert!(persisted["runtime.plugin"].enabled);
         assert!(matches!(outcome.response, SourceResponse::MusicSearch(_)));
         fs::remove_dir_all(root).expect("test directory should be removed");
     }
@@ -3406,6 +3811,68 @@ mod tests {
 
         assert!(Path::new(&record.path).is_dir());
         assert!(record.enabled);
+        assert!(matches!(outcome.response, SourceResponse::MusicSearch(_)));
+        fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn remove_should_restore_package_database_and_runtime_when_cleanup_fails() {
+        let root = temp_dir("remove-cleanup-rollback");
+        let bundled = root.join("bundled");
+        let user = root.join("user");
+        let source_root = root.join("source");
+        fs::create_dir_all(&bundled).expect("bundled directory should be created");
+        fs::create_dir_all(&user).expect("user directory should be created");
+        fs::create_dir_all(&source_root).expect("source directory should be created");
+        let package = write_package(
+            &source_root,
+            &manifest("user.plugin", "builtin:runtime-demo", &[]),
+        );
+
+        let connection = database();
+        let mut registry = PluginRegistry::new(&user, &bundled, Arc::new(SourceRuntime::new()));
+        registry
+            .refresh(&connection)
+            .expect("registry should refresh");
+        registry
+            .install(&connection, &package)
+            .expect("package should install");
+        registry
+            .set_enabled(&connection, "user.plugin", true)
+            .expect("plugin should enable");
+
+        let error = registry
+            .remove_with_package_cleanup(&connection, "user.plugin", |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "forced quarantine cleanup failure",
+                ))
+            })
+            .expect_err("cleanup failure should reject removal");
+        let record = registry
+            .record("user.plugin")
+            .expect("plugin should be restored");
+        let persisted = load_persisted_states(&connection).expect("state should load");
+        let outcome = registry
+            .dispatch_request(
+                &connection,
+                "user.plugin",
+                SourceRequest::MusicSearch {
+                    source: source_runtime::LX_SOURCE_WY.to_owned(),
+                    keyword: "rollback".to_owned(),
+                    page: 1,
+                    page_size: 10,
+                },
+                source_runtime::SourceCancellationToken::default(),
+            )
+            .expect("restored provider should remain dispatchable");
+
+        assert!(error
+            .to_string()
+            .contains("forced quarantine cleanup failure"));
+        assert!(Path::new(&record.path).is_dir());
+        assert!(record.enabled);
+        assert!(persisted["user.plugin"].enabled);
         assert!(matches!(outcome.response, SourceResponse::MusicSearch(_)));
         fs::remove_dir_all(root).expect("test directory should be removed");
     }

@@ -45,6 +45,11 @@ export type PluginRecord = {
 
 export type SourceQuality = "128k" | "320k" | "flac" | "flac24bit";
 
+export type SourceTrackRef = {
+  id: string;
+  source: string;
+};
+
 export type SourceRequest =
   | {
       action: "musicSearch";
@@ -68,6 +73,37 @@ export type SourceRequest =
       action: "pic";
       source: string;
       musicInfo: Record<string, unknown>;
+    }
+  | {
+      action: "musicRecommendations";
+      source: string;
+      accountRef: string;
+      limit: number;
+    }
+  | {
+      action: "playlistList";
+      source: string;
+      accountRef: string;
+    }
+  | {
+      action: "playlistRead";
+      source: string;
+      accountRef: string;
+      playlistId: string;
+    }
+  | {
+      action: "playlistAddTrack";
+      source: string;
+      accountRef: string;
+      playlistId: string;
+      track: SourceTrackRef;
+    }
+  | {
+      action: "playlistRemoveTrack";
+      source: string;
+      accountRef: string;
+      playlistId: string;
+      track: SourceTrackRef;
     };
 
 export type SourceDiagnostic = {
@@ -85,6 +121,31 @@ export type SourceSearchResult = {
   durationSeconds: number | null;
   coverUrl: string | null;
   rawInfo: Record<string, unknown>;
+};
+
+export type RemoteTrack = SourceSearchResult;
+
+export type SourcePlaylist = {
+  id: string;
+  name: string;
+  description: string | null;
+  coverUrl: string | null;
+  trackCount: number;
+  ownerName: string;
+  canMutate: boolean;
+};
+
+export type SourcePlaylistDetail = {
+  playlist: SourcePlaylist;
+  tracks: RemoteTrack[];
+};
+
+export type SourcePlaylistMutation = {
+  auditId: number;
+  operation: "add" | "remove";
+  playlistId: string;
+  trackId: string;
+  occurredAt: number;
 };
 
 export type SourceResponse =
@@ -106,7 +167,12 @@ export type SourceResponse =
         lxlyric: string | null;
       };
     }
-  | { action: "pic"; data: string };
+  | { action: "pic"; data: string }
+  | { action: "musicRecommendations"; data: { list: RemoteTrack[] } }
+  | { action: "playlistList"; data: SourcePlaylist[] }
+  | { action: "playlistRead"; data: SourcePlaylistDetail }
+  | { action: "playlistAddTrack"; data: SourcePlaylistMutation }
+  | { action: "playlistRemoveTrack"; data: SourcePlaylistMutation };
 
 export type SourceRequestOutcome = {
   response: SourceResponse;

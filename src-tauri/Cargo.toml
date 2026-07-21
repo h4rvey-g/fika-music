@@ -33,4 +33,19 @@ oxc_parser = "0.138.0"
 oxc_span = "0.138.0"
 reqwest = { version = "0.13.4", features = ["blocking", "json"] }
 sha2 = "0.10.9"
+semver = "1.0"
+base64 = "0.22.1"
+keyring = { version = "=3.6.3", default-features = false }
+netease-music = "=0.1.1"
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+uuid = { version = "1.18.1", features = ["v4"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["linux-native-sync-persistent", "crypto-rust"] }
 
