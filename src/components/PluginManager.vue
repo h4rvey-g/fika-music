@@ -24,6 +24,10 @@ import {
 } from "../lib/plugin-api";
 import type { PluginDiagnostic, PluginRecord, SourceCapability } from "../lib/plugin-api";
 
+const emit = defineEmits<{
+  pluginsChanged: [plugins: PluginRecord[]];
+}>();
+
 const plugins = ref<PluginRecord[]>([]);
 const expandedPluginId = ref<string | null>(null);
 const isLoading = ref(false);
@@ -43,7 +47,7 @@ async function loadPlugins() {
   pluginError.value = null;
 
   try {
-    plugins.value = await listPlugins();
+    replacePlugins(await listPlugins());
   } catch (error) {
     pluginError.value = normalizeError(error);
   } finally {
@@ -57,7 +61,7 @@ async function refreshPlugins() {
   pluginNotice.value = null;
 
   try {
-    plugins.value = await refreshPluginRegistry();
+    replacePlugins(await refreshPluginRegistry());
     pluginNotice.value = "Plugin registry refreshed.";
   } catch (error) {
     pluginError.value = normalizeError(error);
@@ -157,7 +161,7 @@ async function removePlugin(plugin: PluginRecord) {
   pluginNotice.value = null;
 
   try {
-    plugins.value = await removePluginPackage(plugin.id);
+    replacePlugins(await removePluginPackage(plugin.id));
     if (expandedPluginId.value === plugin.id) {
       expandedPluginId.value = null;
     }
@@ -187,12 +191,19 @@ async function clearDiagnostics(plugin: PluginRecord) {
 function replacePlugin(updated: PluginRecord) {
   const index = plugins.value.findIndex((plugin) => plugin.id === updated.id);
   if (index === -1) {
-    plugins.value = [...plugins.value, updated];
+    replacePlugins([...plugins.value, updated]);
     return;
   }
-  plugins.value = plugins.value.map((plugin, pluginIndex) =>
-    pluginIndex === index ? updated : plugin,
+  replacePlugins(
+    plugins.value.map((plugin, pluginIndex) =>
+      pluginIndex === index ? updated : plugin,
+    ),
   );
+}
+
+function replacePlugins(updated: PluginRecord[]) {
+  plugins.value = updated;
+  emit("pluginsChanged", [...updated]);
 }
 
 function toggleDetails(pluginId: string) {

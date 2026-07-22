@@ -63,6 +63,35 @@ describe("PluginManager", () => {
     expect(apiMocks.listPlugins).toHaveBeenCalledOnce();
     expect(wrapper.text()).toContain("Runtime Demo");
     expect(wrapper.text()).toContain("Review required");
+    expect(wrapper.emitted("pluginsChanged")?.[0]).toEqual([[pluginRecord()]]);
+    wrapper.unmount();
+  });
+
+  it("reports enabled Plugin records to the application shell", async () => {
+    const disabled = pluginRecord({
+      state: "disabled",
+      permissionsReviewed: true,
+      canEnable: true,
+    });
+    const enabled = pluginRecord({
+      state: "enabled",
+      enabled: true,
+      permissionsReviewed: true,
+      canEnable: true,
+    });
+    apiMocks.listPlugins.mockResolvedValue([disabled]);
+    apiMocks.setPluginEnabled.mockResolvedValue(enabled);
+    const wrapper = mount(PluginManager);
+    await flushPromises();
+
+    const enableButton = wrapper.findAll("button").find((button) => button.text() === "Enable");
+    expect(enableButton).toBeDefined();
+    await enableButton?.trigger("click");
+    await flushPromises();
+
+    expect(apiMocks.setPluginEnabled).toHaveBeenCalledWith("fika.runtime-demo", true);
+    const pluginChanges = wrapper.emitted("pluginsChanged") ?? [];
+    expect(pluginChanges[pluginChanges.length - 1]).toEqual([[enabled]]);
     wrapper.unmount();
   });
 

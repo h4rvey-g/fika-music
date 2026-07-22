@@ -32,6 +32,8 @@ const QR_SESSION_TTL_SECONDS: i64 = 300;
 const MAX_PENDING_QR_SESSIONS: usize = 8;
 const API_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_API_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+// playlist_track_all merges chunked track-detail responses into one aggregate payload.
+const MAX_PLAYLIST_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_AUDIT_RECORDS: u32 = 200;
 const MAX_AUDIT_MESSAGE_CHARS: usize = 512;
 const MAX_UPSTREAM_MESSAGE_CHARS: usize = 512;
@@ -370,7 +372,7 @@ impl NeteaseServiceBridge {
                 unikey: session.key,
             })
             .map_err(|error| bridge_failure("poll QR login", error))?;
-        validate_response_size(&response, "poll QR login")?;
+        validate_response_size(&response, "poll QR login", MAX_API_RESPONSE_BYTES)?;
         let code = response
             .body
             .get("code")
@@ -767,7 +769,7 @@ impl NeteaseProviderBridge for NeteaseServiceBridge {
                 s: Some(8),
             })
             .map_err(|error| bridge_failure("read playlist", error))
-            .and_then(|response| checked_body(response, "read playlist"));
+            .and_then(checked_playlist_body);
         let body = self.account_result(account_ref, result)?;
         let playlist_json =
             body.get("playlist")
@@ -1161,7 +1163,19 @@ fn checked_body(
     response: ApiResponse,
     operation: &'static str,
 ) -> Result<JsonValue, NeteaseBridgeError> {
-    validate_response_size(&response, operation)?;
+    checked_body_with_limit(response, operation, MAX_API_RESPONSE_BYTES)
+}
+
+fn checked_playlist_body(response: ApiResponse) -> Result<JsonValue, NeteaseBridgeError> {
+    checked_body_with_limit(response, "read playlist", MAX_PLAYLIST_RESPONSE_BYTES)
+}
+
+fn checked_body_with_limit(
+    response: ApiResponse,
+    operation: &'static str,
+    maximum_bytes: usize,
+) -> Result<JsonValue, NeteaseBridgeError> {
+    validate_response_size(&response, operation, maximum_bytes)?;
     let code = response_code(&response);
     if code == 301 {
         return Err(NeteaseBridgeError::CredentialExpired);
@@ -1178,11 +1192,12 @@ fn checked_body(
 fn validate_response_size(
     response: &ApiResponse,
     operation: &'static str,
+    maximum_bytes: usize,
 ) -> Result<(), NeteaseBridgeError> {
-    if response.raw.len() > MAX_API_RESPONSE_BYTES {
+    if response.raw.len() > maximum_bytes {
         Err(NeteaseBridgeError::InvalidResponse {
             operation,
-            message: format!("response exceeded the {MAX_API_RESPONSE_BYTES} byte limit"),
+            message: format!("response exceeded the {maximum_bytes} byte limit"),
         })
     } else {
         Ok(())
@@ -1758,6 +1773,34 @@ mod tests {
             "test",
         )
         .expect_err("oversized response should fail");
+
+        assert!(matches!(error, NeteaseBridgeError::InvalidResponse { .. }));
+    }
+
+    #[test]
+    fn checked_body_should_allow_large_playlist_responses() {
+        let body = checked_playlist_body(ApiResponse {
+            status: 200,
+            code: Some(200),
+            body: json!({ "code": 200 }),
+            raw: vec![0; MAX_API_RESPONSE_BYTES + 1].into(),
+            cookies: Vec::new(),
+        })
+        .expect("large playlist responses should be accepted");
+
+        assert_eq!(body, json!({ "code": 200 }));
+    }
+
+    #[test]
+    fn checked_playlist_body_should_reject_responses_above_playlist_limit() {
+        let error = checked_playlist_body(ApiResponse {
+            status: 200,
+            code: Some(200),
+            body: json!({ "code": 200 }),
+            raw: vec![0; MAX_PLAYLIST_RESPONSE_BYTES + 1].into(),
+            cookies: Vec::new(),
+        })
+        .expect_err("playlist responses above the aggregate limit should fail");
 
         assert!(matches!(error, NeteaseBridgeError::InvalidResponse { .. }));
     }

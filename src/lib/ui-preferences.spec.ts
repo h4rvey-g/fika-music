@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_UI_PREFERENCES,
+  THEME_OPTIONS,
   UI_PREFERENCES_STORAGE_KEY,
   loadUiPreferences,
   parseUiPreferences,
@@ -32,6 +33,12 @@ describe("UI preferences", () => {
       volume: 1,
       playbackMode: "sequential",
     });
+  });
+
+  it("accepts every available theme", () => {
+    for (const theme of THEME_OPTIONS) {
+      expect(parseUiPreferences({ theme: theme.value }).theme).toBe(theme.value);
+    }
   });
 
   it("writes normalized preferences to the application key", () => {

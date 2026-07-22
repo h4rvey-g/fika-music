@@ -28,9 +28,11 @@ import {
 } from "@lucide/vue";
 import LibraryBrowser from "./components/LibraryBrowser.vue";
 import PluginManager from "./components/PluginManager.vue";
+import PluginWorkspace from "./components/PluginWorkspace.vue";
 import NeteaseSource from "./components/NeteaseSource.vue";
 import NowPlayingPanel from "./components/NowPlayingPanel.vue";
-import type { NeteasePlayback } from "./lib/netease-api";
+import { NETEASE_PLUGIN_ID, type NeteasePlayback } from "./lib/netease-api";
+import { listPlugins, type PluginRecord } from "./lib/plugin-api";
 import { PlayCountTracker } from "./lib/play-count-tracker";
 import { TAURI_COMMANDS } from "./generated/bindings";
 import type {
@@ -50,6 +52,7 @@ import type {
 } from "./generated/bindings";
 import {
   DEFAULT_UI_PREFERENCES,
+  THEME_OPTIONS,
   loadUiPreferences,
   saveUiPreferences,
   type PlaybackMode,
@@ -91,7 +94,7 @@ const mainSections = [
   {
     id: "sources",
     label: "Audio Sources",
-    description: "Browse NetEase recommendations, Playlists, and other providers",
+    description: "Search remote providers and resolve known platform track IDs",
     icon: AudioLines,
   },
   {
@@ -111,11 +114,14 @@ const settingsSection = {
 
 const sections = [...mainSections, settingsSection];
 type AppSection = (typeof sections)[number]["id"];
+type ActiveSection = AppSection | "plugin";
 
 const savedUiPreferences = loadUiPreferences();
 const scanStatus = ref<ScanStatus>({ ...emptyScanStatus });
 const selectedFolder = ref<string | null>(null);
-const activeSection = ref<AppSection>("local");
+const activeSection = ref<ActiveSection>("local");
+const activePluginId = ref<string | null>(null);
+const pluginRecords = ref<PluginRecord[]>([]);
 const sidebarOpen = ref(false);
 const activeTrack = ref<LocalTrack | null>(null);
 const activeRemoteTitle = ref<string | null>(null);
@@ -165,9 +171,21 @@ let unlistenScanProgress: UnlistenFn | null = null;
 let playbackDetailsGeneration = 0;
 const playCountTracker = new PlayCountTracker();
 
-const currentSection = computed(
-  () => sections.find((section) => section.id === activeSection.value) ?? mainSections[0],
+const enabledPlugins = computed(() => pluginRecords.value.filter((plugin) => plugin.enabled));
+const activePlugin = computed(
+  () => enabledPlugins.value.find((plugin) => plugin.id === activePluginId.value) ?? null,
 );
+const currentSection = computed(() => {
+  if (activeSection.value === "plugin" && activePlugin.value) {
+    return {
+      label: activePlugin.value.name,
+      description:
+        activePlugin.value.description || "Review this plugin's registered source providers",
+    };
+  }
+
+  return sections.find((section) => section.id === activeSection.value) ?? mainSections[0];
+});
 const canScan = computed(
   () => Boolean(selectedFolder.value) && !scanStatus.value.isRunning && !isStartingScan.value,
 );
@@ -243,7 +261,7 @@ watch([themePreference, layoutDensity, remoteQuality, volume, playbackMode], () 
 });
 
 onMounted(async () => {
-  await Promise.all([loadScanStatus(), bindScanProgress()]);
+  await Promise.all([loadScanStatus(), bindScanProgress(), loadPluginNavigation()]);
 });
 
 onBeforeUnmount(() => {
@@ -261,7 +279,33 @@ function beginRemoteRequest() {
 
 function selectSection(section: AppSection) {
   activeSection.value = section;
+  activePluginId.value = null;
   sidebarOpen.value = false;
+}
+
+function selectPlugin(pluginId: string) {
+  activePluginId.value = pluginId;
+  activeSection.value = "plugin";
+  sidebarOpen.value = false;
+}
+
+async function loadPluginNavigation() {
+  try {
+    updatePluginRecords(await listPlugins());
+  } catch (error) {
+    appError.value = normalizeError(error);
+  }
+}
+
+function updatePluginRecords(records: PluginRecord[]) {
+  pluginRecords.value = records;
+  if (
+    activeSection.value === "plugin" &&
+    !records.some((plugin) => plugin.id === activePluginId.value && plugin.enabled)
+  ) {
+    activeSection.value = "plugins";
+    activePluginId.value = null;
+  }
 }
 
 function applyTheme(theme: ThemePreference) {
@@ -1135,17 +1179,11 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
             v-if="activeSection === 'sources'"
             class="flex min-w-0 flex-col gap-4 xl:col-start-1 xl:row-start-1"
           >
-          <NeteaseSource
-            :stream-quality="remoteQuality"
-            @playback-ready="playNeteasePlayback"
-            @open-plugins="selectSection('plugins')"
-          />
-
           <section
             v-if="activeSection === 'sources'"
             class="rounded border border-base-300 bg-base-100 p-4"
           >
-            <h2 class="text-base font-semibold">Other Source Providers</h2>
+            <h2 class="text-base font-semibold">Source Tools</h2>
             <p class="mt-1 text-sm text-base-content/65">
               Search through the Rust qsvip port, or resolve a known platform ID through bundled LX templates.
             </p>
@@ -1274,11 +1312,43 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
     </section>
 
         <section
+          v-if="activeSection === 'plugin' && activePlugin"
+          class="mx-auto grid w-full max-w-7xl gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]"
+          :class="layoutDensity === 'compact' ? 'px-3 py-3 lg:px-4' : 'px-4 py-4 lg:px-6'"
+        >
+          <NeteaseSource
+            v-if="activePlugin.id === NETEASE_PLUGIN_ID"
+            class="min-w-0 xl:col-start-1 xl:row-start-1"
+            :stream-quality="remoteQuality"
+            @playback-ready="playNeteasePlayback"
+            @open-plugins="selectSection('plugins')"
+          />
+          <PluginWorkspace
+            v-else
+            class="min-w-0 self-start xl:col-start-1 xl:row-start-1"
+            :plugin="activePlugin"
+            @open-plugins="selectSection('plugins')"
+          />
+          <NowPlayingPanel
+            class="xl:col-start-2 xl:row-start-1"
+            :title="nowPlayingTitle"
+            :subtitle="nowPlayingSubtitle"
+            :cover-url="nowPlayingCoverUrl"
+            :lyrics="activeLyrics"
+            :lyrics-loading="isLoadingLyrics"
+            :lyrics-error="lyricsError"
+            :playback-position="playbackPosition"
+            :can-retry="Boolean(activeTrack || activeRemoteLyricsQuery)"
+            @retry-lyrics="retryLyrics"
+          />
+        </section>
+
+        <section
           v-if="activeSection === 'plugins'"
           class="mx-auto w-full max-w-7xl"
           :class="layoutDensity === 'compact' ? 'px-3 py-3 lg:px-4' : 'px-4 py-5 lg:px-6'"
         >
-          <PluginManager />
+          <PluginManager @plugins-changed="updatePluginRecords" />
         </section>
 
         <section
@@ -1300,13 +1370,13 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
                 <select
                   id="theme-preference"
                   v-model="themePreference"
-                  class="select select-sm w-full sm:w-44"
-                >
-                  <option value="system">System</option>
-                  <option value="light">Light</option>
-                  <option value="dark">Dark</option>
-                </select>
-              </div>
+          class="select select-sm w-full sm:w-44"
+        >
+          <option v-for="theme in THEME_OPTIONS" :key="theme.value" :value="theme.value">
+            {{ theme.label }}
+          </option>
+        </select>
+      </div>
 
               <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <label for="layout-density" class="flex min-w-0 items-start gap-3">
@@ -1557,9 +1627,9 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
           </div>
         </div>
 
-        <nav class="flex flex-1 flex-col p-3" aria-label="Primary navigation">
+        <nav class="flex min-h-0 flex-1 flex-col p-3" aria-label="Primary navigation">
           <ul
-            class="menu w-full gap-1 p-0"
+            class="menu min-h-0 w-full flex-1 flex-nowrap gap-1 overflow-y-auto p-0"
             :class="layoutDensity === 'compact' ? 'menu-sm' : 'menu-md'"
           >
             <li v-for="section in mainSections" :key="section.id">
@@ -1573,10 +1643,31 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
                 <span>{{ section.label }}</span>
               </button>
             </li>
+
+            <li v-if="enabledPlugins.length" class="menu-title mt-3">
+              <span>Enabled plugins</span>
+            </li>
+            <li v-for="plugin in enabledPlugins" :key="plugin.id">
+              <button
+                type="button"
+                :class="{
+                  'menu-active': activeSection === 'plugin' && activePluginId === plugin.id,
+                }"
+                :aria-current="
+                  activeSection === 'plugin' && activePluginId === plugin.id ? 'page' : undefined
+                "
+                :data-plugin-id="plugin.id"
+                :title="`${plugin.name} (${plugin.id})`"
+                @click="selectPlugin(plugin.id)"
+              >
+                <Plug :size="18" aria-hidden="true" />
+                <span class="min-w-0 truncate">{{ plugin.name }}</span>
+              </button>
+            </li>
           </ul>
 
           <ul
-            class="menu mt-auto w-full gap-1 p-0 pt-4"
+            class="menu w-full shrink-0 gap-1 p-0 pt-4"
             :class="layoutDensity === 'compact' ? 'menu-sm' : 'menu-md'"
           >
             <li>
