@@ -1,6 +1,8 @@
 use crate::source_runtime::SourceProvider;
-use lofty::file::{AudioFile, TaggedFileExt};
-use lofty::tag::{Accessor, Tag};
+use lofty::config::ParseOptions;
+use lofty::file::{AudioFile, FileType, TaggedFileExt};
+use lofty::mp4::{Mp4Codec, Mp4File};
+use lofty::tag::{Accessor, ItemKey, Tag};
 use plugin_system::{PluginDiagnostic, PluginRecord, PluginRegistry, PluginSystemError};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
@@ -13,14 +15,30 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use walkdir::WalkDir;
 
+mod album_art;
 mod database;
+mod library;
 pub mod lx_js_importer;
 pub mod lyrics;
 pub mod netease;
 pub mod plugin_system;
 pub mod source_runtime;
 
+pub use album_art::{
+    AlbumArtSettings, AlbumArtTaskStatus, AlbumCoverCandidate, AlbumCoverResult, AlbumCoverStatus,
+    LibraryTaskState, MetadataLookupItemResult, MetadataLookupTaskStatus,
+};
+pub use library::{
+    LibraryAlbumGroup, LibraryGroupToggleResult, LibraryPlaybackQueue, LibraryQueryPage,
+    LibraryQueryRequest, LibraryQueueTrack, LibrarySelectionRange, LibrarySelectionRequest,
+    LibrarySortDirection, LibrarySortField, LibraryTextField, LibraryViewItem, LibraryViewItemKind,
+    LibraryViewRange,
+};
+
 const SCAN_PROGRESS_EVENT: &str = "library:scan-progress";
+const ALBUM_ART_PROGRESS_EVENT: &str = "library:album-art-progress";
+const METADATA_LOOKUP_PROGRESS_EVENT: &str = "library:metadata-lookup-progress";
+const LIBRARY_METADATA_VERSION: i64 = 1;
 
 macro_rules! with_tauri_commands {
     ($consumer:ident) => {
@@ -28,7 +46,23 @@ macro_rules! with_tauri_commands {
             select_music_folder,
             start_library_scan,
             get_scan_status,
-            list_local_tracks,
+            query_local_library,
+            local_library_view_range,
+            set_local_library_group_collapsed,
+            get_album_art_settings,
+            set_album_art_network_enabled,
+            resolve_local_album_cover,
+            get_album_art_task_status,
+            start_album_art_backfill,
+            resume_album_art_backfill,
+            pause_album_art_backfill,
+            get_metadata_lookup_task_status,
+            start_local_metadata_lookup,
+            resume_local_metadata_lookup,
+            pause_local_metadata_lookup,
+            create_local_library_playback_queue,
+            local_library_queue_track,
+            increment_local_track_play_count,
             local_track_media_source,
             local_track_playback_details,
             resolve_remote_track_lyrics,
@@ -101,6 +135,10 @@ enum AppError {
     TrackNotFound(i64),
     #[error("local track file is missing: {0}")]
     TrackFileMissing(String),
+    #[error("library error: {0}")]
+    Library(#[from] library::LibraryError),
+    #[error("album-art error: {0}")]
+    AlbumArt(#[from] album_art::AlbumArtError),
 }
 
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
@@ -113,12 +151,19 @@ pub struct LocalTrack {
     title: String,
     artist: Option<String>,
     album: Option<String>,
+    album_artist: Option<String>,
+    genre: Option<String>,
+    year: Option<i64>,
+    codec: Option<String>,
+    bitrate_kbps: Option<i64>,
+    sample_rate_hz: Option<i64>,
     duration_seconds: Option<i64>,
     track_number: Option<i64>,
     disc_number: Option<i64>,
     file_size_bytes: i64,
     modified_at: Option<i64>,
     indexed_at: i64,
+    play_count: i64,
 }
 
 #[derive(Debug)]
@@ -128,6 +173,12 @@ struct LocalTrackDraft {
     title: String,
     artist: Option<String>,
     album: Option<String>,
+    album_artist: Option<String>,
+    genre: Option<String>,
+    year: Option<i64>,
+    codec: Option<String>,
+    bitrate_kbps: Option<i64>,
+    sample_rate_hz: Option<i64>,
     duration_seconds: Option<i64>,
     track_number: Option<i64>,
     disc_number: Option<i64>,
@@ -214,6 +265,8 @@ pub struct ScanProgressEvent {
 
 struct AppState {
     db: Arc<Mutex<Connection>>,
+    library: Arc<Mutex<library::LibraryService>>,
+    album_art: Arc<album_art::AlbumArtService>,
     scan_status: Mutex<ScanStatus>,
     source_requests: Mutex<BTreeMap<String, source_runtime::SourceCancellationToken>>,
     source_runtime: Arc<source_runtime::SourceRuntime>,
@@ -253,6 +306,15 @@ impl AppState {
         let mut connection = Connection::open(db_path)?;
         database::initialize(&mut connection)?;
         let db = Arc::new(Mutex::new(connection));
+        let library = {
+            let connection = db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
+            library::LibraryService::load(&connection)?
+        };
+        let library = Arc::new(Mutex::new(library));
+        let album_art = Arc::new(album_art::AlbumArtService::new(
+            Arc::clone(&db),
+            Arc::clone(&library),
+        )?);
         let source_host = Arc::new(source_runtime::DefaultSourceHost::new(
             Duration::from_secs(8),
             4 * 1024 * 1024,
@@ -278,6 +340,8 @@ impl AppState {
 
         Ok(Self {
             db,
+            library,
+            album_art,
             scan_status: Mutex::new(ScanStatus::default()),
             source_requests: Mutex::new(BTreeMap::new()),
             source_runtime,
@@ -737,13 +801,263 @@ fn get_scan_status(state: State<'_, AppState>) -> CommandResult<ScanStatus> {
 }
 
 #[tauri::command]
-fn list_local_tracks(state: State<'_, AppState>) -> CommandResult<Vec<LocalTrack>> {
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| AppError::StatePoisoned("db").to_string())?;
+async fn query_local_library(
+    state: State<'_, AppState>,
+    request: LibraryQueryRequest,
+) -> CommandResult<LibraryQueryPage> {
+    let library = Arc::clone(&state.library);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut library = library
+            .lock()
+            .map_err(|_| AppError::StatePoisoned("library").to_string())?;
+        Ok(library.query(request))
+    })
+    .await
+    .map_err(|error| format!("library query task failed: {error}"))?
+}
 
-    list_tracks(&db).map_err(|error| error.to_string())
+#[tauri::command]
+fn local_library_view_range(
+    state: State<'_, AppState>,
+    snapshot_id: String,
+    offset: usize,
+    limit: usize,
+) -> CommandResult<LibraryViewRange> {
+    let library = state
+        .library
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("library").to_string())?;
+    library
+        .view_in_range(snapshot_id.trim(), offset, limit)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_local_library_group_collapsed(
+    state: State<'_, AppState>,
+    snapshot_id: String,
+    group_id: String,
+    collapsed: bool,
+) -> CommandResult<LibraryGroupToggleResult> {
+    let mut library = state
+        .library
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("library").to_string())?;
+    library
+        .set_group_collapsed(snapshot_id.trim(), group_id.trim(), collapsed)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_album_art_settings(state: State<'_, AppState>) -> CommandResult<AlbumArtSettings> {
+    state
+        .album_art
+        .settings()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_album_art_network_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> CommandResult<AlbumArtSettings> {
+    state
+        .album_art
+        .set_network_enabled(enabled)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn resolve_local_album_cover(
+    state: State<'_, AppState>,
+    group_id: String,
+    release_group_id: Option<String>,
+) -> CommandResult<AlbumCoverResult> {
+    let target = {
+        let library = state
+            .library
+            .lock()
+            .map_err(|_| AppError::StatePoisoned("library").to_string())?;
+        library
+            .album_target(group_id.trim())
+            .map_err(|error| error.to_string())?
+    };
+    let service = Arc::clone(&state.album_art);
+    tauri::async_runtime::spawn_blocking(move || {
+        service
+            .resolve_album(&target, release_group_id.as_deref())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("album cover task failed: {error}"))?
+}
+
+#[tauri::command]
+fn get_album_art_task_status(state: State<'_, AppState>) -> CommandResult<AlbumArtTaskStatus> {
+    state
+        .album_art
+        .album_task_status()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn start_album_art_backfill(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<AlbumArtTaskStatus> {
+    let targets = state
+        .library
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("library").to_string())?
+        .album_targets();
+    state
+        .album_art
+        .start_album_backfill(targets, move |status| {
+            let _ = app.emit(ALBUM_ART_PROGRESS_EVENT, status);
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn resume_album_art_backfill(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<AlbumArtTaskStatus> {
+    state
+        .album_art
+        .resume_album_backfill(move |status| {
+            let _ = app.emit(ALBUM_ART_PROGRESS_EVENT, status);
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn pause_album_art_backfill(state: State<'_, AppState>) -> CommandResult<AlbumArtTaskStatus> {
+    state
+        .album_art
+        .pause_album_backfill()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_metadata_lookup_task_status(
+    state: State<'_, AppState>,
+) -> CommandResult<MetadataLookupTaskStatus> {
+    state
+        .album_art
+        .metadata_task_status()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn start_local_metadata_lookup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    snapshot_id: String,
+    selection: LibrarySelectionRequest,
+) -> CommandResult<MetadataLookupTaskStatus> {
+    let tracks = state
+        .library
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("library").to_string())?
+        .selected_tracks(snapshot_id.trim(), &selection)
+        .map_err(|error| error.to_string())?;
+    if tracks.is_empty() {
+        return Err("the metadata lookup selection is empty".to_owned());
+    }
+    state
+        .album_art
+        .start_metadata_lookup(tracks, move |status| {
+            let _ = app.emit(METADATA_LOOKUP_PROGRESS_EVENT, status);
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn resume_local_metadata_lookup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<MetadataLookupTaskStatus> {
+    state
+        .album_art
+        .resume_metadata_lookup(move |status| {
+            let _ = app.emit(METADATA_LOOKUP_PROGRESS_EVENT, status);
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn pause_local_metadata_lookup(
+    state: State<'_, AppState>,
+) -> CommandResult<MetadataLookupTaskStatus> {
+    state
+        .album_art
+        .pause_metadata_lookup()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn create_local_library_playback_queue(
+    state: State<'_, AppState>,
+    snapshot_id: String,
+    start_index: usize,
+    selection: Option<LibrarySelectionRequest>,
+) -> CommandResult<LibraryPlaybackQueue> {
+    let mut library = state
+        .library
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("library").to_string())?;
+    library
+        .create_playback_queue(snapshot_id.trim(), start_index, selection.as_ref())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn local_library_queue_track(
+    state: State<'_, AppState>,
+    queue_id: String,
+    index: usize,
+) -> CommandResult<LibraryQueueTrack> {
+    let library = state
+        .library
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("library").to_string())?;
+    library
+        .queue_track(queue_id.trim(), index)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn increment_local_track_play_count(
+    state: State<'_, AppState>,
+    track_id: i64,
+) -> CommandResult<i64> {
+    let play_count = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| AppError::StatePoisoned("db").to_string())?;
+        db.execute(
+            "UPDATE local_tracks SET play_count = play_count + 1 WHERE id = ?1",
+            params![track_id],
+        )
+        .map_err(|error| error.to_string())?;
+        db.query_row(
+            "SELECT play_count FROM local_tracks WHERE id = ?1",
+            params![track_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| AppError::TrackNotFound(track_id).to_string())?
+    };
+
+    let mut library = state
+        .library
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("library").to_string())?;
+    library.update_play_count(track_id, play_count);
+    Ok(play_count)
 }
 
 #[tauri::command]
@@ -1104,6 +1418,15 @@ fn scan_folder(app: &AppHandle, state: &AppState, folder: &Path) -> AppResult<()
         }
     }
 
+    {
+        let db = state.db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
+        let mut library = state
+            .library
+            .lock()
+            .map_err(|_| AppError::StatePoisoned("library"))?;
+        library.reload(&db)?;
+    }
+
     update_scan_status(
         app,
         state,
@@ -1138,6 +1461,13 @@ fn collect_supported_audio_files(folder: &Path) -> DiscoveredAudioFiles {
 }
 
 fn is_supported_audio_file(path: &Path) -> bool {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(".fika-metadata-"))
+    {
+        return false;
+    }
     path.extension()
         .and_then(|extension| extension.to_str())
         .map(|extension| {
@@ -1158,10 +1488,28 @@ fn extract_local_track(path: &Path) -> AppResult<LocalTrackDraft> {
         .map(str::to_owned)
         .unwrap_or_else(|| file_path.clone());
 
-    let tagged_file = lofty::read_from_path(path).map_err(|source| AppError::Metadata {
-        path: file_path.clone(),
-        source,
-    })?;
+    let (tagged_file, codec) = if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("m4a"))
+    {
+        let mut file = fs::File::open(path)?;
+        let mp4_file = Mp4File::read_from(&mut file, ParseOptions::new()).map_err(|source| {
+            AppError::Metadata {
+                path: file_path.clone(),
+                source,
+            }
+        })?;
+        let codec = mp4_codec_label(*mp4_file.properties().codec()).to_owned();
+        (mp4_file.into(), Some(codec))
+    } else {
+        let tagged_file = lofty::read_from_path(path).map_err(|source| AppError::Metadata {
+            path: file_path.clone(),
+            source,
+        })?;
+        let codec = codec_label(tagged_file.file_type()).map(str::to_owned);
+        (tagged_file, codec)
+    };
     let tag = tagged_file
         .primary_tag()
         .or_else(|| tagged_file.first_tag());
@@ -1172,7 +1520,8 @@ fn extract_local_track(path: &Path) -> AppResult<LocalTrackDraft> {
         .unwrap_or_else(|| file_name.clone());
 
     let title = tag_string(tag, |tag| tag.title()).unwrap_or(fallback_title);
-    let duration_seconds = seconds_to_i64(tagged_file.properties().duration().as_secs());
+    let properties = tagged_file.properties();
+    let duration_seconds = seconds_to_i64(properties.duration().as_secs());
 
     Ok(LocalTrackDraft {
         file_path,
@@ -1180,12 +1529,40 @@ fn extract_local_track(path: &Path) -> AppResult<LocalTrackDraft> {
         title,
         artist: tag_string(tag, |tag| tag.artist()),
         album: tag_string(tag, |tag| tag.album()),
+        album_artist: tag_item_string(tag, ItemKey::AlbumArtist),
+        genre: tag_string(tag, |tag| tag.genre()),
+        year: tag
+            .and_then(|tag| tag.date())
+            .map(|date| i64::from(date.year)),
+        codec,
+        bitrate_kbps: properties.audio_bitrate().map(i64::from),
+        sample_rate_hz: properties.sample_rate().map(i64::from),
         duration_seconds,
         track_number: tag.and_then(|tag| tag.track()).map(i64::from),
         disc_number: tag.and_then(|tag| tag.disk()).map(i64::from),
         file_size_bytes: u64_to_i64(metadata.len()),
         modified_at: metadata.modified().ok().and_then(system_time_to_timestamp),
     })
+}
+
+fn codec_label(file_type: FileType) -> Option<&'static str> {
+    match file_type {
+        FileType::Aac => Some("AAC"),
+        FileType::Flac => Some("FLAC"),
+        FileType::Mpeg => Some("MP3"),
+        FileType::Mp4 => Some("MP4 Audio"),
+        _ => None,
+    }
+}
+
+fn mp4_codec_label(codec: Mp4Codec) -> &'static str {
+    match codec {
+        Mp4Codec::AAC => "AAC",
+        Mp4Codec::ALAC => "ALAC",
+        Mp4Codec::MP3 => "MP3",
+        Mp4Codec::FLAC => "FLAC",
+        _ => "MP4 Audio",
+    }
 }
 
 fn tag_string<'tag>(
@@ -1195,6 +1572,13 @@ fn tag_string<'tag>(
     tag.and_then(getter)
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+fn tag_item_string(tag: Option<&Tag>, key: ItemKey) -> Option<String> {
+    tag.and_then(|tag| tag.get_string(key))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 fn upsert_local_track(connection: &Connection, draft: &LocalTrackDraft) -> AppResult<LocalTrack> {
@@ -1208,24 +1592,41 @@ fn upsert_local_track(connection: &Connection, draft: &LocalTrackDraft) -> AppRe
             title,
             artist,
             album,
+            album_artist,
+            genre,
+            year,
+            codec,
+            bitrate_kbps,
+            sample_rate_hz,
             duration_seconds,
             track_number,
             disc_number,
             file_size_bytes,
             modified_at,
-            indexed_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            indexed_at,
+            metadata_version
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+            ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+        )
         ON CONFLICT(file_path) DO UPDATE SET
             file_name = excluded.file_name,
             title = excluded.title,
             artist = excluded.artist,
             album = excluded.album,
+            album_artist = excluded.album_artist,
+            genre = excluded.genre,
+            year = excluded.year,
+            codec = excluded.codec,
+            bitrate_kbps = excluded.bitrate_kbps,
+            sample_rate_hz = excluded.sample_rate_hz,
             duration_seconds = excluded.duration_seconds,
             track_number = excluded.track_number,
             disc_number = excluded.disc_number,
             file_size_bytes = excluded.file_size_bytes,
             modified_at = excluded.modified_at,
-            indexed_at = excluded.indexed_at
+            indexed_at = excluded.indexed_at,
+            metadata_version = excluded.metadata_version
         ",
         params![
             draft.file_path,
@@ -1233,19 +1634,26 @@ fn upsert_local_track(connection: &Connection, draft: &LocalTrackDraft) -> AppRe
             draft.title,
             draft.artist,
             draft.album,
+            draft.album_artist,
+            draft.genre,
+            draft.year,
+            draft.codec,
+            draft.bitrate_kbps,
+            draft.sample_rate_hz,
             draft.duration_seconds,
             draft.track_number,
             draft.disc_number,
             draft.file_size_bytes,
             draft.modified_at,
             indexed_at,
+            LIBRARY_METADATA_VERSION,
         ],
     )?;
 
     track_by_path(connection, &draft.file_path)
 }
 
-fn list_tracks(connection: &Connection) -> AppResult<Vec<LocalTrack>> {
+fn list_tracks(connection: &Connection) -> rusqlite::Result<Vec<LocalTrack>> {
     let mut statement = connection.prepare(
         "
         SELECT
@@ -1255,12 +1663,19 @@ fn list_tracks(connection: &Connection) -> AppResult<Vec<LocalTrack>> {
             title,
             artist,
             album,
+            album_artist,
+            genre,
+            year,
+            codec,
+            bitrate_kbps,
+            sample_rate_hz,
             duration_seconds,
             track_number,
             disc_number,
             file_size_bytes,
             modified_at,
-            indexed_at
+            indexed_at,
+            play_count
         FROM local_tracks
         ORDER BY artist IS NULL, artist COLLATE NOCASE, album IS NULL, album COLLATE NOCASE, track_number IS NULL, track_number, title COLLATE NOCASE
         ",
@@ -1284,12 +1699,19 @@ fn track_by_path(connection: &Connection, file_path: &str) -> AppResult<LocalTra
             title,
             artist,
             album,
+            album_artist,
+            genre,
+            year,
+            codec,
+            bitrate_kbps,
+            sample_rate_hz,
             duration_seconds,
             track_number,
             disc_number,
             file_size_bytes,
             modified_at,
-            indexed_at
+            indexed_at,
+            play_count
         FROM local_tracks
         WHERE file_path = ?1
         ",
@@ -1310,12 +1732,19 @@ fn track_by_id(connection: &Connection, track_id: i64) -> AppResult<Option<Local
             title,
             artist,
             album,
+            album_artist,
+            genre,
+            year,
+            codec,
+            bitrate_kbps,
+            sample_rate_hz,
             duration_seconds,
             track_number,
             disc_number,
             file_size_bytes,
             modified_at,
-            indexed_at
+            indexed_at,
+            play_count
         FROM local_tracks
         WHERE id = ?1
         ",
@@ -1334,12 +1763,19 @@ fn local_track_from_row(row: &Row<'_>) -> rusqlite::Result<LocalTrack> {
         title: row.get(3)?,
         artist: row.get(4)?,
         album: row.get(5)?,
-        duration_seconds: row.get(6)?,
-        track_number: row.get(7)?,
-        disc_number: row.get(8)?,
-        file_size_bytes: row.get(9)?,
-        modified_at: row.get(10)?,
-        indexed_at: row.get(11)?,
+        album_artist: row.get(6)?,
+        genre: row.get(7)?,
+        year: row.get(8)?,
+        codec: row.get(9)?,
+        bitrate_kbps: row.get(10)?,
+        sample_rate_hz: row.get(11)?,
+        duration_seconds: row.get(12)?,
+        track_number: row.get(13)?,
+        disc_number: row.get(14)?,
+        file_size_bytes: row.get(15)?,
+        modified_at: row.get(16)?,
+        indexed_at: row.get(17)?,
+        play_count: row.get(18)?,
     })
 }
 
@@ -1442,6 +1878,12 @@ mod tests {
             title: title.to_owned(),
             artist: artist.map(str::to_owned),
             album: Some("Test Album".to_owned()),
+            album_artist: artist.map(str::to_owned),
+            genre: Some("Test Genre".to_owned()),
+            year: Some(2024),
+            codec: Some("MP3".to_owned()),
+            bitrate_kbps: Some(320),
+            sample_rate_hz: Some(44_100),
             duration_seconds: Some(180),
             track_number: Some(1),
             disc_number: Some(1),
@@ -1474,10 +1916,10 @@ mod tests {
 
     #[test]
     fn is_supported_audio_file_should_reject_unsupported_or_missing_extensions() {
-        let actual = ["cover.jpg", "notes.txt", "track"]
+        let actual = ["cover.jpg", "notes.txt", "track", ".fika-metadata-abc.flac"]
             .map(|path| is_supported_audio_file(Path::new(path)));
 
-        assert_eq!(actual, [false, false, false]);
+        assert_eq!(actual, [false, false, false, false]);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { defineComponent } from "vue";
 import App from "./App.vue";
 
 const tauriMocks = vi.hoisted(() => ({
@@ -23,6 +24,49 @@ vi.mock("./components/PluginManager.vue", () => ({
   },
 }));
 
+vi.mock("./components/LibraryBrowser.vue", () => ({
+  default: defineComponent({
+    name: "LibraryBrowser",
+    emits: ["playbackQueue", "summary", "error", "index"],
+    setup(_, { emit }) {
+      function playSecond() {
+        emit(
+          "playbackQueue",
+          {
+            queueId: "library-queue",
+            total: 2,
+            currentIndex: 1,
+            track: {
+              id: 2,
+              filePath: "/music/second.mp3",
+              fileName: "second.mp3",
+              title: "Second",
+              artist: "Artist",
+              album: "Album",
+              albumArtist: "Artist",
+              genre: "Pop",
+              year: 2024,
+              codec: "MP3",
+              bitrateKbps: 320,
+              sampleRateHz: 44100,
+              durationSeconds: 181,
+              trackNumber: 2,
+              discNumber: 1,
+              fileSizeBytes: 2048,
+              modifiedAt: 1,
+              indexedAt: 1,
+              playCount: 0,
+            },
+          },
+          true,
+        );
+      }
+      return { playSecond };
+    },
+    template: '<button type="button" aria-label="Play Second" @click="playSecond">Library browser</button>',
+  }),
+}));
+
 vi.mock("./components/NeteaseSource.vue", () => ({
   default: {
     name: "NeteaseSource",
@@ -39,9 +83,6 @@ describe("application shell", () => {
     vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
     tauriMocks.listen.mockResolvedValue(vi.fn());
     tauriMocks.invoke.mockImplementation((command: string) => {
-      if (command === "list_local_tracks") {
-        return Promise.resolve([]);
-      }
       if (command === "get_scan_status") {
         return Promise.resolve({
           isRunning: false,
@@ -115,40 +156,7 @@ describe("application shell", () => {
   });
 
   it("navigates local tracks and wraps at the end in repeat mode", async () => {
-    const localTracks = [
-      {
-        id: 1,
-        filePath: "/music/first.mp3",
-        fileName: "first.mp3",
-        title: "First",
-        artist: "Artist",
-        album: "Album",
-        durationSeconds: 180,
-        trackNumber: 1,
-        discNumber: 1,
-        fileSizeBytes: 1024,
-        modifiedAt: 1,
-        indexedAt: 1,
-      },
-      {
-        id: 2,
-        filePath: "/music/second.mp3",
-        fileName: "second.mp3",
-        title: "Second",
-        artist: "Artist",
-        album: "Album",
-        durationSeconds: 181,
-        trackNumber: 2,
-        discNumber: 1,
-        fileSizeBytes: 2048,
-        modifiedAt: 1,
-        indexedAt: 1,
-      },
-    ];
-    tauriMocks.invoke.mockImplementation((command: string, payload?: { trackId?: number }) => {
-      if (command === "list_local_tracks") {
-        return Promise.resolve(localTracks);
-      }
+    tauriMocks.invoke.mockImplementation((command: string, payload?: { trackId?: number; index?: number }) => {
       if (command === "get_scan_status") {
         return Promise.resolve({
           isRunning: false,
@@ -167,6 +175,32 @@ describe("application shell", () => {
         return Promise.resolve({
           filePath: payload?.trackId === 2 ? "/music/second.mp3" : "/music/first.mp3",
           mimeType: "audio/mpeg",
+        });
+      }
+      if (command === "local_library_queue_track") {
+        return Promise.resolve({
+          index: payload?.index ?? 0,
+          track: {
+            id: 1,
+            filePath: "/music/first.mp3",
+            fileName: "first.mp3",
+            title: "First",
+            artist: "Artist",
+            album: "Album",
+            albumArtist: "Artist",
+            genre: "Pop",
+            year: 2024,
+            codec: "MP3",
+            bitrateKbps: 320,
+            sampleRateHz: 44100,
+            durationSeconds: 180,
+            trackNumber: 1,
+            discNumber: 1,
+            fileSizeBytes: 1024,
+            modifiedAt: 1,
+            indexedAt: 1,
+            playCount: 0,
+          },
         });
       }
       if (command === "local_track_playback_details") {

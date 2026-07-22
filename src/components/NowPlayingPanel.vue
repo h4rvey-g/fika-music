@@ -12,6 +12,7 @@ const props = defineProps<{
   lyricsError: string | null;
   playbackPosition: number;
   canRetry: boolean;
+  fillHeight?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -86,7 +87,8 @@ watch(activeLyricIndex, async (index) => {
 
 <template>
   <section
-    class="flex h-[36rem] flex-col overflow-hidden rounded border border-base-300 bg-base-100"
+    class="flex min-h-0 flex-col overflow-hidden rounded border border-base-300 bg-base-100"
+    :class="fillHeight ? 'h-full' : 'h-[36rem]'"
     aria-label="Now playing details"
   >
     <div class="grid shrink-0 place-items-center border-b border-base-300 bg-base-200 p-4">

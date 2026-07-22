@@ -9,7 +9,12 @@ use fika_music_lib::netease::{
 use fika_music_lib::plugin_system::PluginRecord;
 use fika_music_lib::source_runtime::{SourceRequest, SourceRequestOutcome};
 use fika_music_lib::{
-    LocalTrack, MediaSource, NeteaseCommandError, PluginCommandError, RemoteCommandError,
+    AlbumArtSettings, AlbumArtTaskStatus, AlbumCoverCandidate, AlbumCoverResult, AlbumCoverStatus,
+    LibraryAlbumGroup, LibraryGroupToggleResult, LibraryPlaybackQueue, LibraryQueryPage,
+    LibraryQueryRequest, LibraryQueueTrack, LibrarySelectionRange, LibrarySelectionRequest,
+    LibrarySortDirection, LibrarySortField, LibraryTaskState, LibraryTextField, LibraryViewItem,
+    LibraryViewItemKind, LibraryViewRange, LocalTrack, MediaSource, MetadataLookupItemResult,
+    MetadataLookupTaskStatus, NeteaseCommandError, PluginCommandError, RemoteCommandError,
     RemoteMediaSource, RemoteSearchResults, ScanProgressEvent, ScanStatus, TAURI_COMMAND_NAMES,
 };
 use ts_rs::{Config, TS};
@@ -53,6 +58,28 @@ fn generate(output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         .with_out_dir(output_dir)
         .with_large_int("number");
     export_all::<LocalTrack>(&config)?;
+    export_all::<LibraryTextField>(&config)?;
+    export_all::<LibrarySortField>(&config)?;
+    export_all::<LibrarySortDirection>(&config)?;
+    export_all::<LibraryQueryRequest>(&config)?;
+    export_all::<LibraryViewItemKind>(&config)?;
+    export_all::<LibraryAlbumGroup>(&config)?;
+    export_all::<LibraryViewItem>(&config)?;
+    export_all::<LibraryQueryPage>(&config)?;
+    export_all::<LibraryViewRange>(&config)?;
+    export_all::<LibraryGroupToggleResult>(&config)?;
+    export_all::<AlbumCoverStatus>(&config)?;
+    export_all::<AlbumCoverCandidate>(&config)?;
+    export_all::<AlbumCoverResult>(&config)?;
+    export_all::<AlbumArtSettings>(&config)?;
+    export_all::<LibraryTaskState>(&config)?;
+    export_all::<AlbumArtTaskStatus>(&config)?;
+    export_all::<MetadataLookupItemResult>(&config)?;
+    export_all::<MetadataLookupTaskStatus>(&config)?;
+    export_all::<LibrarySelectionRange>(&config)?;
+    export_all::<LibrarySelectionRequest>(&config)?;
+    export_all::<LibraryPlaybackQueue>(&config)?;
+    export_all::<LibraryQueueTrack>(&config)?;
     export_all::<MediaSource>(&config)?;
     export_all::<LocalTrackPlaybackDetails>(&config)?;
     export_all::<TrackLyricsQuery>(&config)?;

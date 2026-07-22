@@ -2,7 +2,7 @@ use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
 
 #[cfg(test)]
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 5;
 
 const INITIAL_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS local_tracks (
@@ -93,7 +93,84 @@ fn migrations() -> Migrations<'static> {
             }
             Ok(())
         }),
+        M::up_with_hook("", |transaction| {
+            add_column_if_missing(transaction, "local_tracks", "album_artist", "TEXT")?;
+            add_column_if_missing(transaction, "local_tracks", "genre", "TEXT")?;
+            add_column_if_missing(transaction, "local_tracks", "year", "INTEGER")?;
+            add_column_if_missing(transaction, "local_tracks", "codec", "TEXT")?;
+            add_column_if_missing(transaction, "local_tracks", "bitrate_kbps", "INTEGER")?;
+            add_column_if_missing(transaction, "local_tracks", "sample_rate_hz", "INTEGER")?;
+            add_column_if_missing(
+                transaction,
+                "local_tracks",
+                "play_count",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            add_column_if_missing(
+                transaction,
+                "local_tracks",
+                "metadata_version",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            Ok(())
+        }),
+        M::up(
+            "
+            CREATE TABLE IF NOT EXISTS app_settings (
+                setting_key TEXT PRIMARY KEY,
+                setting_value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS album_art_lookups (
+                group_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                release_group_id TEXT,
+                candidates_json TEXT,
+                message TEXT,
+                checked_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_album_art_lookups_status
+                ON album_art_lookups(status, checked_at);
+            ",
+        ),
+        M::up_with_hook("", |transaction| {
+            add_column_if_missing(
+                transaction,
+                "album_art_lookups",
+                "written_tracks",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            add_column_if_missing(
+                transaction,
+                "album_art_lookups",
+                "failed_tracks",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            Ok(())
+        }),
     ])
+}
+
+fn add_column_if_missing(
+    transaction: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> rusqlite::Result<()> {
+    let exists = transaction.query_row(
+        &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('{table}') WHERE name = ?1"),
+        [column],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !exists {
+        transaction.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 pub fn initialize(connection: &mut Connection) -> Result<(), rusqlite_migration::Error> {
@@ -122,6 +199,30 @@ mod tests {
             .expect("plugin schema should be readable")
     }
 
+    fn has_library_column(connection: &Connection, column: &str) -> bool {
+        has_column(connection, "local_tracks", column)
+    }
+
+    fn has_column(connection: &Connection, table: &str, column: &str) -> bool {
+        connection
+            .query_row(
+                &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('{table}') WHERE name = ?1"),
+                [column],
+                |row| row.get(0),
+            )
+            .expect("library schema should be readable")
+    }
+
+    fn has_table(connection: &Connection, table: &str) -> bool {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .expect("table existence should be readable")
+    }
+
     #[test]
     fn initialize_should_create_the_latest_schema_for_a_new_database() {
         let mut connection = Connection::open_in_memory().expect("database should open");
@@ -130,6 +231,15 @@ mod tests {
 
         assert_eq!(user_version(&connection), CURRENT_SCHEMA_VERSION);
         assert!(has_manifest_fingerprint(&connection));
+        assert!(has_library_column(&connection, "play_count"));
+        assert!(has_library_column(&connection, "metadata_version"));
+        assert!(has_table(&connection, "app_settings"));
+        assert!(has_table(&connection, "album_art_lookups"));
+        assert!(has_column(
+            &connection,
+            "album_art_lookups",
+            "failed_tracks"
+        ));
     }
 
     #[test]
@@ -143,6 +253,7 @@ mod tests {
 
         assert_eq!(user_version(&connection), CURRENT_SCHEMA_VERSION);
         assert!(has_manifest_fingerprint(&connection));
+        assert!(has_library_column(&connection, "album_artist"));
     }
 
     #[test]
@@ -163,5 +274,68 @@ mod tests {
 
         assert_eq!(user_version(&connection), CURRENT_SCHEMA_VERSION);
         assert!(has_manifest_fingerprint(&connection));
+        assert!(has_library_column(&connection, "sample_rate_hz"));
+    }
+
+    #[test]
+    fn initialize_should_upgrade_version_three_with_album_art_tables() {
+        let mut connection = Connection::open_in_memory().expect("database should open");
+        migrations()
+            .to_version(&mut connection, 3)
+            .expect("version three should initialize");
+
+        initialize(&mut connection).expect("latest migration should run");
+
+        assert_eq!(
+            (
+                user_version(&connection),
+                has_table(&connection, "app_settings"),
+                has_table(&connection, "album_art_lookups"),
+                has_column(&connection, "album_art_lookups", "written_tracks"),
+            ),
+            (CURRENT_SCHEMA_VERSION, true, true, true),
+        );
+    }
+
+    #[test]
+    fn initialize_should_upgrade_version_four_without_losing_album_art_lookups() {
+        let mut connection = Connection::open_in_memory().expect("database should open");
+        migrations()
+            .to_version(&mut connection, 4)
+            .expect("version four should initialize");
+        connection
+            .execute(
+                "INSERT INTO album_art_lookups (
+                    group_id, status, release_group_id, candidates_json, message, checked_at
+                 ) VALUES ('album-1', 'partial', 'release-1', NULL, 'one failed', 1)",
+                [],
+            )
+            .expect("album lookup should insert");
+
+        initialize(&mut connection).expect("latest migration should run");
+
+        let lookup = connection
+            .query_row(
+                "SELECT status, message, written_tracks, failed_tracks
+                 FROM album_art_lookups WHERE group_id = 'album-1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .expect("album lookup should remain readable");
+
+        assert_eq!(
+            (user_version(&connection), lookup),
+            (
+                CURRENT_SCHEMA_VERSION,
+                ("partial".to_owned(), "one failed".to_owned(), 0, 0),
+            ),
+        );
     }
 }

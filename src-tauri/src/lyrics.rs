@@ -5,7 +5,6 @@ use lofty::id3::v2::{
     Frame, Id3v2Tag, SyncTextContentType, SynchronizedTextFrame, TimestampFormat,
 };
 use lofty::mpeg::MpegFile;
-use lofty::picture::{Picture, PictureType};
 use lofty::tag::ItemKey;
 use netease_music::{LyricParams, NeteaseMusicClient, SearchParams};
 use reqwest::blocking::Client;
@@ -34,7 +33,6 @@ const MATCH_SCORE_PREFERENCE_WINDOW: f64 = 15.0;
 const MAX_DURATION_DIFFERENCE_SECONDS: f64 = 4.0;
 const MAX_LYRICS_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_NETWORK_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_COVER_BYTES: u64 = 16 * 1024 * 1024;
 const NETWORK_PROVIDER_TIMEOUT: Duration = Duration::from_secs(6);
 const NETWORK_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PROVIDER_CANDIDATES: usize = 20;
@@ -944,10 +942,7 @@ where
 
 pub fn resolve_local_track(path: &Path, query: &TrackLyricsQuery) -> LocalTrackPlaybackDetails {
     let tagged_file = lofty::read_from_path(path).ok();
-    let cover_data_url = tagged_file
-        .as_ref()
-        .and_then(embedded_cover_data_url)
-        .or_else(|| sidecar_cover_data_url(path));
+    let cover_data_url = crate::album_art::embedded_cover_data_url(path);
 
     let embedded = tagged_file
         .as_ref()
@@ -1680,103 +1675,6 @@ fn persist_downloaded_lyrics(audio_path: &Path, text: &str) -> Result<PathBuf, s
             Err(error)
         }
     }
-}
-
-fn embedded_cover_data_url(tagged_file: &TaggedFile) -> Option<String> {
-    for tag in tagged_file.tags() {
-        if let Some(picture) = tag.get_picture_type(PictureType::CoverFront) {
-            if let Some(data_url) = picture_data_url(picture) {
-                return Some(data_url);
-            }
-        }
-    }
-    tagged_file
-        .tags()
-        .iter()
-        .find_map(|tag| tag.pictures().iter().find_map(picture_data_url))
-}
-
-fn picture_data_url(picture: &Picture) -> Option<String> {
-    if picture.data().is_empty() || picture.data().len() as u64 > MAX_COVER_BYTES {
-        return None;
-    }
-    let mime_type = picture
-        .mime_type()
-        .map(|mime_type| mime_type.as_str())
-        .or_else(|| sniff_image_mime(picture.data()))?;
-    Some(data_url(mime_type, picture.data()))
-}
-
-fn sidecar_cover_data_url(audio_path: &Path) -> Option<String> {
-    let path = find_sidecar_cover(audio_path)?;
-    let metadata = fs::metadata(&path).ok()?;
-    if metadata.len() == 0 || metadata.len() > MAX_COVER_BYTES {
-        return None;
-    }
-    let bytes = fs::read(&path).ok()?;
-    let mime_type = mime_guess::from_path(&path)
-        .first_raw()
-        .filter(|mime_type| mime_type.starts_with("image/"))
-        .or_else(|| sniff_image_mime(&bytes))?;
-    Some(data_url(mime_type, &bytes))
-}
-
-fn find_sidecar_cover(audio_path: &Path) -> Option<PathBuf> {
-    let directory = audio_path.parent()?;
-    let audio_stem = audio_path.file_stem()?.to_string_lossy().to_lowercase();
-    const GENERIC_NAMES: [&str; 4] = ["cover", "folder", "front", "album"];
-    let mut candidates = fs::read_dir(directory)
-        .ok()?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file())
-        .filter_map(|path| {
-            let extension = path.extension()?.to_string_lossy().to_ascii_lowercase();
-            let extension_rank = match extension.as_str() {
-                "jpg" | "jpeg" => 0_u8,
-                "png" => 1_u8,
-                "webp" => 2_u8,
-                "gif" => 3_u8,
-                "bmp" => 4_u8,
-                _ => return None,
-            };
-            let stem = path.file_stem()?.to_string_lossy().to_lowercase();
-            let name_rank = if stem == audio_stem {
-                0_u8
-            } else if let Some(index) = GENERIC_NAMES.iter().position(|name| stem == *name) {
-                u8::try_from(index + 1).ok()?
-            } else {
-                return None;
-            };
-            Some((name_rank, extension_rank, path))
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        (left.0, left.1)
-            .cmp(&(right.0, right.1))
-            .then_with(|| left.2.cmp(&right.2))
-    });
-    candidates.into_iter().next().map(|(_, _, path)| path)
-}
-
-fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if bytes.starts_with(b"BM") {
-        Some("image/bmp")
-    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else {
-        None
-    }
-}
-
-fn data_url(mime_type: &str, bytes: &[u8]) -> String {
-    format!("data:{mime_type};base64,{}", BASE64_STANDARD.encode(bytes))
 }
 
 fn non_empty(value: Option<&str>) -> Option<&str> {

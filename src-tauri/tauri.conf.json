@@ -14,8 +14,10 @@
     "windows": [
       {
         "title": "fika-music",
-        "width": 800,
-        "height": 600
+        "width": 1200,
+        "height": 760,
+        "minWidth": 1000,
+        "minHeight": 650
       }
     ],
     "security": {

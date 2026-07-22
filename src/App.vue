@@ -26,12 +26,16 @@ import {
   Volume2,
   X,
 } from "@lucide/vue";
+import LibraryBrowser from "./components/LibraryBrowser.vue";
 import PluginManager from "./components/PluginManager.vue";
 import NeteaseSource from "./components/NeteaseSource.vue";
 import NowPlayingPanel from "./components/NowPlayingPanel.vue";
 import type { NeteasePlayback } from "./lib/netease-api";
+import { PlayCountTracker } from "./lib/play-count-tracker";
 import { TAURI_COMMANDS } from "./generated/bindings";
 import type {
+  LibraryPlaybackQueue,
+  LibraryQueueTrack,
   LocalTrack,
   LocalTrackPlaybackDetails,
   MediaSource,
@@ -56,6 +60,12 @@ type PlaybackSource = {
   filePath?: string;
   url?: string;
   mimeType: string;
+};
+
+type LibraryBrowserInstance = {
+  refresh: () => Promise<void>;
+  startFirstTrack: () => Promise<void>;
+  updatePlayCount: (trackId: number, playCount: number) => void;
 };
 
 const emptyScanStatus: ScanStatus = {
@@ -103,7 +113,6 @@ const sections = [...mainSections, settingsSection];
 type AppSection = (typeof sections)[number]["id"];
 
 const savedUiPreferences = loadUiPreferences();
-const tracks = ref<LocalTrack[]>([]);
 const scanStatus = ref<ScanStatus>({ ...emptyScanStatus });
 const selectedFolder = ref<string | null>(null);
 const activeSection = ref<AppSection>("local");
@@ -125,7 +134,6 @@ const activeLyrics = ref<ResolvedLyrics | null>(null);
 const activeRemoteLyricsQuery = ref<TrackLyricsQuery | null>(null);
 const isLoadingLyrics = ref(false);
 const lyricsError = ref<string | null>(null);
-const isLoadingTracks = ref(false);
 const isChoosingFolder = ref(false);
 const isStartingScan = ref(false);
 const isPreparingPlayback = ref(false);
@@ -133,6 +141,14 @@ const isResolvingRemote = ref(false);
 const appError = ref<string | null>(null);
 const scanMessage = ref<string | null>(null);
 const audioElement = ref<HTMLAudioElement | null>(null);
+const libraryBrowser = ref<LibraryBrowserInstance | null>(null);
+const libraryTrackCount = ref(0);
+const filteredLibraryTrackCount = ref(0);
+const localQueueId = ref<string | null>(null);
+const localQueueTotal = ref(0);
+const localQueueIndex = ref(-1);
+const queuedLocalTrack = ref<LocalTrack | null>(null);
+const localQueueActive = ref(false);
 const remoteFamily = ref("nianxin");
 const remoteSource = ref("wy");
 const remoteQuality = ref(savedUiPreferences.streamQuality);
@@ -147,31 +163,14 @@ const isCancellingRemoteRequest = ref(false);
 
 let unlistenScanProgress: UnlistenFn | null = null;
 let playbackDetailsGeneration = 0;
+const playCountTracker = new PlayCountTracker();
 
-const hasTracks = computed(() => tracks.value.length > 0);
-const visibleTracks = computed(() => tracks.value.slice(0, 200));
 const currentSection = computed(
   () => sections.find((section) => section.id === activeSection.value) ?? mainSections[0],
 );
 const canScan = computed(
   () => Boolean(selectedFolder.value) && !scanStatus.value.isRunning && !isStartingScan.value,
 );
-const scanPercent = computed(() => {
-  const total = scanStatus.value.discoveredFiles;
-  if (total <= 0) {
-    return scanStatus.value.isRunning ? 1 : 0;
-  }
-
-  return Math.round((scanStatus.value.scannedFiles / total) * 100);
-});
-const libraryDuration = computed(() => {
-  const totalSeconds = tracks.value.reduce(
-    (total, track) => total + (track.durationSeconds ?? 0),
-    0,
-  );
-
-  return formatLongDuration(totalSeconds);
-});
 const nowPlayingTitle = computed(() => activeTrack.value?.title || activeRemoteTitle.value || "Nothing playing");
 const nowPlayingSubtitle = computed(() => {
   if (activeTrack.value) {
@@ -184,20 +183,27 @@ const nowPlayingSubtitle = computed(() => {
 });
 const hasActiveRemoteRequest = computed(() => activeRemoteRequestId.value !== null);
 const volumePercent = computed(() => Math.round(volume.value * 100));
-const activeTrackIndex = computed(() =>
-  activeTrack.value ? tracks.value.findIndex((track) => track.id === activeTrack.value?.id) : -1,
-);
 const canGoPrevious = computed(() => {
-  if (activeTrackIndex.value < 0 || tracks.value.length === 0) {
+  if (
+    !activeTrack.value ||
+    !localQueueActive.value ||
+    !localQueueId.value ||
+    localQueueIndex.value < 0
+  ) {
     return false;
   }
-  return playbackMode.value !== "sequential" || activeTrackIndex.value > 0;
+  return playbackMode.value !== "sequential" || localQueueIndex.value > 0;
 });
 const canGoNext = computed(() => {
-  if (activeTrackIndex.value < 0 || tracks.value.length === 0) {
+  if (
+    !activeTrack.value ||
+    !localQueueActive.value ||
+    !localQueueId.value ||
+    localQueueIndex.value < 0
+  ) {
     return false;
   }
-  return playbackMode.value !== "sequential" || activeTrackIndex.value < tracks.value.length - 1;
+  return playbackMode.value !== "sequential" || localQueueIndex.value < localQueueTotal.value - 1;
 });
 const playbackModeLabel = computed(() => {
   switch (playbackMode.value) {
@@ -237,12 +243,13 @@ watch([themePreference, layoutDensity, remoteQuality, volume, playbackMode], () 
 });
 
 onMounted(async () => {
-  await Promise.all([loadTracks(), loadScanStatus(), bindScanProgress()]);
+  await Promise.all([loadScanStatus(), bindScanProgress()]);
 });
 
 onBeforeUnmount(() => {
   unlistenScanProgress?.();
   playbackDetailsGeneration += 1;
+  sampleListeningTime();
   void cancelActiveRemoteRequest();
 });
 
@@ -295,12 +302,14 @@ async function cancelActiveRemoteRequest() {
 }
 
 async function bindScanProgress() {
-  unlistenScanProgress = await listen<ScanProgressEvent>("library:scan-progress", async (event) => {
+  unlistenScanProgress = await listen<ScanProgressEvent>("library:scan-progress", (event) => {
     scanStatus.value = event.payload.status;
     scanMessage.value = event.payload.message;
-
-    if (!event.payload.status.isRunning) {
-      await loadTracks();
+    if (
+      !event.payload.status.isRunning &&
+      event.payload.message?.startsWith("Indexing failed:")
+    ) {
+      appError.value = event.payload.message;
     }
   });
 }
@@ -308,19 +317,6 @@ async function bindScanProgress() {
 async function loadScanStatus() {
   scanStatus.value = await invoke<ScanStatus>(TAURI_COMMANDS.getScanStatus);
   selectedFolder.value = scanStatus.value.folderPath;
-}
-
-async function loadTracks() {
-  isLoadingTracks.value = true;
-  appError.value = null;
-
-  try {
-    tracks.value = await invoke<LocalTrack[]>(TAURI_COMMANDS.listLocalTracks);
-  } catch (error) {
-    appError.value = normalizeError(error);
-  } finally {
-    isLoadingTracks.value = false;
-  }
 }
 
 async function chooseFolder() {
@@ -456,6 +452,7 @@ function retryLyrics() {
 }
 
 async function playTrack(track: LocalTrack) {
+  sampleListeningTime();
   isPreparingPlayback.value = true;
   appError.value = null;
 
@@ -469,6 +466,8 @@ async function playTrack(track: LocalTrack) {
     activeRemoteProvider.value = null;
     activeSource.value = source;
     audioUrl.value = convertFileSrc(source.filePath);
+    queuedLocalTrack.value = track;
+    resetListeningSession();
     void loadLocalTrackPlaybackDetails(track);
 
     await nextTick();
@@ -483,6 +482,34 @@ async function playTrack(track: LocalTrack) {
   } finally {
     isPreparingPlayback.value = false;
   }
+}
+
+async function handleLibraryPlaybackQueue(queue: LibraryPlaybackQueue, autoplay: boolean) {
+  localQueueId.value = queue.queueId;
+  localQueueTotal.value = queue.total;
+  localQueueIndex.value = queue.currentIndex;
+  queuedLocalTrack.value = queue.track;
+  localQueueActive.value = autoplay;
+  if (autoplay) {
+    await playTrack(queue.track);
+  }
+}
+
+function clearLocalPlaybackQueue() {
+  localQueueId.value = null;
+  localQueueTotal.value = 0;
+  localQueueIndex.value = -1;
+  queuedLocalTrack.value = null;
+  localQueueActive.value = false;
+}
+
+function updateLibrarySummary(summary: { libraryTotal: number; filteredTotal: number }) {
+  libraryTrackCount.value = summary.libraryTotal;
+  filteredLibraryTrackCount.value = summary.filteredTotal;
+}
+
+function showLibraryError(message: string) {
+  appError.value = message;
 }
 
 async function playRemoteTrack() {
@@ -501,6 +528,8 @@ async function playRemoteTrack() {
   const requestId = beginRemoteRequest();
 
   try {
+    sampleListeningTime();
+    clearLocalPlaybackQueue();
     const source = await invoke<RemoteMediaSource>(
       TAURI_COMMANDS.resolveImportedLxTemplateMusicUrl,
       {
@@ -584,6 +613,8 @@ async function playRemoteSearchResult(result: SourceSearchResult) {
   const requestId = beginRemoteRequest();
 
   try {
+    sampleListeningTime();
+    clearLocalPlaybackQueue();
     const source = await invoke<RemoteMediaSource>(TAURI_COMMANDS.resolveQishuiMusicUrl, {
       musicInfo: result.rawInfo,
       quality: remoteQuality.value,
@@ -617,6 +648,8 @@ async function playRemoteSearchResult(result: SourceSearchResult) {
 }
 
 async function playNeteasePlayback(playback: NeteasePlayback) {
+  sampleListeningTime();
+  clearLocalPlaybackQueue();
   isPreparingPlayback.value = true;
   appError.value = null;
   remoteDiagnostics.value = playback.diagnostics.map((diagnostic) => diagnostic.message);
@@ -647,15 +680,27 @@ async function playNeteasePlayback(playback: NeteasePlayback) {
 }
 
 async function togglePlayback() {
+  if (
+    !localQueueActive.value &&
+    queuedLocalTrack.value &&
+    (!audioElement.value || audioElement.value.ended)
+  ) {
+    localQueueActive.value = true;
+    await playTrack(queuedLocalTrack.value);
+    return;
+  }
   if (!audioElement.value) {
     if (activeTrack.value) {
       await playTrack(activeTrack.value);
       return;
     }
 
-    if (tracks.value[0]) {
-      await playTrack(tracks.value[0]);
+    if (queuedLocalTrack.value) {
+      localQueueActive.value = true;
+      await playTrack(queuedLocalTrack.value);
+      return;
     }
+    await libraryBrowser.value?.startFirstTrack();
     return;
   }
 
@@ -682,57 +727,80 @@ function cyclePlaybackMode() {
 }
 
 async function playPreviousTrack() {
-  const currentIndex = activeTrackIndex.value;
-  if (currentIndex < 0 || tracks.value.length === 0) {
+  if (
+    !activeTrack.value ||
+    !localQueueActive.value ||
+    !localQueueId.value ||
+    localQueueIndex.value < 0 ||
+    localQueueTotal.value === 0
+  ) {
     return;
   }
 
   let previousIndex: number;
   if (playbackMode.value === "shuffle") {
-    previousIndex = randomTrackIndex(currentIndex);
-  } else if (currentIndex > 0) {
-    previousIndex = currentIndex - 1;
+    previousIndex = randomQueueIndex(localQueueIndex.value);
+  } else if (localQueueIndex.value > 0) {
+    previousIndex = localQueueIndex.value - 1;
   } else if (playbackMode.value === "repeat") {
-    previousIndex = tracks.value.length - 1;
+    previousIndex = localQueueTotal.value - 1;
   } else {
     return;
   }
 
-  const track = tracks.value[previousIndex];
-  if (track) {
-    await playTrack(track);
-  }
+  await playLocalQueueTrack(previousIndex);
 }
 
 async function playNextTrack() {
-  const currentIndex = activeTrackIndex.value;
-  if (currentIndex < 0 || tracks.value.length === 0) {
+  if (
+    !activeTrack.value ||
+    !localQueueActive.value ||
+    !localQueueId.value ||
+    localQueueIndex.value < 0 ||
+    localQueueTotal.value === 0
+  ) {
     return;
   }
 
   let nextIndex: number;
   if (playbackMode.value === "shuffle") {
-    nextIndex = randomTrackIndex(currentIndex);
-  } else if (currentIndex < tracks.value.length - 1) {
-    nextIndex = currentIndex + 1;
+    nextIndex = randomQueueIndex(localQueueIndex.value);
+  } else if (localQueueIndex.value < localQueueTotal.value - 1) {
+    nextIndex = localQueueIndex.value + 1;
   } else if (playbackMode.value === "repeat") {
     nextIndex = 0;
   } else {
     return;
   }
 
-  const track = tracks.value[nextIndex];
-  if (track) {
-    await playTrack(track);
+  await playLocalQueueTrack(nextIndex);
+}
+
+async function playLocalQueueTrack(index: number) {
+  const queueId = localQueueId.value;
+  if (!queueId) {
+    return;
+  }
+  try {
+    const queuedTrack = await invoke<LibraryQueueTrack>(TAURI_COMMANDS.localLibraryQueueTrack, {
+      queueId,
+      index,
+    });
+    localQueueIndex.value = queuedTrack.index;
+    queuedLocalTrack.value = queuedTrack.track;
+    localQueueActive.value = true;
+    await playTrack(queuedTrack.track);
+  } catch (error) {
+    appError.value = normalizeError(error);
   }
 }
 
-function randomTrackIndex(currentIndex: number) {
-  if (tracks.value.length <= 1) {
+function randomQueueIndex(currentIndex: number) {
+  if (localQueueTotal.value <= 1) {
     return 0;
   }
 
-  const candidate = Math.floor(Math.random() * (tracks.value.length - 1));
+  const candidate = Math.floor(Math.random() * (localQueueTotal.value - 1));
   return candidate >= currentIndex ? candidate + 1 : candidate;
 }
 
@@ -743,17 +811,37 @@ function updateVolume() {
 }
 
 async function onAudioEnded() {
+  pauseListeningTime();
   isPlaying.value = false;
   playbackPosition.value = playbackDuration.value;
+  if (!localQueueActive.value && localQueueId.value && queuedLocalTrack.value) {
+    localQueueActive.value = true;
+    await playTrack(queuedLocalTrack.value);
+    return;
+  }
   await playNextTrack();
 }
 
 function onAudioPause() {
+  pauseListeningTime();
   isPlaying.value = false;
 }
 
 function onAudioPlay() {
   isPlaying.value = true;
+  if (activeTrack.value) {
+    playCountTracker.start(performance.now());
+  }
+}
+
+function onAudioWaiting() {
+  pauseListeningTime();
+}
+
+function onAudioPlaying() {
+  if (activeTrack.value) {
+    playCountTracker.start(performance.now());
+  }
 }
 
 function onAudioLoadedMetadata() {
@@ -761,7 +849,63 @@ function onAudioLoadedMetadata() {
 }
 
 function onAudioTimeUpdate() {
+  sampleListeningTime();
   syncPlaybackTimeline();
+}
+
+function resetListeningSession() {
+  playCountTracker.reset();
+}
+
+function sampleListeningTime() {
+  const track = activeTrack.value;
+  if (!track) {
+    return;
+  }
+  const duration = playbackDuration.value || track.durationSeconds || 0;
+  if (
+    playCountTracker.sample(
+      performance.now(),
+      duration,
+      audioElement.value?.playbackRate || 1,
+    )
+  ) {
+    void recordPlayCount(track);
+  }
+}
+
+function pauseListeningTime() {
+  const track = activeTrack.value;
+  if (!track) {
+    return;
+  }
+  const duration = playbackDuration.value || track.durationSeconds || 0;
+  if (
+    playCountTracker.pause(
+      performance.now(),
+      duration,
+      audioElement.value?.playbackRate || 1,
+    )
+  ) {
+    void recordPlayCount(track);
+  }
+}
+
+async function recordPlayCount(track: LocalTrack) {
+  try {
+    const playCount = await invoke<number>(TAURI_COMMANDS.incrementLocalTrackPlayCount, {
+      trackId: track.id,
+    });
+    libraryBrowser.value?.updatePlayCount(track.id, playCount);
+    if (activeTrack.value?.id === track.id) {
+      activeTrack.value = { ...activeTrack.value, playCount };
+    }
+    if (queuedLocalTrack.value?.id === track.id) {
+      queuedLocalTrack.value = { ...queuedLocalTrack.value, playCount };
+    }
+  } catch (error) {
+    appError.value = normalizeError(error);
+  }
 }
 
 function syncPlaybackTimeline() {
@@ -808,29 +952,6 @@ function formatDuration(seconds: number | null) {
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = Math.floor(seconds % 60);
   return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
-}
-
-function formatLongDuration(seconds: number) {
-  if (seconds <= 0) {
-    return "0 min";
-  }
-
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.round((seconds % 3600) / 60);
-
-  if (hours === 0) {
-    return `${minutes} min`;
-  }
-
-  return `${hours} hr ${minutes} min`;
-}
-
-function formatFileSize(bytes: number) {
-  if (bytes < 1024 * 1024) {
-    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-  }
-
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function trackSubtitle(track: LocalTrack) {
@@ -941,11 +1062,17 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
         </div>
       </header>
 
-      <main class="min-h-0 flex-1 overflow-y-auto">
+      <main
+        class="min-h-0 flex-1"
+        :class="activeSection === 'local' ? 'overflow-hidden' : 'overflow-y-auto'"
+      >
         <section
           v-if="activeSection === 'local' || activeSection === 'sources'"
-          class="mx-auto flex w-full max-w-7xl flex-col"
-          :class="layoutDensity === 'compact' ? 'gap-3 px-3 py-3 lg:px-4' : 'gap-5 px-4 py-5 lg:px-6'"
+          class="mx-auto flex w-full flex-col"
+          :class="[
+            activeSection === 'local' ? 'h-full min-h-0' : 'max-w-7xl',
+            layoutDensity === 'compact' ? 'gap-3 px-3 py-3 lg:px-4' : 'gap-4 px-4 py-4 lg:px-6',
+          ]"
         >
           <div v-if="appError" role="alert" class="alert alert-error">
             <AlertCircle :size="18" aria-hidden="true" />
@@ -964,107 +1091,35 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
           <div
             :class="
               activeSection === 'local'
-                ? 'grid gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]'
+                ? 'grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_20rem] gap-4'
                 : 'block'
             "
           >
-            <section
+            <LibraryBrowser
               v-if="activeSection === 'local'"
-              class="flex min-h-[28rem] flex-col overflow-hidden rounded border border-base-300 bg-base-100"
-            >
-          <div class="flex flex-col gap-3 border-b border-base-300 p-4 md:flex-row md:items-center md:justify-between">
-            <div>
-              <h2 class="flex items-center gap-2 text-base font-semibold">
-                <Library :size="18" aria-hidden="true" />
-                Library
-              </h2>
-              <p class="mt-1 flex flex-wrap items-center gap-2 text-sm text-base-content/65">
-                <span>{{ tracks.length }} tracks · {{ libraryDuration }}</span>
-                <span v-if="tracks.length > visibleTracks.length" class="badge badge-sm">
-                  Showing first {{ visibleTracks.length }}
-                </span>
-              </p>
-            </div>
-            <button class="btn btn-sm" type="button" :disabled="isLoadingTracks" @click="loadTracks">
-              <RefreshCw :class="{ 'animate-spin': isLoadingTracks }" :size="16" aria-hidden="true" />
-              Refresh
-            </button>
-          </div>
-
-          <div v-if="!hasTracks && !isLoadingTracks" class="grid flex-1 place-items-center p-8 text-center">
-            <div class="max-w-sm">
-              <div class="mx-auto mb-4 flex size-14 items-center justify-center rounded border border-base-300 bg-base-200">
-                <FolderOpen :size="26" aria-hidden="true" />
-              </div>
-              <h3 class="text-base font-semibold">No local tracks indexed</h3>
-              <p class="mt-2 text-sm text-base-content/65">
-                Choose a music folder and index MP3, FLAC, M4A, or AAC files.
-              </p>
-            </div>
-          </div>
-
-          <div v-else class="overflow-x-auto">
-            <table
-              class="table table-zebra"
-              :class="layoutDensity === 'compact' ? 'table-xs' : 'table-sm'"
-            >
-              <thead>
-                <tr>
-                  <th class="w-12"></th>
-                  <th>Track</th>
-                  <th>Artist</th>
-                  <th>Album</th>
-                  <th class="text-right">Time</th>
-                  <th class="text-right">Size</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr
-                  v-for="track in visibleTracks"
-                  :key="track.id"
-                  :class="{ 'bg-base-200': activeTrack?.id === track.id }"
-                >
-                  <td>
-                    <button
-                      class="btn btn-square btn-ghost btn-sm"
-                      type="button"
-                      :disabled="isPreparingPlayback"
-                      :aria-label="
-                        activeTrack?.id === track.id && isPlaying
-                          ? `Pause ${track.title}`
-                          : `Play ${track.title}`
-                      "
-                      @click="
-                        activeTrack?.id === track.id ? togglePlayback() : playTrack(track)
-                      "
-                    >
-                      <Pause v-if="activeTrack?.id === track.id && isPlaying" :size="16" aria-hidden="true" />
-                      <Play v-else :size="16" aria-hidden="true" />
-                    </button>
-                  </td>
-                  <td class="min-w-56">
-                    <div class="font-medium">{{ track.title }}</div>
-                    <div class="max-w-80 truncate text-xs text-base-content/60">{{ track.fileName }}</div>
-                  </td>
-                  <td>{{ track.artist || "Unknown artist" }}</td>
-                  <td>{{ track.album || "Unknown album" }}</td>
-                  <td class="text-right tabular-nums">{{ formatDuration(track.durationSeconds) }}</td>
-                  <td class="text-right tabular-nums">{{ formatFileSize(track.fileSizeBytes) }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
+              ref="libraryBrowser"
+              :active-track-id="activeTrack?.id ?? null"
+              :is-playing="isPlaying"
+              :density="layoutDensity"
+              :scan-status="scanStatus"
+              :scan-message="scanMessage"
+              :can-index="canScan"
+              @playback-queue="handleLibraryPlaybackQueue"
+              @summary="updateLibrarySummary"
+              @error="showLibraryError"
+              @index="startScan"
+            />
 
           <aside
             :class="
               activeSection === 'sources'
                 ? 'mx-auto grid w-full max-w-7xl gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]'
-                : 'flex flex-col gap-4'
+                : 'flex min-h-0 flex-col'
             "
           >
           <NowPlayingPanel
             :class="activeSection === 'sources' ? 'xl:col-start-2 xl:row-start-1' : ''"
+            :fill-height="activeSection === 'local'"
             :title="nowPlayingTitle"
             :subtitle="nowPlayingSubtitle"
             :cover-url="nowPlayingCoverUrl"
@@ -1075,45 +1130,6 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
             :can-retry="Boolean(activeTrack || activeRemoteLyricsQuery)"
             @retry-lyrics="retryLyrics"
           />
-
-          <section
-            v-if="activeSection === 'local'"
-            class="rounded border border-base-300 bg-base-100 p-4"
-          >
-            <h2 class="text-base font-semibold">Indexing</h2>
-            <p class="mt-1 truncate text-sm text-base-content/65">
-              {{ selectedFolder || "No folder selected" }}
-            </p>
-
-            <div class="mt-4 grid grid-cols-2 gap-2 text-sm">
-              <div class="rounded bg-base-200 p-3">
-                <div class="text-xs text-base-content/60">Discovered</div>
-                <div class="font-semibold tabular-nums">{{ scanStatus.discoveredFiles }}</div>
-              </div>
-              <div class="rounded bg-base-200 p-3">
-                <div class="text-xs text-base-content/60">Indexed</div>
-                <div class="font-semibold tabular-nums">{{ scanStatus.indexedTracks }}</div>
-              </div>
-              <div class="rounded bg-base-200 p-3">
-                <div class="text-xs text-base-content/60">Skipped</div>
-                <div class="font-semibold tabular-nums">{{ scanStatus.skippedFiles }}</div>
-              </div>
-              <div class="rounded bg-base-200 p-3">
-                <div class="text-xs text-base-content/60">Errors</div>
-                <div class="font-semibold tabular-nums">{{ scanStatus.errorCount }}</div>
-              </div>
-            </div>
-
-            <progress class="progress mt-4" :value="scanPercent" max="100"></progress>
-            <p class="mt-2 text-sm text-base-content/65">
-              {{ scanMessage || (scanStatus.isRunning ? "Indexing local tracks" : "Idle") }}
-            </p>
-
-            <div v-if="scanStatus.lastError" role="alert" class="alert alert-warning mt-4 alert-soft">
-              <AlertCircle :size="18" aria-hidden="true" />
-              <span class="text-sm">{{ scanStatus.lastError }}</span>
-            </div>
-          </section>
 
           <div
             v-if="activeSection === 'sources'"
@@ -1448,7 +1464,7 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
               <button
                 class="btn btn-circle btn-neutral btn-sm mx-0.5 shrink-0"
                 type="button"
-                :disabled="isPreparingPlayback || (!activeTrack && !activeRemoteTitle && !tracks.length)"
+                :disabled="isPreparingPlayback || (!activeTrack && !activeRemoteTitle && !queuedLocalTrack && !libraryTrackCount)"
                 :aria-label="isPlaying ? 'Pause playback' : 'Play playback'"
                 :title="isPlaying ? 'Pause' : 'Play'"
                 @click="togglePlayback"
@@ -1519,7 +1535,9 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
             @loadedmetadata="onAudioLoadedMetadata"
             @pause="onAudioPause"
             @play="onAudioPlay"
+            @playing="onAudioPlaying"
             @timeupdate="onAudioTimeUpdate"
+            @waiting="onAudioWaiting"
             @error="onAudioError"
           ></audio>
         </div>
@@ -1580,7 +1598,10 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
             {{ selectedFolder || "No music folder" }}
           </div>
           <div class="mt-1 text-sm font-medium tabular-nums">
-            {{ tracks.length }} track{{ tracks.length === 1 ? "" : "s" }} indexed
+            {{ libraryTrackCount.toLocaleString() }} track{{ libraryTrackCount === 1 ? "" : "s" }} indexed
+            <span v-if="filteredLibraryTrackCount !== libraryTrackCount" class="text-base-content/55">
+              · {{ filteredLibraryTrackCount.toLocaleString() }} shown
+            </span>
           </div>
         </div>
       </aside>
