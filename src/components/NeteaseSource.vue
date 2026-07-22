@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import {
   AlertCircle,
   CircleCheck,
@@ -15,7 +16,12 @@ import {
   UserRound,
   X,
 } from "@lucide/vue";
-import { listPlugins, type PluginRecord, type RemoteTrack, type SourcePlaylist, type SourcePlaylistDetail, type SourceQuality } from "../lib/plugin-api";
+import {
+  cancelSourceRequest,
+  listPlugins,
+  type RemoteTrack,
+  type SourceQuality,
+} from "../lib/plugin-api";
 import {
   NETEASE_PLUGIN_ID,
   addNeteasePlaylistTrack,
@@ -30,8 +36,6 @@ import {
   removeNeteasePlaylistTrack,
   resolveNeteaseTrack,
   startNeteaseQrLogin,
-  type NeteaseAccount,
-  type NeteaseMutationAudit,
   type NeteasePlayback,
   type NeteaseQrLoginStart,
 } from "../lib/netease-api";
@@ -50,30 +54,59 @@ type PendingMutation = {
   operation: "add" | "remove";
   track: RemoteTrack;
 };
+type PlaylistMutationVariables = PendingMutation & {
+  accountRef: string;
+  playlistId: string;
+};
 
-const plugin = ref<PluginRecord | null>(null);
-const accounts = ref<NeteaseAccount[]>([]);
+const queryKeys = {
+  plugins: ["plugins"] as const,
+  accounts: ["netease", "accounts"] as const,
+  recommendations: (accountRef: string) =>
+    ["netease", "recommendations", accountRef] as const,
+  playlists: (accountRef: string) => ["netease", "playlists", accountRef] as const,
+  audit: (accountRef: string) => ["netease", "audit", accountRef] as const,
+  playlist: (accountRef: string, playlistId: string) =>
+    ["netease", "playlist", accountRef, playlistId] as const,
+  playlistsForAccount: (accountRef: string) =>
+    ["netease", "playlist", accountRef] as const,
+};
+
+const queryClient = useQueryClient();
 const activeAccountRef = ref("");
 const activeTab = ref<NeteaseTab>("recommendations");
-const recommendations = ref<RemoteTrack[]>([]);
-const playlists = ref<SourcePlaylist[]>([]);
 const selectedPlaylistId = ref("");
-const selectedPlaylist = ref<SourcePlaylistDetail | null>(null);
-const audit = ref<NeteaseMutationAudit[]>([]);
-const diagnostics = ref<string[]>([]);
+const operationDiagnostics = ref<string[]>([]);
 const qrLogin = ref<NeteaseQrLoginStart | null>(null);
 const qrStatus = ref("");
 const pendingMutation = ref<PendingMutation | null>(null);
 const mutationPlaylistId = ref("");
-const sourceError = ref<string | null>(null);
+const manualError = ref<string | null>(null);
+const dismissedQueryError = ref("");
 const sourceNotice = ref<string | null>(null);
-const isLoading = ref(false);
 const isConnecting = ref(false);
 const isPollingQr = ref(false);
 const isPlayingTrackId = ref<string | null>(null);
-const isMutating = ref(false);
 
 let qrPollTimer: ReturnType<typeof setTimeout> | null = null;
+let activePlaybackRequestId: string | null = null;
+
+const pluginsQuery = useQuery({
+  queryKey: queryKeys.plugins,
+  queryFn: listPlugins,
+  staleTime: 0,
+});
+
+const accountsQuery = useQuery({
+  queryKey: queryKeys.accounts,
+  queryFn: listNeteaseAccounts,
+  staleTime: 0,
+});
+
+const plugin = computed(
+  () => pluginsQuery.data.value?.find((record) => record.id === NETEASE_PLUGIN_ID) ?? null,
+);
+const accounts = computed(() => accountsQuery.data.value ?? []);
 
 const isPluginReady = computed(
   () => plugin.value?.enabled === true && plugin.value.state === "enabled",
@@ -81,140 +114,202 @@ const isPluginReady = computed(
 const activeAccount = computed(
   () => accounts.value.find((account) => account.accountRef === activeAccountRef.value) ?? null,
 );
+const workspaceEnabled = computed(
+  () => isPluginReady.value && Boolean(activeAccountRef.value),
+);
+
+const recommendationsQuery = useQuery(() => ({
+  queryKey: queryKeys.recommendations(activeAccountRef.value),
+  enabled: workspaceEnabled.value,
+  queryFn: ({ queryKey, signal }) =>
+    cancellableSourceQuery(signal, (requestId) =>
+      getNeteaseRecommendations(queryKey[2], requestId),
+    ),
+}));
+
+const playlistsQuery = useQuery(() => ({
+  queryKey: queryKeys.playlists(activeAccountRef.value),
+  enabled: workspaceEnabled.value,
+  queryFn: ({ queryKey, signal }) =>
+    cancellableSourceQuery(signal, (requestId) => getNeteasePlaylists(queryKey[2], requestId)),
+}));
+
+const auditQuery = useQuery(() => ({
+  queryKey: queryKeys.audit(activeAccountRef.value),
+  enabled: workspaceEnabled.value,
+  queryFn: ({ queryKey }) => listNeteaseMutationAudit(queryKey[2]),
+}));
+
+const selectedPlaylistQuery = useQuery(() => ({
+  queryKey: queryKeys.playlist(activeAccountRef.value, selectedPlaylistId.value),
+  enabled: workspaceEnabled.value && Boolean(selectedPlaylistId.value),
+  queryFn: ({ queryKey, signal }) =>
+    cancellableSourceQuery(signal, (requestId) =>
+      getNeteasePlaylist(queryKey[2], queryKey[3], requestId),
+    ),
+}));
+
+const disconnectMutation = useMutation({
+  mutationFn: (accountRef: string) => disconnectNeteaseAccount(accountRef),
+});
+
+const playlistMutation = useMutation({
+  mutationFn: ({ operation, accountRef, playlistId, track }: PlaylistMutationVariables) =>
+    operation === "add"
+      ? addNeteasePlaylistTrack(accountRef, playlistId, track)
+      : removeNeteasePlaylistTrack(accountRef, playlistId, track),
+});
+
+const recommendations = computed(() => recommendationsQuery.data.value?.data ?? []);
+const playlists = computed(() => playlistsQuery.data.value?.data ?? []);
+const selectedPlaylist = computed(() => selectedPlaylistQuery.data.value?.data ?? null);
+const audit = computed(() => auditQuery.data.value ?? []);
 const mutablePlaylists = computed(() => playlists.value.filter((playlist) => playlist.canMutate));
 const mutationPlaylist = computed(
   () => playlists.value.find((playlist) => playlist.id === mutationPlaylistId.value) ?? null,
 );
+const isMutating = computed(() => playlistMutation.isPending.value);
+const isLoading = computed(
+  () =>
+    pluginsQuery.isPending.value ||
+    accountsQuery.isPending.value ||
+    recommendationsQuery.isFetching.value ||
+    playlistsQuery.isFetching.value ||
+    auditQuery.isFetching.value ||
+    selectedPlaylistQuery.isFetching.value ||
+    disconnectMutation.isPending.value,
+);
 
-onMounted(() => {
-  void loadInitialState();
+const diagnostics = computed(() => {
+  const messages = [
+    ...(recommendationsQuery.data.value?.diagnostics ?? []),
+    ...(playlistsQuery.data.value?.diagnostics ?? []),
+    ...(selectedPlaylistQuery.data.value?.diagnostics ?? []),
+  ].map((diagnostic) => diagnostic.message);
+  return [...new Set([...messages, ...operationDiagnostics.value])];
 });
 
-onBeforeUnmount(() => {
-  cancelQrLogin();
+const queryErrorMessage = computed(() => {
+  const errors = [
+    queryError("Plugin", pluginsQuery.isError.value, pluginsQuery.error.value),
+    queryError("Accounts", accountsQuery.isError.value, accountsQuery.error.value),
+    queryError(
+      "Recommendations",
+      recommendationsQuery.isError.value,
+      recommendationsQuery.error.value,
+    ),
+    queryError("Playlists", playlistsQuery.isError.value, playlistsQuery.error.value),
+    queryError("Audit", auditQuery.isError.value, auditQuery.error.value),
+    queryError(
+      "Playlist",
+      selectedPlaylistQuery.isError.value,
+      selectedPlaylistQuery.error.value,
+    ),
+  ].filter((message): message is string => Boolean(message));
+  return errors.join(" ");
 });
 
-async function loadInitialState() {
-  isLoading.value = true;
-  sourceError.value = null;
-  try {
-    const [pluginRecords, connectedAccounts] = await Promise.all([
-      listPlugins(),
-      listNeteaseAccounts(),
-    ]);
-    plugin.value = pluginRecords.find((record) => record.id === NETEASE_PLUGIN_ID) ?? null;
-    accounts.value = connectedAccounts;
+const sourceError = computed<string | null>({
+  get() {
+    if (manualError.value) {
+      return manualError.value;
+    }
+    const queryError = queryErrorMessage.value;
+    return queryError && queryError !== dismissedQueryError.value ? queryError : null;
+  },
+  set(value) {
+    if (value === null) {
+      manualError.value = null;
+      dismissedQueryError.value = queryErrorMessage.value;
+    } else {
+      manualError.value = value;
+    }
+  },
+});
+
+watch(
+  () => accountsQuery.data.value,
+  (connectedAccounts) => {
+    if (!connectedAccounts) {
+      return;
+    }
+    if (connectedAccounts.some((account) => account.accountRef === activeAccountRef.value)) {
+      return;
+    }
     activeAccountRef.value =
       connectedAccounts.find((account) => account.status === "active")?.accountRef ??
       connectedAccounts[0]?.accountRef ??
       "";
-    if (isPluginReady.value && activeAccountRef.value) {
-      await loadWorkspace();
+  },
+  { immediate: true },
+);
+
+watch(activeAccountRef, () => {
+  abandonPlaybackRequest();
+  selectedPlaylistId.value = "";
+  operationDiagnostics.value = [];
+  pendingMutation.value = null;
+  manualError.value = null;
+  dismissedQueryError.value = "";
+});
+
+watch(
+  playlists,
+  (availablePlaylists) => {
+    if (!availablePlaylists.some((playlist) => playlist.id === selectedPlaylistId.value)) {
+      selectedPlaylistId.value = availablePlaylists[0]?.id ?? "";
     }
-  } catch (error) {
-    sourceError.value = normalizeError(error);
-  } finally {
-    isLoading.value = false;
+  },
+  { immediate: true },
+);
+
+watch(queryErrorMessage, (message, previousMessage) => {
+  if (message !== previousMessage) {
+    dismissedQueryError.value = "";
   }
-}
+});
+
+watch(
+  () => [
+    recommendationsQuery.errorUpdatedAt.value,
+    playlistsQuery.errorUpdatedAt.value,
+    auditQuery.errorUpdatedAt.value,
+    selectedPlaylistQuery.errorUpdatedAt.value,
+  ],
+  (timestamps, previousTimestamps) => {
+    const hasNewError = timestamps.some(
+      (timestamp, index) => timestamp > (previousTimestamps?.[index] ?? 0),
+    );
+    if (hasNewError) {
+      void refreshAccountStatuses();
+    }
+  },
+);
+
+onBeforeUnmount(() => {
+  cancelQrLogin();
+  abandonPlaybackRequest();
+});
 
 async function refreshWorkspace() {
   if (!activeAccountRef.value || !isPluginReady.value) {
     return;
   }
-  isLoading.value = true;
-  sourceError.value = null;
+  manualError.value = null;
+  dismissedQueryError.value = "";
   sourceNotice.value = null;
-  try {
-    await loadWorkspace();
-  } catch (error) {
-    sourceError.value = normalizeError(error);
-  } finally {
-    isLoading.value = false;
-  }
-}
-
-async function loadWorkspace() {
-  const accountRef = activeAccountRef.value;
-  if (!accountRef) {
-    return;
-  }
-  const requestId = crypto.randomUUID();
-  const [recommendationResult, playlistResult, auditResult] = await Promise.allSettled([
-    getNeteaseRecommendations(accountRef, requestId),
-    getNeteasePlaylists(accountRef),
-    listNeteaseMutationAudit(accountRef),
+  await Promise.all([
+    recommendationsQuery.refetch(),
+    playlistsQuery.refetch(),
+    auditQuery.refetch(),
   ]);
-  const errors: string[] = [];
-  const messages: string[] = [];
-
-  if (recommendationResult.status === "fulfilled") {
-    recommendations.value = recommendationResult.value.data;
-    messages.push(...recommendationResult.value.diagnostics.map((item) => item.message));
-  } else {
-    recommendations.value = [];
-    errors.push(`Recommendations: ${normalizeError(recommendationResult.reason)}`);
-  }
-
-  if (playlistResult.status === "fulfilled") {
-    playlists.value = playlistResult.value.data;
-    messages.push(...playlistResult.value.diagnostics.map((item) => item.message));
-  } else {
-    playlists.value = [];
-    selectedPlaylistId.value = "";
-    selectedPlaylist.value = null;
-    errors.push(`Playlists: ${normalizeError(playlistResult.reason)}`);
-  }
-
-  if (auditResult.status === "fulfilled") {
-    audit.value = auditResult.value;
-  } else {
-    audit.value = [];
-    errors.push(`Audit: ${normalizeError(auditResult.reason)}`);
-  }
-
-  diagnostics.value = messages;
-  if (errors.length) {
-    sourceError.value = errors.join(" ");
-    await refreshAccountStatuses();
-  }
-
-  const selectedStillExists = playlists.value.some(
-    (playlist) => playlist.id === selectedPlaylistId.value,
-  );
-  if (!selectedStillExists) {
-    selectedPlaylistId.value = playlists.value[0]?.id ?? "";
-  }
   if (selectedPlaylistId.value) {
-    await loadSelectedPlaylist();
-  } else {
-    selectedPlaylist.value = null;
+    await selectedPlaylistQuery.refetch();
   }
 }
 
-async function selectAccount() {
-  selectedPlaylistId.value = "";
-  selectedPlaylist.value = null;
-  await refreshWorkspace();
-}
-
-async function loadSelectedPlaylist() {
-  if (!activeAccountRef.value || !selectedPlaylistId.value) {
-    selectedPlaylist.value = null;
-    return;
-  }
-  try {
-    const result = await getNeteasePlaylist(
-      activeAccountRef.value,
-      selectedPlaylistId.value,
-      crypto.randomUUID(),
-    );
-    selectedPlaylist.value = result.data;
-    diagnostics.value = result.diagnostics.map((diagnostic) => diagnostic.message);
-  } catch (error) {
-    sourceError.value = normalizeError(error);
-    await refreshAccountStatuses();
-  }
+function selectAccount() {
+  sourceNotice.value = null;
 }
 
 async function startQrLogin() {
@@ -272,10 +367,17 @@ async function pollQrLogin() {
     if (result.account) {
       qrLogin.value = null;
       qrStatus.value = "";
-      accounts.value = await listNeteaseAccounts();
+      await accountsQuery.refetch();
+      const isCurrentAccount = activeAccountRef.value === result.account.accountRef;
+      if (!isCurrentAccount) {
+        clearAccountWorkspace(result.account.accountRef);
+      }
       activeAccountRef.value = result.account.accountRef;
+      await nextTick();
+      if (isCurrentAccount) {
+        await refreshWorkspace();
+      }
       sourceNotice.value = `${result.account.displayName} connected.`;
-      await refreshWorkspace();
     }
   } catch (error) {
     if (qrLogin.value?.sessionId === sessionId) {
@@ -309,24 +411,17 @@ async function disconnectAccount() {
   if (!account || !window.confirm(`Disconnect ${account.displayName}?`)) {
     return;
   }
-  isLoading.value = true;
-  sourceError.value = null;
+  manualError.value = null;
   try {
-    await disconnectNeteaseAccount(account.accountRef);
-    accounts.value = await listNeteaseAccounts();
-    activeAccountRef.value = accounts.value[0]?.accountRef ?? "";
-    recommendations.value = [];
-    playlists.value = [];
-    selectedPlaylist.value = null;
-    audit.value = [];
-    if (activeAccountRef.value) {
-      await loadWorkspace();
-    }
+    await cancelAccountQueries(account.accountRef);
+    await disconnectMutation.mutateAsync(account.accountRef);
+    await accountsQuery.refetch();
+    await nextTick();
+    clearAccountWorkspace(account.accountRef);
+    sourceNotice.value = `${account.displayName} disconnected.`;
   } catch (error) {
-    sourceError.value = normalizeError(error);
+    manualError.value = normalizeError(error);
     await refreshAccountStatuses();
-  } finally {
-    isLoading.value = false;
   }
 }
 
@@ -335,21 +430,31 @@ async function playTrack(track: RemoteTrack) {
     return;
   }
   isPlayingTrackId.value = track.id;
-  sourceError.value = null;
+  manualError.value = null;
+  const requestId = crypto.randomUUID();
+  activePlaybackRequestId = requestId;
   try {
     const playback = await resolveNeteaseTrack(
       track,
       props.streamQuality,
       activeAccountRef.value || undefined,
-      crypto.randomUUID(),
+      requestId,
     );
-    diagnostics.value = playback.diagnostics.map((diagnostic) => diagnostic.message);
+    if (activePlaybackRequestId !== requestId) {
+      return;
+    }
+    operationDiagnostics.value = playback.diagnostics.map((diagnostic) => diagnostic.message);
     emit("playbackReady", playback);
   } catch (error) {
-    sourceError.value = normalizeError(error);
-    await refreshAccountStatuses();
+    if (activePlaybackRequestId === requestId) {
+      manualError.value = normalizeError(error);
+      await refreshAccountStatuses();
+    }
   } finally {
-    isPlayingTrackId.value = null;
+    if (activePlaybackRequestId === requestId) {
+      activePlaybackRequestId = null;
+      isPlayingTrackId.value = null;
+    }
   }
 }
 
@@ -381,50 +486,111 @@ async function confirmMutation() {
   if (!mutation || !accountRef || !mutationPlaylistId.value) {
     return;
   }
-  isMutating.value = true;
-  sourceError.value = null;
+  manualError.value = null;
   try {
-    let result: Awaited<ReturnType<typeof addNeteasePlaylistTrack>>;
+    const playlistId = mutationPlaylistId.value;
+    const playlistName = mutationPlaylist.value?.name ?? "Playlist";
+    const result = await playlistMutation.mutateAsync({
+      ...mutation,
+      accountRef,
+      playlistId,
+    });
     if (mutation.operation === "add") {
-      result = await addNeteasePlaylistTrack(
-        accountRef,
-        mutationPlaylistId.value,
-        mutation.track,
-      );
-      sourceNotice.value = `${mutation.track.title} added to ${mutationPlaylist.value?.name ?? "Playlist"}.`;
+      sourceNotice.value = `${mutation.track.title} added to ${playlistName}.`;
     } else {
-      result = await removeNeteasePlaylistTrack(
-        accountRef,
-        mutationPlaylistId.value,
-        mutation.track,
-      );
-      sourceNotice.value = `${mutation.track.title} removed from ${mutationPlaylist.value?.name ?? "Playlist"}.`;
+      sourceNotice.value = `${mutation.track.title} removed from ${playlistName}.`;
     }
-    diagnostics.value = result.diagnostics.map((diagnostic) => diagnostic.message);
+    operationDiagnostics.value = result.diagnostics.map((diagnostic) => diagnostic.message);
     pendingMutation.value = null;
-    audit.value = await listNeteaseMutationAudit(accountRef);
-    if (selectedPlaylistId.value === mutationPlaylistId.value) {
-      await loadSelectedPlaylist();
-    }
+    await invalidateMutationQueries(accountRef, playlistId);
   } catch (error) {
-    sourceError.value = normalizeError(error);
-    try {
-      audit.value = await listNeteaseMutationAudit(accountRef);
-    } catch {
-      // Keep the mutation error as the primary failure.
-    }
+    manualError.value = normalizeError(error);
+    await queryClient.invalidateQueries({
+      queryKey: queryKeys.audit(accountRef),
+      exact: true,
+    });
     await refreshAccountStatuses();
-  } finally {
-    isMutating.value = false;
   }
 }
 
 async function refreshAccountStatuses() {
   try {
-    accounts.value = await listNeteaseAccounts();
+    await accountsQuery.refetch();
   } catch {
-    // Preserve the operation error; account refresh is secondary context.
+    // Preserve the primary provider or mutation error.
   }
+}
+
+async function cancellableSourceQuery<T>(
+  signal: AbortSignal,
+  query: (requestId: string) => Promise<T>,
+) {
+  const requestId = crypto.randomUUID();
+  const cancel = () => {
+    void cancelSourceRequest(requestId).catch(() => undefined);
+  };
+  if (signal.aborted) {
+    cancel();
+    throw new DOMException("Source request cancelled", "AbortError");
+  }
+  signal.addEventListener("abort", cancel, { once: true });
+  try {
+    return await query(requestId);
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
+}
+
+async function cancelAccountQueries(accountRef: string) {
+  await Promise.all([
+    queryClient.cancelQueries({
+      queryKey: queryKeys.recommendations(accountRef),
+      exact: true,
+    }),
+    queryClient.cancelQueries({
+      queryKey: queryKeys.playlists(accountRef),
+      exact: true,
+    }),
+    queryClient.cancelQueries({ queryKey: queryKeys.audit(accountRef), exact: true }),
+    queryClient.cancelQueries({ queryKey: queryKeys.playlistsForAccount(accountRef) }),
+  ]);
+}
+
+function clearAccountWorkspace(accountRef: string) {
+  queryClient.removeQueries({ queryKey: queryKeys.recommendations(accountRef), exact: true });
+  queryClient.removeQueries({ queryKey: queryKeys.playlists(accountRef), exact: true });
+  queryClient.removeQueries({ queryKey: queryKeys.audit(accountRef), exact: true });
+  queryClient.removeQueries({ queryKey: queryKeys.playlistsForAccount(accountRef) });
+}
+
+async function invalidateMutationQueries(accountRef: string, playlistId: string) {
+  await Promise.all([
+    queryClient.invalidateQueries({
+      queryKey: queryKeys.playlists(accountRef),
+      exact: true,
+    }),
+    queryClient.invalidateQueries({
+      queryKey: queryKeys.playlist(accountRef, playlistId),
+      exact: true,
+    }),
+    queryClient.invalidateQueries({
+      queryKey: queryKeys.audit(accountRef),
+      exact: true,
+    }),
+  ]);
+}
+
+function abandonPlaybackRequest() {
+  const requestId = activePlaybackRequestId;
+  activePlaybackRequestId = null;
+  isPlayingTrackId.value = null;
+  if (requestId) {
+    void cancelSourceRequest(requestId).catch(() => undefined);
+  }
+}
+
+function queryError(label: string, isError: boolean, error: unknown) {
+  return isError ? `${label}: ${normalizeError(error)}` : null;
 }
 
 function formatDuration(seconds: number | null) {
@@ -662,7 +828,7 @@ function normalizeError(error: unknown): string {
               <button
                 type="button"
                 :class="{ 'menu-active': selectedPlaylistId === playlist.id }"
-                @click="selectedPlaylistId = playlist.id; loadSelectedPlaylist()"
+                @click="selectedPlaylistId = playlist.id"
               >
                 <span class="min-w-0 flex-1 truncate text-left">{{ playlist.name }}</span>
                 <span class="text-xs tabular-nums opacity-60">{{ playlist.trackCount }}</span>

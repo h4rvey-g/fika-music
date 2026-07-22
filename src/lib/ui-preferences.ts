@@ -1,12 +1,14 @@
 export type ThemePreference = "system" | "light" | "dark";
 export type LayoutDensity = "comfortable" | "compact";
 export type StreamQuality = "128k" | "320k" | "flac" | "flac24bit";
+export type PlaybackMode = "sequential" | "shuffle" | "repeat";
 
 export type UiPreferences = {
   theme: ThemePreference;
   density: LayoutDensity;
   streamQuality: StreamQuality;
   volume: number;
+  playbackMode: PlaybackMode;
 };
 
 type ReadableStorage = Pick<Storage, "getItem">;
@@ -19,6 +21,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   density: "comfortable",
   streamQuality: "128k",
   volume: 0.8,
+  playbackMode: "sequential",
 };
 
 export function loadUiPreferences(storage: ReadableStorage | null = browserStorage()): UiPreferences {
@@ -62,6 +65,9 @@ export function parseUiPreferences(value: unknown): UiPreferences {
       typeof candidate.volume === "number" && Number.isFinite(candidate.volume)
         ? Math.min(1, Math.max(0, candidate.volume))
         : DEFAULT_UI_PREFERENCES.volume,
+    playbackMode: isPlaybackMode(candidate.playbackMode)
+      ? candidate.playbackMode
+      : DEFAULT_UI_PREFERENCES.playbackMode,
   };
 }
 
@@ -87,4 +93,8 @@ function isLayoutDensity(value: unknown): value is LayoutDensity {
 
 function isStreamQuality(value: unknown): value is StreamQuality {
   return value === "128k" || value === "320k" || value === "flac" || value === "flac24bit";
+}
+
+function isPlaybackMode(value: unknown): value is PlaybackMode {
+  return value === "sequential" || value === "shuffle" || value === "repeat";
 }

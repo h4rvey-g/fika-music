@@ -1,3 +1,5 @@
+use moka::policy::EvictionPolicy;
+use moka::sync::Cache;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -7,15 +9,18 @@ use std::fmt;
 use std::io::Read;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 const MAX_DIAGNOSTICS: usize = 200;
 const DEFAULT_NETWORK_TIMEOUT: Duration = Duration::from_secs(8);
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_CACHE_ENTRIES: usize = 256;
+const MAX_CACHE_ENTRIES: u32 = 256;
 const MAX_CACHE_VALUE_BYTES: usize = 512 * 1024;
 const MAX_CACHE_KEY_BYTES: usize = 4 * 1024;
+const MAX_CACHE_WEIGHT_BYTES: u64 = 32 * 1024 * 1024;
+const CACHE_ENTRY_MIN_WEIGHT: u32 = MAX_CACHE_WEIGHT_BYTES as u32 / MAX_CACHE_ENTRIES;
+const CACHE_TIME_TO_IDLE: Duration = Duration::from_secs(30 * 60);
 
 pub const LX_SOURCE_KIND_MUSIC: &str = "music";
 pub const LX_SOURCE_KW: &str = "kw";
@@ -27,8 +32,9 @@ pub const LX_SOURCE_LOCAL: &str = "local";
 
 pub const SOURCE_RUNTIME_API_VERSION: SourceRuntimeApiVersion = SourceRuntimeApiVersion::new(1, 1);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct SourceRuntimeApiVersion {
     pub major: u16,
     pub minor: u16,
@@ -50,8 +56,9 @@ impl fmt::Display for SourceRuntimeApiVersion {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
+#[ts(export_to = "bindings.ts")]
 pub enum SourceCapability {
     #[serde(rename = "network:any")]
     NetworkAny,
@@ -83,8 +90,9 @@ impl SourceCapability {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub enum DiagnosticLevel {
     Info,
     Warn,
@@ -92,16 +100,18 @@ pub enum DiagnosticLevel {
     Security,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct SourceDiagnostic {
     pub source_id: String,
     pub level: DiagnosticLevel,
     pub message: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub enum SourceAction {
     MusicSearch,
     MusicUrl,
@@ -114,8 +124,11 @@ pub enum SourceAction {
     PlaylistRemoveTrack,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, ts_rs::TS,
+)]
 #[serde(rename_all = "kebab-case")]
+#[ts(export_to = "bindings.ts")]
 pub enum SourceQuality {
     #[serde(rename = "128k")]
     #[default]
@@ -148,14 +161,16 @@ impl SourceQuality {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub enum SourceKind {
     Music,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct SourceInfo {
     pub id: String,
     pub name: String,
@@ -165,8 +180,9 @@ pub struct SourceInfo {
     pub qualities: Vec<SourceQuality>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct SourceRuntimeReport {
     pub source_id: String,
     pub initialized: bool,
@@ -178,8 +194,9 @@ pub struct SourceRuntimeReport {
     pub diagnostics: Vec<SourceDiagnostic>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(tag = "action", rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub enum SourceRequest {
     MusicSearch {
         source: String,
@@ -191,6 +208,7 @@ pub enum SourceRequest {
     MusicUrl {
         source: String,
         #[serde(rename = "musicInfo")]
+        #[ts(type = "Record<string, unknown>")]
         music_info: JsonValue,
         #[serde(default)]
         quality: SourceQuality,
@@ -198,11 +216,13 @@ pub enum SourceRequest {
     Lyric {
         source: String,
         #[serde(rename = "musicInfo")]
+        #[ts(type = "Record<string, unknown>")]
         music_info: JsonValue,
     },
     Pic {
         source: String,
         #[serde(rename = "musicInfo")]
+        #[ts(type = "Record<string, unknown>")]
         music_info: JsonValue,
     },
     MusicRecommendations {
@@ -361,8 +381,9 @@ fn validate_playlist_id(playlist_id: &str) -> Result<(), String> {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct SourceTrackRef {
     pub id: String,
     pub source: String,
@@ -380,8 +401,9 @@ impl SourceTrackRef {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct LyricResponse {
     pub lyric: Option<String>,
     pub tlyric: Option<String>,
@@ -389,8 +411,9 @@ pub struct LyricResponse {
     pub lxlyric: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct SourceSearchResult {
     pub id: String,
     pub source: String,
@@ -399,11 +422,13 @@ pub struct SourceSearchResult {
     pub album: Option<String>,
     pub duration_seconds: Option<u64>,
     pub cover_url: Option<String>,
+    #[ts(type = "Record<string, unknown>")]
     pub raw_info: JsonValue,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct SourceSearchResponse {
     pub is_end: bool,
     pub total: Option<u64>,
@@ -412,14 +437,16 @@ pub struct SourceSearchResponse {
 
 pub type RemoteTrack = SourceSearchResult;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct SourceRecommendationsResponse {
     pub list: Vec<RemoteTrack>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct SourcePlaylist {
     pub id: String,
     pub name: String,
@@ -430,22 +457,25 @@ pub struct SourcePlaylist {
     pub can_mutate: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct SourcePlaylistDetail {
     pub playlist: SourcePlaylist,
     pub tracks: Vec<RemoteTrack>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub enum SourcePlaylistMutationKind {
     Add,
     Remove,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct SourcePlaylistMutation {
     pub audit_id: i64,
     pub operation: SourcePlaylistMutationKind,
@@ -454,8 +484,9 @@ pub struct SourcePlaylistMutation {
     pub occurred_at: i64,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(tag = "action", content = "data", rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub enum SourceResponse {
     MusicSearch(SourceSearchResponse),
     MusicUrl(String),
@@ -468,8 +499,9 @@ pub enum SourceResponse {
     PlaylistRemoveTrack(SourcePlaylistMutation),
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct SourceRequestOutcome {
     pub response: SourceResponse,
     pub diagnostics: Vec<SourceDiagnostic>,
@@ -674,7 +706,7 @@ pub trait SourceHost: Send + Sync {
     }
 }
 
-type SourceCache = Arc<Mutex<BTreeMap<(String, String), Vec<u8>>>>;
+type SourceCache = Cache<(String, String), Vec<u8>>;
 type SourceAccountRefs = Arc<RwLock<BTreeMap<(String, String), String>>>;
 
 #[derive(Clone)]
@@ -714,7 +746,20 @@ impl DefaultSourceHost {
             http_client,
             network_timeout,
             max_response_bytes,
-            cache: Arc::new(Mutex::new(BTreeMap::new())),
+            cache: Cache::builder()
+                .max_capacity(MAX_CACHE_WEIGHT_BYTES)
+                .weigher(|(source_id, key): &(String, String), value: &Vec<u8>| {
+                    let bytes = source_id
+                        .len()
+                        .saturating_add(key.len())
+                        .saturating_add(value.len());
+                    u32::try_from(bytes)
+                        .unwrap_or(u32::MAX)
+                        .max(CACHE_ENTRY_MIN_WEIGHT)
+                })
+                .eviction_policy(EvictionPolicy::lru())
+                .time_to_idle(CACHE_TIME_TO_IDLE)
+                .build(),
             account_refs: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
@@ -773,7 +818,11 @@ impl SourceHost for DefaultSourceHost {
         if cancellation.is_cancelled() {
             return Err(SourceHostError::Cancelled);
         }
-        if !request.url.starts_with("http://") && !request.url.starts_with("https://") {
+        let parsed_url =
+            reqwest::Url::parse(&request.url).map_err(|_| SourceHostError::InvalidUrl {
+                url: network_diagnostic_target(&request.url),
+            })?;
+        if !matches!(parsed_url.scheme(), "http" | "https") || parsed_url.host_str().is_none() {
             return Err(SourceHostError::InvalidUrl {
                 url: network_diagnostic_target(&request.url),
             });
@@ -782,8 +831,8 @@ impl SourceHost for DefaultSourceHost {
         let diagnostic_target = network_diagnostic_target(&request.url);
 
         let mut request_builder = match request.method {
-            SourceHttpMethod::Get => self.http_client.get(&request.url),
-            SourceHttpMethod::Post => self.http_client.post(&request.url),
+            SourceHttpMethod::Get => self.http_client.get(parsed_url.clone()),
+            SourceHttpMethod::Post => self.http_client.post(parsed_url),
         }
         .timeout(self.network_timeout)
         .header(reqwest::header::USER_AGENT, "FikaMusic/0.1 source-runtime");
@@ -860,12 +909,7 @@ impl SourceHost for DefaultSourceHost {
                 message: format!("cache key exceeds the {} byte limit", MAX_CACHE_KEY_BYTES),
             });
         }
-        self.cache
-            .lock()
-            .map_err(|_| SourceHostError::Cache {
-                message: "cache lock was poisoned".to_owned(),
-            })
-            .map(|cache| cache.get(&(source_id.to_owned(), key.to_owned())).cloned())
+        Ok(self.cache.get(&(source_id.to_owned(), key.to_owned())))
     }
 
     fn cache_write(
@@ -891,17 +935,8 @@ impl SourceHost for DefaultSourceHost {
                 message: format!("cache key exceeds the {} byte limit", MAX_CACHE_KEY_BYTES),
             });
         }
-        let mut cache = self.cache.lock().map_err(|_| SourceHostError::Cache {
-            message: "cache lock was poisoned".to_owned(),
-        })?;
-        if !cache.contains_key(&(source_id.to_owned(), key.to_owned()))
-            && cache.len() >= MAX_CACHE_ENTRIES
-        {
-            if let Some(oldest_key) = cache.keys().next().cloned() {
-                cache.remove(&oldest_key);
-            }
-        }
-        cache.insert((source_id.to_owned(), key.to_owned()), value.to_vec());
+        self.cache
+            .insert((source_id.to_owned(), key.to_owned()), value.to_vec());
         Ok(())
     }
 
@@ -3124,6 +3159,60 @@ mod tests {
             .expect_err("oversized cache key should be rejected");
 
         assert!(matches!(error, SourceHostError::Cache { .. }));
+    }
+
+    #[test]
+    fn default_host_cache_should_bound_entries_and_keep_recent_values() {
+        let host = DefaultSourceHost::new(Duration::from_secs(1), 1024);
+        let cancellation = SourceCancellationToken::default();
+        for index in 0..MAX_CACHE_ENTRIES {
+            host.cache_write(
+                "test-source",
+                &format!("key-{index}"),
+                b"value",
+                &cancellation,
+            )
+            .expect("cache entry should write");
+        }
+        host.cache_read("test-source", "key-0", &cancellation)
+            .expect("recent cache entry should read");
+        host.cache_write(
+            "test-source",
+            "overflow-key",
+            b"overflow-value",
+            &cancellation,
+        )
+        .expect("overflow cache entry should write");
+        host.cache.run_pending_tasks();
+
+        assert!(host.cache.entry_count() <= u64::from(MAX_CACHE_ENTRIES));
+        assert!(host
+            .cache_read("test-source", "key-0", &cancellation)
+            .expect("recent cache entry should read")
+            .is_some());
+        assert!(host
+            .cache_read("test-source", "overflow-key", &cancellation)
+            .expect("new cache entry should read")
+            .is_some());
+    }
+
+    #[test]
+    fn default_host_cache_should_bound_total_weight() {
+        let host = DefaultSourceHost::new(Duration::from_secs(1), 1024);
+        let cancellation = SourceCancellationToken::default();
+        let value = vec![0_u8; MAX_CACHE_VALUE_BYTES];
+        for index in 0..100 {
+            host.cache_write(
+                "test-source",
+                &format!("large-{index}"),
+                &value,
+                &cancellation,
+            )
+            .expect("large cache entry should write");
+        }
+        host.cache.run_pending_tasks();
+
+        assert!(host.cache.weighted_size() <= MAX_CACHE_WEIGHT_BYTES);
     }
 
     #[test]

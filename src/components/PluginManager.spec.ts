@@ -37,12 +37,14 @@ function pluginRecord(overrides: Partial<PluginRecord> = {}): PluginRecord {
         entrypoint: "builtin:runtime-demo",
         initialized: false,
         sources: [],
+        runtimeReport: null,
         diagnostics: [],
       },
     ],
     diagnostics: [],
     canRemove: false,
     canEnable: false,
+    manifest: null,
     ...overrides,
   };
 }

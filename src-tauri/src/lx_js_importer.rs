@@ -5,8 +5,15 @@ use crate::source_runtime::{
     LX_SOURCE_LOCAL, LX_SOURCE_MG, LX_SOURCE_TX, LX_SOURCE_WY,
 };
 use oxc_allocator::Allocator;
+use oxc_ast::ast::{
+    Argument, ArrayExpression, Expression, Function, ObjectExpression, TemplateLiteral,
+    VariableDeclarator,
+};
+use oxc_ast::ast_kind::AstKind;
+use oxc_ast_visit::Visit;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -329,7 +336,8 @@ impl QishuiRustProvider {
         url: &str,
         params: &[(&str, String)],
     ) -> Result<serde_json::Value, SourceRuntimeError> {
-        let url = append_query_params(url, params);
+        let url = append_query_params(url, params)
+            .map_err(|error| context.provider_error(format!("汽水VIP请求URL无效: {error}")))?;
         let response =
             context.http_request(SourceHttpRequest::get(url), "request qsvip endpoint")?;
         if !response.is_success() {
@@ -548,10 +556,8 @@ impl SourceProvider for ImportedLxTemplateProvider {
         };
 
         let level = quality_to_template_level(quality);
-        let url = template
-            .url
-            .replace("{id}", &encode_component(&track_id))
-            .replace("{level}", &encode_component(level));
+        let url = render_template_url(&template.url, &track_id, level)
+            .map_err(|error| context.provider_error(format!("invalid URL template: {error}")))?;
 
         let resolved_url = self.resolved_template_url(context, &url)?;
 
@@ -597,9 +603,9 @@ fn resolve_template_endpoint(
     let body = response
         .text()
         .map_err(|error| context.provider_error(error.to_string()))?;
-    let body = body.trim();
+    let body = body.trim().trim_matches('"');
     if is_http_url(body) {
-        return Ok(body.trim_matches('"').to_owned());
+        return Ok(body.to_owned());
     }
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
         if let Some(url) = find_url_in_json(&json) {
@@ -627,20 +633,17 @@ fn find_url_in_json(value: &serde_json::Value) -> Option<String> {
 }
 
 fn is_http_url(value: &str) -> bool {
-    value.starts_with("http://") || value.starts_with("https://")
+    url::Url::parse(value)
+        .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
 }
 
-fn append_query_params(url: &str, params: &[(&str, String)]) -> String {
-    let query = params
-        .iter()
-        .map(|(key, value)| format!("{}={}", encode_component(key), encode_component(value)))
-        .collect::<Vec<_>>()
-        .join("&");
-    if query.is_empty() {
-        return url.to_owned();
+fn append_query_params(url: &str, params: &[(&str, String)]) -> Result<String, url::ParseError> {
+    let mut url = parse_http_url(url)?;
+    if !params.is_empty() {
+        url.query_pairs_mut()
+            .extend_pairs(params.iter().map(|(key, value)| (*key, value.as_str())));
     }
-    let separator = if url.contains('?') { '&' } else { '?' };
-    format!("{url}{separator}{query}")
+    Ok(url.into())
 }
 
 fn qishui_first_data(value: &serde_json::Value) -> Option<&serde_json::Value> {
@@ -772,6 +775,384 @@ struct DecoderCall {
     key: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum AstValue {
+    String(String),
+    Number(usize),
+    Path(String),
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct AstCall {
+    callee: String,
+    arguments: Vec<AstValue>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct JsAstFacts {
+    hex_identifier_count: usize,
+    symbols: BTreeSet<String>,
+    member_paths: BTreeSet<String>,
+    string_literals: Vec<String>,
+    string_arrays: Vec<Vec<String>>,
+    numeric_literals: BTreeSet<usize>,
+    aliases: BTreeMap<String, String>,
+    calls: Vec<AstCall>,
+    decoder_specs: Vec<StringDecoderSpec>,
+    url_templates: Vec<LxUrlTemplate>,
+}
+
+impl JsAstFacts {
+    fn has_symbol(&self, value: &str) -> bool {
+        self.symbols.contains(value)
+    }
+
+    fn has_member_path(&self, value: &str) -> bool {
+        self.member_paths.contains(value)
+    }
+
+    fn has_call(&self, callee: &str) -> bool {
+        self.calls.iter().any(|call| call.callee == callee)
+    }
+
+    fn has_call_with_first_argument(&self, callee: &str, argument: &str) -> bool {
+        self.calls.iter().any(|call| {
+            call.callee == callee
+                && call
+                    .arguments
+                    .first()
+                    .is_some_and(|value| value.matches(argument))
+        })
+    }
+
+    fn has_string(&self, value: &str) -> bool {
+        self.string_literals.iter().any(|item| item == value)
+    }
+}
+
+impl AstValue {
+    fn matches(&self, expected: &str) -> bool {
+        matches!(self, Self::String(value) | Self::Path(value) if value == expected)
+    }
+}
+
+#[derive(Default)]
+struct JsAstCollector {
+    facts: JsAstFacts,
+}
+
+impl JsAstCollector {
+    fn into_facts(self) -> JsAstFacts {
+        self.facts
+    }
+
+    fn push_string(&mut self, value: &str) {
+        self.facts.symbols.insert(value.to_owned());
+        if !self.facts.string_literals.iter().any(|item| item == value) {
+            self.facts.string_literals.push(value.to_owned());
+        }
+    }
+
+    fn collect_variable_declarator(&mut self, declarator: &VariableDeclarator<'_>) {
+        let Some(identifier) = declarator.id.get_binding_identifier() else {
+            return;
+        };
+        let name = identifier.name.as_str();
+        self.facts.symbols.insert(name.to_owned());
+        let Some(initializer) = declarator.init.as_ref() else {
+            return;
+        };
+
+        if let Expression::Identifier(alias) = initializer {
+            self.facts
+                .aliases
+                .insert(name.to_owned(), alias.name.to_string());
+        }
+
+        let Some(family) = name
+            .strip_suffix("URL_TEMPLATES")
+            .map(|value| value.trim_end_matches('_').to_ascii_lowercase())
+        else {
+            return;
+        };
+        let Expression::ObjectExpression(object) = initializer else {
+            return;
+        };
+        self.facts
+            .url_templates
+            .extend(url_templates_from_object(&family, object));
+    }
+
+    fn collect_call(&mut self, call: &oxc_ast::ast::CallExpression<'_>) {
+        let Some(callee) = expression_path(&call.callee) else {
+            return;
+        };
+        self.facts.calls.push(AstCall {
+            callee,
+            arguments: call.arguments.iter().map(ast_value_from_argument).collect(),
+        });
+    }
+
+    fn collect_function(&mut self, function: &Function<'_>) {
+        let Some(name) = function
+            .id
+            .as_ref()
+            .map(|identifier| identifier.name.as_str())
+        else {
+            return;
+        };
+        if !name.starts_with("_0x") {
+            return;
+        }
+        let Some(body) = function.body.as_ref() else {
+            return;
+        };
+        let mut inspector = DecoderFunctionInspector::default();
+        inspector.visit_function_body(body);
+        let Some(offset) = inspector.offsets.first().copied() else {
+            return;
+        };
+        let kind = if inspector.numeric_literals.contains(&256)
+            && inspector.symbols.contains("charCodeAt")
+            && inspector.symbols.contains("fromCharCode")
+        {
+            StringDecoderKind::Rc4
+        } else if inspector.symbols.contains("decodeURIComponent") {
+            StringDecoderKind::Base64Percent
+        } else {
+            return;
+        };
+        self.facts.decoder_specs.push(StringDecoderSpec {
+            name: name.to_owned(),
+            offset,
+            kind,
+        });
+    }
+}
+
+impl<'a> Visit<'a> for JsAstCollector {
+    fn enter_node(&mut self, kind: AstKind<'a>) {
+        match kind {
+            AstKind::IdentifierName(identifier) => {
+                self.facts.symbols.insert(identifier.name.to_string());
+                if identifier.name.starts_with("_0x") {
+                    self.facts.hex_identifier_count += 1;
+                }
+            }
+            AstKind::IdentifierReference(identifier) => {
+                self.facts.symbols.insert(identifier.name.to_string());
+                if identifier.name.starts_with("_0x") {
+                    self.facts.hex_identifier_count += 1;
+                }
+            }
+            AstKind::BindingIdentifier(identifier) => {
+                self.facts.symbols.insert(identifier.name.to_string());
+                if identifier.name.starts_with("_0x") {
+                    self.facts.hex_identifier_count += 1;
+                }
+            }
+            AstKind::StringLiteral(literal) => self.push_string(literal.value.as_str()),
+            AstKind::TemplateLiteral(template) => {
+                if let Some(value) = template_literal_text(template) {
+                    self.push_string(&value);
+                }
+            }
+            AstKind::NumericLiteral(literal) => {
+                if let Some(value) = number_to_usize(literal.value) {
+                    self.facts.numeric_literals.insert(value);
+                }
+            }
+            AstKind::StaticMemberExpression(member) => {
+                if let Some(path) =
+                    static_member_path(&member.object, member.property.name.as_str())
+                {
+                    self.facts.member_paths.insert(path);
+                }
+            }
+            AstKind::ComputedMemberExpression(member) => {
+                if let Some(path) = computed_member_path(&member.object, &member.expression) {
+                    self.facts.member_paths.insert(path);
+                }
+            }
+            AstKind::ArrayExpression(array) => {
+                if let Some(values) = string_array(array) {
+                    self.facts.string_arrays.push(values);
+                }
+            }
+            AstKind::VariableDeclarator(declarator) => {
+                self.collect_variable_declarator(declarator);
+            }
+            AstKind::CallExpression(call) => self.collect_call(call),
+            AstKind::Function(function) => self.collect_function(function),
+            _ => {}
+        }
+    }
+}
+
+#[derive(Default)]
+struct DecoderFunctionInspector {
+    symbols: BTreeSet<String>,
+    numeric_literals: BTreeSet<usize>,
+    offsets: Vec<usize>,
+}
+
+impl<'a> Visit<'a> for DecoderFunctionInspector {
+    fn enter_node(&mut self, kind: AstKind<'a>) {
+        match kind {
+            AstKind::IdentifierName(identifier) => {
+                self.symbols.insert(identifier.name.to_string());
+            }
+            AstKind::IdentifierReference(identifier) => {
+                self.symbols.insert(identifier.name.to_string());
+            }
+            AstKind::StringLiteral(literal) => {
+                self.symbols.insert(literal.value.to_string());
+            }
+            AstKind::NumericLiteral(literal) => {
+                if let Some(value) = number_to_usize(literal.value) {
+                    self.numeric_literals.insert(value);
+                }
+            }
+            AstKind::BinaryExpression(expression)
+                if expression.operator == oxc_ast::ast::BinaryOperator::Subtraction =>
+            {
+                if matches!(expression.left, Expression::Identifier(_)) {
+                    if let Expression::NumericLiteral(value) = &expression.right {
+                        if let Some(value) = number_to_usize(value.value) {
+                            self.offsets.push(value);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn expression_path(expression: &Expression<'_>) -> Option<String> {
+    match expression {
+        Expression::Identifier(identifier) => Some(identifier.name.to_string()),
+        Expression::StaticMemberExpression(member) => {
+            static_member_path(&member.object, member.property.name.as_str())
+        }
+        Expression::ComputedMemberExpression(member) => {
+            computed_member_path(&member.object, &member.expression)
+        }
+        Expression::ParenthesizedExpression(expression) => expression_path(&expression.expression),
+        _ => None,
+    }
+}
+
+fn static_member_path(object: &Expression<'_>, property: &str) -> Option<String> {
+    let object = expression_path(object)?;
+    Some(format!("{object}.{property}"))
+}
+
+fn computed_member_path(object: &Expression<'_>, property: &Expression<'_>) -> Option<String> {
+    let object = expression_path(object)?;
+    let property = static_expression_text(property)?;
+    Some(format!("{object}.{property}"))
+}
+
+fn static_expression_text(expression: &Expression<'_>) -> Option<String> {
+    match expression {
+        Expression::StringLiteral(literal) => Some(literal.value.to_string()),
+        Expression::TemplateLiteral(template) => {
+            template.single_quasi().map(|value| value.to_string())
+        }
+        Expression::Identifier(identifier) => Some(identifier.name.to_string()),
+        _ => None,
+    }
+}
+
+fn ast_value_from_argument(argument: &Argument<'_>) -> AstValue {
+    argument
+        .as_expression()
+        .map(ast_value_from_expression)
+        .unwrap_or(AstValue::Other)
+}
+
+fn ast_value_from_expression(expression: &Expression<'_>) -> AstValue {
+    match expression {
+        Expression::StringLiteral(literal) => AstValue::String(literal.value.to_string()),
+        Expression::TemplateLiteral(template) => template_literal_text(template)
+            .map(AstValue::String)
+            .unwrap_or(AstValue::Other),
+        Expression::NumericLiteral(literal) => number_to_usize(literal.value)
+            .map(AstValue::Number)
+            .unwrap_or(AstValue::Other),
+        _ => expression_path(expression)
+            .map(AstValue::Path)
+            .unwrap_or(AstValue::Other),
+    }
+}
+
+fn number_to_usize(value: f64) -> Option<usize> {
+    if value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= usize::MAX as f64 {
+        Some(value as usize)
+    } else {
+        None
+    }
+}
+
+fn template_literal_text(template: &TemplateLiteral<'_>) -> Option<String> {
+    let mut value = String::new();
+    for (index, quasi) in template.quasis.iter().enumerate() {
+        value.push_str(quasi.value.cooked.unwrap_or(quasi.value.raw).as_str());
+        if let Some(expression) = template.expressions.get(index) {
+            value.push_str("${");
+            value.push_str(&expression_path(expression)?);
+            value.push('}');
+        }
+    }
+    Some(value)
+}
+
+fn string_array(array: &ArrayExpression<'_>) -> Option<Vec<String>> {
+    array
+        .elements
+        .iter()
+        .map(|element| {
+            let expression = element.as_expression()?;
+            match expression {
+                Expression::StringLiteral(literal) => Some(literal.value.to_string()),
+                Expression::TemplateLiteral(template) => {
+                    template.single_quasi().map(|value| value.to_string())
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn url_templates_from_object(family: &str, object: &ObjectExpression<'_>) -> Vec<LxUrlTemplate> {
+    object
+        .properties
+        .iter()
+        .filter_map(|property| property.as_property())
+        .filter_map(|property| {
+            let source_id = property.key.static_name()?.into_owned();
+            if !LX_SOURCE_KEYS.contains(&source_id.as_str()) {
+                return None;
+            }
+            let url = match &property.value {
+                Expression::StringLiteral(literal) => literal.value.to_string(),
+                Expression::TemplateLiteral(template) => template_literal_text(template)?,
+                _ => return None,
+            };
+            is_url_template(&url).then(|| LxUrlTemplate {
+                family: family.to_owned(),
+                source_id,
+                domain: extract_domain(&url),
+                has_track_id_placeholder: url.contains("{id}") || url.contains("${id}"),
+                has_quality_placeholder: { url.contains("{level}") || url.contains("${level}") },
+                url,
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LxJsImportError {
     #[error("failed to read LX JS source {path}: {source}")]
@@ -784,6 +1165,12 @@ pub enum LxJsImportError {
         path: String,
         diagnostics: Vec<String>,
     },
+}
+
+struct ParsedJs {
+    report: JsParseReport,
+    facts: JsAstFacts,
+    comments: Vec<String>,
 }
 
 pub fn analyze_lx_js_file(path: impl AsRef<Path>) -> Result<LxJsImportReport, LxJsImportError> {
@@ -801,12 +1188,12 @@ pub fn analyze_lx_js_source(
     source: &str,
 ) -> Result<LxJsImportReport, LxJsImportError> {
     let path = path.as_ref();
-    let parse = parse_with_oxc(path, source)?;
-    let obfuscation = scan_obfuscation(source);
-    let metadata = parse_metadata(source);
-    let deobfuscation = deobfuscate_string_literals(source, &metadata);
-    let contract = scan_lx_contract(source, &deobfuscation, obfuscation.likely_obfuscated);
-    let endpoint = scan_endpoint_report(source, &deobfuscation.decoded_strings);
+    let parsed = parse_with_oxc(path, source)?;
+    let obfuscation = scan_obfuscation(source, &parsed.facts);
+    let metadata = parse_metadata(&parsed.comments);
+    let deobfuscation = deobfuscate_string_literals(&parsed.facts, &metadata);
+    let contract = scan_lx_contract(&parsed.facts, &deobfuscation, obfuscation.likely_obfuscated);
+    let endpoint = scan_endpoint_report(&parsed.facts, &deobfuscation.decoded_strings);
     let manifest = build_import_manifest(&metadata, &contract, &obfuscation, &deobfuscation);
 
     Ok(LxJsImportReport {
@@ -816,7 +1203,7 @@ pub fn analyze_lx_js_source(
             .unwrap_or("<memory>")
             .to_owned(),
         metadata,
-        parse,
+        parse: parsed.report,
         contract,
         endpoint,
         obfuscation,
@@ -825,7 +1212,7 @@ pub fn analyze_lx_js_source(
     })
 }
 
-fn parse_with_oxc(path: &Path, source: &str) -> Result<JsParseReport, LxJsImportError> {
+fn parse_with_oxc(path: &Path, source: &str) -> Result<ParsedJs, LxJsImportError> {
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::mjs());
     let parser_return = Parser::new(&allocator, source, source_type).parse();
@@ -842,18 +1229,31 @@ fn parse_with_oxc(path: &Path, source: &str) -> Result<JsParseReport, LxJsImport
         });
     }
 
-    Ok(JsParseReport {
-        parsed_with_oxc: true,
-        top_level_statement_count: parser_return.program.body.len(),
-        comment_count: parser_return.program.comments.len(),
-        diagnostics,
+    let comments = parser_return
+        .program
+        .comments
+        .iter()
+        .map(|comment| comment.content_span().source_text(source).to_owned())
+        .collect();
+    let mut collector = JsAstCollector::default();
+    collector.visit_program(&parser_return.program);
+
+    Ok(ParsedJs {
+        report: JsParseReport {
+            parsed_with_oxc: true,
+            top_level_statement_count: parser_return.program.body.len(),
+            comment_count: parser_return.program.comments.len(),
+            diagnostics,
+        },
+        facts: collector.into_facts(),
+        comments,
     })
 }
 
-fn parse_metadata(source: &str) -> LxJsMetadata {
+fn parse_metadata(comments: &[String]) -> LxJsMetadata {
     let mut metadata = LxJsMetadata::default();
 
-    for line in source.lines().take(120) {
+    for line in comments.iter().flat_map(|comment| comment.lines()) {
         let line = line.trim().trim_start_matches('*').trim();
         let Some(tag) = line.strip_prefix('@') else {
             continue;
@@ -888,34 +1288,32 @@ fn split_tag(tag: &str) -> Option<(&str, &str)> {
 }
 
 fn scan_lx_contract(
-    source: &str,
+    facts: &JsAstFacts,
     deobfuscation: &LxJsDeobfuscationReport,
     likely_obfuscated: bool,
 ) -> LxJsContractReport {
-    let declared_actions = scan_declared_actions(source, &deobfuscation.decoded_strings);
-    let declared_qualities = scan_declared_qualities(source, &deobfuscation.decoded_strings);
-    let declared_sources = scan_declared_sources(source, &declared_actions, &declared_qualities);
-    let references_qualitys = source.contains("qualitys") || source.contains("qualities");
+    let declared_actions = scan_declared_actions(facts, &deobfuscation.decoded_strings);
+    let declared_qualities = scan_declared_qualities(facts, &deobfuscation.decoded_strings);
+    let declared_sources = scan_declared_sources(facts, &declared_actions, &declared_qualities);
+    let references_qualitys = facts.has_symbol("qualitys") || facts.has_symbol("qualities");
+    let uses_event_names = facts.has_symbol("EVENT_NAMES");
 
     LxJsContractReport {
-        uses_global_lx: source.contains("globalThis['lx']") || source.contains("globalThis.lx"),
-        uses_event_names: source.contains("EVENT_NAMES"),
-        uses_lx_request: source.contains("request,")
-            || source.contains("request}")
-            || source.contains("request(")
-            || source.contains("request,"),
-        registers_request_handler: source.contains("EVENT_NAMES.request")
-            || source.contains("EVENT_NAMES[")
-            || source.contains("on(EVENT_NAMES"),
-        sends_any_lx_event: source.contains("send(EVENT_NAMES"),
-        sends_inited_event_literal: source.contains("EVENT_NAMES.inited")
-            || contains_string_literal(source, "inited")
+        uses_global_lx: facts.has_member_path("globalThis.lx"),
+        uses_event_names,
+        uses_lx_request: facts.has_symbol("request"),
+        registers_request_handler: uses_event_names
+            && (facts.has_call_with_first_argument("on", "EVENT_NAMES.request")
+                || facts.has_call("on")),
+        sends_any_lx_event: uses_event_names && facts.has_call("send"),
+        sends_inited_event_literal: facts.has_member_path("EVENT_NAMES.inited")
+            || facts.has_string("inited")
             || deobfuscation
                 .decoded_strings
                 .iter()
                 .any(|value| value == "inited"),
-        sends_update_alert_event_literal: source.contains("EVENT_NAMES.updateAlert")
-            || contains_string_literal(source, "updateAlert")
+        sends_update_alert_event_literal: facts.has_member_path("EVENT_NAMES.updateAlert")
+            || facts.has_string("updateAlert")
             || deobfuscation
                 .decoded_strings
                 .iter()
@@ -1066,61 +1464,59 @@ fn quality_to_template_level(quality: SourceQuality) -> &'static str {
     }
 }
 
-fn encode_component(value: &str) -> String {
-    let mut encoded = String::new();
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push('%');
-            encoded.push(hex_digit(byte >> 4));
-            encoded.push(hex_digit(byte & 0x0f));
-        }
-    }
-    encoded
+fn render_template_url(
+    template: &str,
+    track_id: &str,
+    level: &str,
+) -> Result<String, url::ParseError> {
+    const COMPONENT_ENCODE_SET: &percent_encoding::AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'~');
+
+    let track_id = utf8_percent_encode(track_id, COMPONENT_ENCODE_SET).to_string();
+    let level = utf8_percent_encode(level, COMPONENT_ENCODE_SET).to_string();
+    let rendered = template
+        .replace("${id}", &track_id)
+        .replace("{id}", &track_id)
+        .replace("${level}", &level)
+        .replace("{level}", &level);
+    parse_http_url(&rendered).map(Into::into)
 }
 
-fn hex_digit(nibble: u8) -> char {
-    match nibble {
-        0..=9 => char::from(b'0' + nibble),
-        10..=15 => char::from(b'A' + (nibble - 10)),
-        _ => '0',
+fn parse_http_url(value: &str) -> Result<url::Url, url::ParseError> {
+    let url = url::Url::parse(value)?;
+    if matches!(url.scheme(), "http" | "https") && url.host_str().is_some() {
+        Ok(url)
+    } else {
+        Err(url::ParseError::RelativeUrlWithoutBase)
     }
 }
 
-fn scan_declared_actions(source: &str, decoded_strings: &[String]) -> Vec<SourceAction> {
+fn scan_declared_actions(facts: &JsAstFacts, decoded_strings: &[String]) -> Vec<SourceAction> {
     let mut actions = Vec::new();
-    if contains_string_literal(source, "musicSearch")
-        || source.contains("action === \"musicSearch\"")
-        || source.contains("action === \"search\"")
+    if facts.has_symbol("musicSearch")
+        || facts.has_string("search")
         || decoded_strings
             .iter()
             .any(|value| value == "musicSearch" || value == "search")
     {
         push_unique_action(&mut actions, SourceAction::MusicSearch);
     }
-    if contains_string_literal(source, "musicUrl")
-        || source.contains("action === \"musicUrl\"")
-        || decoded_strings.iter().any(|value| value == "musicUrl")
-    {
+    if facts.has_symbol("musicUrl") || decoded_strings.iter().any(|value| value == "musicUrl") {
         push_unique_action(&mut actions, SourceAction::MusicUrl);
     }
-    if contains_string_literal(source, "lyric")
-        || source.contains("action === \"lyric\"")
-        || decoded_strings.iter().any(|value| value == "lyric")
-    {
+    if facts.has_symbol("lyric") || decoded_strings.iter().any(|value| value == "lyric") {
         push_unique_action(&mut actions, SourceAction::Lyric);
     }
-    if contains_string_literal(source, "pic")
-        || source.contains("action === \"pic\"")
-        || decoded_strings.iter().any(|value| value == "pic")
-    {
+    if facts.has_symbol("pic") || decoded_strings.iter().any(|value| value == "pic") {
         push_unique_action(&mut actions, SourceAction::Pic);
     }
     actions
 }
 
-fn scan_declared_qualities(source: &str, decoded_strings: &[String]) -> Vec<SourceQuality> {
+fn scan_declared_qualities(facts: &JsAstFacts, decoded_strings: &[String]) -> Vec<SourceQuality> {
     let mut qualities = Vec::new();
     for (needle, aliases, quality) in [
         ("128k", &["standard"][..], SourceQuality::K128),
@@ -1137,7 +1533,7 @@ fn scan_declared_qualities(source: &str, decoded_strings: &[String]) -> Vec<Sour
             SourceQuality::Flac24Bit,
         ),
     ] {
-        if contains_string_literal(source, needle)
+        if facts.has_string(needle)
             || decoded_strings.iter().any(|value| value == needle)
             || aliases
                 .iter()
@@ -1150,13 +1546,13 @@ fn scan_declared_qualities(source: &str, decoded_strings: &[String]) -> Vec<Sour
 }
 
 fn scan_declared_sources(
-    source: &str,
+    facts: &JsAstFacts,
     declared_actions: &[SourceAction],
     declared_qualities: &[SourceQuality],
 ) -> BTreeMap<String, ImportedLxSourceInfo> {
     let mut sources = BTreeMap::new();
     for source_id in LX_SOURCE_KEYS {
-        if source_mentions_lx_key(source, source_id) {
+        if facts.has_symbol(source_id) {
             let qualities = if *source_id == LX_SOURCE_LOCAL {
                 Vec::new()
             } else {
@@ -1166,7 +1562,7 @@ fn scan_declared_sources(
                 (*source_id).to_owned(),
                 ImportedLxSourceInfo {
                     id: (*source_id).to_owned(),
-                    name: infer_source_display_name(source, source_id),
+                    name: infer_source_display_name(facts, source_id),
                     kind: LX_SOURCE_KIND_MUSIC.to_owned(),
                     actions: declared_actions.to_vec(),
                     qualities,
@@ -1177,7 +1573,7 @@ fn scan_declared_sources(
     sources
 }
 
-fn infer_source_display_name(source: &str, source_id: &str) -> String {
+fn infer_source_display_name(facts: &JsAstFacts, source_id: &str) -> String {
     for (id, display_name) in [
         (LX_SOURCE_WY, "网易云音乐"),
         (LX_SOURCE_TX, "QQ音乐"),
@@ -1186,7 +1582,7 @@ fn infer_source_display_name(source: &str, source_id: &str) -> String {
         (LX_SOURCE_MG, "咪咕音乐"),
         (LX_SOURCE_LOCAL, "本地音乐"),
     ] {
-        if source_id == id && source.contains(display_name) {
+        if source_id == id && facts.has_string(display_name) {
             return display_name.to_owned();
         }
     }
@@ -1202,14 +1598,16 @@ fn infer_source_display_name(source: &str, source_id: &str) -> String {
     }
 }
 
-fn scan_endpoint_report(source: &str, decoded_strings: &[String]) -> LxJsEndpointReport {
+fn scan_endpoint_report(facts: &JsAstFacts, decoded_strings: &[String]) -> LxJsEndpointReport {
     let mut urls = Vec::new();
-    collect_urls_from_text(source, &mut urls);
+    for literal in &facts.string_literals {
+        collect_urls_from_text(literal, &mut urls);
+    }
     for decoded in decoded_strings {
         collect_urls_from_text(decoded, &mut urls);
     }
 
-    let templates = scan_url_templates(source);
+    let templates = facts.url_templates.clone();
     let template_count = urls
         .iter()
         .filter(|url| is_url_template(url))
@@ -1238,110 +1636,8 @@ fn scan_endpoint_report(source: &str, decoded_strings: &[String]) -> LxJsEndpoin
     }
 }
 
-fn scan_url_templates(source: &str) -> Vec<LxUrlTemplate> {
-    let mut templates = Vec::new();
-    let mut cursor = 0;
-    while let Some(offset) = source[cursor..].find("URL_TEMPLATES") {
-        let name_end = cursor + offset + "URL_TEMPLATES".len();
-        let Some(const_start) = source[..name_end].rfind("const ") else {
-            cursor = name_end;
-            continue;
-        };
-        let family = source[const_start + "const ".len()..name_end]
-            .trim()
-            .trim_end_matches("URL_TEMPLATES")
-            .trim_end_matches('_')
-            .to_ascii_lowercase();
-        let Some(object_start_offset) = source[name_end..].find('{') else {
-            cursor = name_end;
-            continue;
-        };
-        let object_start = name_end + object_start_offset;
-        let Some(object_end) = find_matching_brace(source, object_start) else {
-            cursor = name_end;
-            continue;
-        };
-        let body = &source[object_start + 1..object_end];
-        collect_platform_templates(&family, body, &mut templates);
-        cursor = object_end.saturating_add(1);
-    }
-    templates
-}
-
-fn collect_platform_templates(family: &str, body: &str, templates: &mut Vec<LxUrlTemplate>) {
-    for line in body.lines() {
-        let line = line.trim().trim_end_matches(',');
-        let Some((raw_key, raw_value)) = line.split_once(':') else {
-            continue;
-        };
-        let source_id = raw_key.trim().trim_matches(['\'', '"']).to_owned();
-        if !LX_SOURCE_KEYS.contains(&source_id.as_str()) {
-            continue;
-        }
-        let raw_value = raw_value.trim();
-        if raw_value.is_empty() || !raw_value.contains("http") {
-            continue;
-        }
-        let url = raw_value
-            .trim_matches(['\'', '"', '`'])
-            .trim_end_matches(',')
-            .to_owned();
-        if !is_url_template(&url) {
-            continue;
-        }
-        templates.push(LxUrlTemplate {
-            family: family.to_owned(),
-            source_id,
-            domain: extract_domain(&url),
-            has_track_id_placeholder: url.contains("{id}") || url.contains("${id}"),
-            has_quality_placeholder: url.contains("{level}") || url.contains("${level}"),
-            url,
-        });
-    }
-}
-
 fn is_url_template(url: &str) -> bool {
     url.contains("{id}") || url.contains("{level}") || url.contains("${")
-}
-
-fn find_matching_brace(source: &str, open: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
-    if *bytes.get(open)? != b'{' {
-        return None;
-    }
-    let mut depth = 0usize;
-    let mut index = open;
-    let mut quote = None;
-    let mut escaped = false;
-
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == active_quote {
-                quote = None;
-            }
-            index += 1;
-            continue;
-        }
-
-        match byte {
-            b'\'' | b'"' | b'`' => quote = Some(byte),
-            b'{' => depth += 1,
-            b'}' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(index);
-                }
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-    None
 }
 
 fn collect_urls_from_text(text: &str, urls: &mut Vec<String>) {
@@ -1383,23 +1679,14 @@ fn earliest_offset(left: Option<usize>, right: Option<usize>) -> Option<usize> {
 }
 
 fn extract_domain(url: &str) -> Option<String> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))?;
-    let domain = rest
-        .split(['/', '?', '#'])
-        .next()?
-        .trim()
-        .trim_end_matches(':');
-    if domain.is_empty() {
-        None
-    } else {
-        Some(domain.to_owned())
-    }
+    url::Url::parse(url)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+        .and_then(|url| url.host_str().map(str::to_owned))
 }
 
-fn scan_obfuscation(source: &str) -> LxJsObfuscationReport {
-    let hex_identifier_count = source.matches("_0x").count();
+fn scan_obfuscation(source: &str, facts: &JsAstFacts) -> LxJsObfuscationReport {
+    let hex_identifier_count = facts.hex_identifier_count;
     let long_line_count = source.lines().filter(|line| line.len() > 1_000).count();
     let mut signals = Vec::new();
 
@@ -1411,19 +1698,29 @@ fn scan_obfuscation(source: &str) -> LxJsObfuscationReport {
     if long_line_count > 0 {
         signals.push(format!("contains {long_line_count} minified long line(s)"));
     }
-    if source.contains("while(!![])") || source.contains("while (!![])") {
+    if facts
+        .member_paths
+        .iter()
+        .any(|path| path.ends_with(".push"))
+        && facts
+            .member_paths
+            .iter()
+            .any(|path| path.ends_with(".shift"))
+    {
         signals.push("string-array rotation loop".to_owned());
     }
-    if source.contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=")
-        && source.contains("decodeURIComponent")
+    if facts.has_string("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=")
+        && facts.has_symbol("decodeURIComponent")
     {
         signals.push("base64 percent-decoder string table".to_owned());
     }
-    if source.contains("0x100") && source.contains("charCodeAt") && source.contains("fromCharCode")
+    if facts.numeric_literals.contains(&256)
+        && facts.has_symbol("charCodeAt")
+        && facts.has_symbol("fromCharCode")
     {
         signals.push("RC4-like string decoder".to_owned());
     }
-    if source.contains("qualitys") && scan_declared_qualities(source, &[]).is_empty() {
+    if facts.has_symbol("qualitys") && scan_declared_qualities(facts, &[]).is_empty() {
         signals.push("quality labels are not present as plain string literals".to_owned());
     }
 
@@ -1435,9 +1732,17 @@ fn scan_obfuscation(source: &str) -> LxJsObfuscationReport {
     }
 }
 
-fn deobfuscate_string_literals(source: &str, metadata: &LxJsMetadata) -> LxJsDeobfuscationReport {
-    let string_table = extract_largest_string_array(source);
-    let decoder_specs = extract_decoder_specs(source);
+fn deobfuscate_string_literals(
+    facts: &JsAstFacts,
+    metadata: &LxJsMetadata,
+) -> LxJsDeobfuscationReport {
+    let string_table = facts
+        .string_arrays
+        .iter()
+        .max_by_key(|values| values.len())
+        .cloned()
+        .unwrap_or_default();
+    let decoder_specs = &facts.decoder_specs;
     if string_table.is_empty() || decoder_specs.is_empty() {
         return LxJsDeobfuscationReport {
             string_table_len: string_table.len(),
@@ -1446,8 +1751,8 @@ fn deobfuscate_string_literals(source: &str, metadata: &LxJsMetadata) -> LxJsDeo
         };
     }
 
-    let aliases = extract_decoder_aliases(source, &decoder_specs);
-    let calls = extract_decoder_calls(source, &aliases);
+    let aliases = resolve_decoder_aliases(facts, decoder_specs);
+    let calls = decoder_calls_from_ast(facts, &aliases);
     if calls.is_empty() {
         return LxJsDeobfuscationReport {
             string_table_len: string_table.len(),
@@ -1467,272 +1772,59 @@ fn deobfuscate_string_literals(source: &str, metadata: &LxJsMetadata) -> LxJsDeo
     }
 }
 
-fn extract_largest_string_array(source: &str) -> Vec<String> {
-    let bytes = source.as_bytes();
-    let mut best = Vec::new();
-    let mut cursor = 0;
-
-    while cursor < bytes.len() {
-        let Some(open_offset) = source[cursor..].find('[') else {
-            break;
-        };
-        let mut index = cursor + open_offset + 1;
-        let mut values = Vec::new();
-
-        loop {
-            index = skip_ascii_whitespace(bytes, index);
-            if index >= bytes.len() {
-                break;
-            }
-            if bytes[index] == b']' {
-                if values.len() > best.len() {
-                    best = values;
-                }
-                break;
-            }
-            if bytes[index] != b'\'' && bytes[index] != b'"' {
-                break;
-            }
-
-            let Some((value, next_index)) = parse_js_string_literal(source, index) else {
-                break;
-            };
-            values.push(value);
-            index = skip_ascii_whitespace(bytes, next_index);
-
-            if index < bytes.len() && bytes[index] == b',' {
-                index += 1;
-                continue;
-            }
-            if index < bytes.len() && bytes[index] == b']' && values.len() > best.len() {
-                best = values;
-            }
-            break;
-        }
-
-        cursor += open_offset + 1;
-    }
-
-    best
-}
-
-fn parse_js_string_literal(source: &str, start: usize) -> Option<(String, usize)> {
-    let bytes = source.as_bytes();
-    let quote = *bytes.get(start)?;
-    if quote != b'\'' && quote != b'"' {
-        return None;
-    }
-
-    let mut value = String::new();
-    let mut index = start + 1;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        index += 1;
-        if byte == quote {
-            return Some((value, index));
-        }
-        if byte != b'\\' {
-            value.push(char::from(byte));
-            continue;
-        }
-
-        let escape = *bytes.get(index)?;
-        index += 1;
-        match escape {
-            b'n' => value.push('\n'),
-            b'r' => value.push('\r'),
-            b't' => value.push('\t'),
-            b'0' => value.push('\0'),
-            b'x' => {
-                let hex = source.get(index..index + 2)?;
-                let code = u8::from_str_radix(hex, 16).ok()?;
-                value.push(char::from(code));
-                index += 2;
-            }
-            b'u' => {
-                let hex = source.get(index..index + 4)?;
-                let code = u32::from_str_radix(hex, 16).ok()?;
-                value.push(char::from_u32(code)?);
-                index += 4;
-            }
-            _ => value.push(char::from(escape)),
-        }
-    }
-
-    None
-}
-
-fn skip_ascii_whitespace(bytes: &[u8], mut index: usize) -> usize {
-    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
-        index += 1;
-    }
-    index
-}
-
-fn extract_decoder_specs(source: &str) -> Vec<StringDecoderSpec> {
-    let mut specs = Vec::new();
-    let mut cursor = 0;
-    while let Some(offset) = source[cursor..].find("function _0x") {
-        let function_start = cursor + offset;
-        let Some(name_start) = source[function_start..].find("_0x") else {
-            break;
-        };
-        let name_start = function_start + name_start;
-        let name_end = read_identifier_end(source, name_start);
-        let name = source[name_start..name_end].to_owned();
-        let body = &source[name_end..source.len().min(name_end + 8_000)];
-        let Some(offset_index) = body.find("-0x").or_else(|| body.find("- 0x")) else {
-            cursor = name_end;
-            continue;
-        };
-        let offset_slice = &body[offset_index..];
-        let Some(hex_start) = offset_slice.find("0x") else {
-            cursor = name_end;
-            continue;
-        };
-        let hex_start = offset_index + hex_start + 2;
-        let hex = body[hex_start..]
-            .chars()
-            .take_while(char::is_ascii_hexdigit)
-            .collect::<String>();
-        let Ok(offset) = usize::from_str_radix(&hex, 16) else {
-            cursor = name_end;
-            continue;
-        };
-        let kind = if body.contains("0x100")
-            && body.contains("charCodeAt")
-            && body.contains("fromCharCode")
-        {
-            StringDecoderKind::Rc4
-        } else {
-            StringDecoderKind::Base64Percent
-        };
-        if !specs
-            .iter()
-            .any(|spec: &StringDecoderSpec| spec.name == name)
-        {
-            specs.push(StringDecoderSpec { name, offset, kind });
-        }
-        cursor = name_end;
-    }
-    specs
-}
-
-fn extract_decoder_aliases(
-    source: &str,
+fn resolve_decoder_aliases(
+    facts: &JsAstFacts,
     decoder_specs: &[StringDecoderSpec],
 ) -> BTreeMap<String, StringDecoderSpec> {
-    let mut aliases = BTreeMap::new();
-    for spec in decoder_specs {
-        aliases.insert(spec.name.clone(), spec.clone());
-    }
+    let mut aliases = decoder_specs
+        .iter()
+        .map(|spec| (spec.name.clone(), spec.clone()))
+        .collect::<BTreeMap<_, _>>();
 
-    let prefix = &source[..source.len().min(2_000)];
-    let mut cursor = 0;
-    while let Some(offset) = prefix[cursor..].find("_0x") {
-        let lhs_start = cursor + offset;
-        let lhs_end = read_identifier_end(prefix, lhs_start);
-        let lhs = &prefix[lhs_start..lhs_end];
-        let rest = &prefix[lhs_end..];
-        let Some(equal_offset) = rest.find('=') else {
-            cursor = lhs_end;
-            continue;
-        };
-        let rhs_start = skip_ascii_whitespace(prefix.as_bytes(), lhs_end + equal_offset + 1);
-        if !prefix[rhs_start..].starts_with("_0x") {
-            cursor = lhs_end;
-            continue;
+    loop {
+        let mut changed = false;
+        for (alias, target) in &facts.aliases {
+            let Some(spec) = aliases.get(target).cloned() else {
+                continue;
+            };
+            if aliases.insert(alias.clone(), spec).is_none() {
+                changed = true;
+            }
         }
-        let rhs_end = read_identifier_end(prefix, rhs_start);
-        let rhs = &prefix[rhs_start..rhs_end];
-        if let Some(spec) = aliases.get(rhs).cloned() {
-            aliases.insert(lhs.to_owned(), spec);
+        if !changed {
+            break;
         }
-        cursor = rhs_end;
     }
 
     aliases
 }
 
-fn extract_decoder_calls(
-    source: &str,
+fn decoder_calls_from_ast(
+    facts: &JsAstFacts,
     aliases: &BTreeMap<String, StringDecoderSpec>,
 ) -> Vec<DecoderCall> {
-    let mut calls = Vec::new();
-    for (alias, spec) in aliases {
-        let pattern = format!("{alias}(");
-        let mut cursor = 0;
-        while let Some(offset) = source[cursor..].find(&pattern) {
-            let call_start = cursor + offset + pattern.len();
-            if let Some((index, key)) = parse_decoder_call_args(source, call_start, spec.kind) {
-                calls.push(DecoderCall {
-                    decoder: spec.clone(),
-                    index,
-                    key,
-                });
+    facts
+        .calls
+        .iter()
+        .filter_map(|call| {
+            let decoder = aliases.get(&call.callee)?.clone();
+            let AstValue::Number(index) = call.arguments.first()? else {
+                return None;
+            };
+            let key = call.arguments.get(1).and_then(|value| match value {
+                AstValue::String(value) => Some(value.clone()),
+                _ => None,
+            });
+            if decoder.kind == StringDecoderKind::Rc4 && key.is_none() {
+                return None;
             }
-            cursor = call_start;
-        }
-    }
-    calls
-}
-
-fn parse_decoder_call_args(
-    source: &str,
-    args_start: usize,
-    kind: StringDecoderKind,
-) -> Option<(usize, Option<String>)> {
-    let bytes = source.as_bytes();
-    let index_start = skip_ascii_whitespace(bytes, args_start);
-    let (index, index_end) = parse_js_number(source, index_start)?;
-    if kind == StringDecoderKind::Base64Percent {
-        let close = skip_ascii_whitespace(bytes, index_end);
-        if close < bytes.len() && bytes[close] == b')' {
-            return Some((index, None));
-        }
-    }
-
-    let comma = skip_ascii_whitespace(bytes, index_end);
-    if comma >= bytes.len() || bytes[comma] != b',' {
-        return None;
-    }
-    let key_start = skip_ascii_whitespace(bytes, comma + 1);
-    let (key, _) = parse_js_string_literal(source, key_start)?;
-    Some((index, Some(key)))
-}
-
-fn parse_js_number(source: &str, start: usize) -> Option<(usize, usize)> {
-    let tail = source.get(start..)?;
-    if tail.starts_with("0x") || tail.starts_with("0X") {
-        let digits = tail[2..]
-            .chars()
-            .take_while(char::is_ascii_hexdigit)
-            .collect::<String>();
-        if digits.is_empty() {
-            return None;
-        }
-        let value = usize::from_str_radix(&digits, 16).ok()?;
-        return Some((value, start + 2 + digits.len()));
-    }
-
-    let digits = tail
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>();
-    if digits.is_empty() {
-        return None;
-    }
-    let value = digits.parse::<usize>().ok()?;
-    Some((value, start + digits.len()))
-}
-
-fn read_identifier_end(source: &str, start: usize) -> usize {
-    source[start..]
-        .find(|character: char| {
-            !(character == '_' || character == 'x' || character.is_ascii_hexdigit())
+            Some(DecoderCall {
+                decoder,
+                index: *index,
+                key,
+            })
         })
-        .map(|offset| start + offset)
-        .unwrap_or(source.len())
+        .collect()
 }
 
 fn infer_rotation(
@@ -1895,14 +1987,6 @@ fn is_useful_decoded_string(value: &str) -> bool {
     value.chars().all(|character| {
         !character.is_control() || character == '\n' || character == '\r' || character == '\t'
     })
-}
-
-fn source_mentions_lx_key(source: &str, key: &str) -> bool {
-    contains_string_literal(source, key) || source.contains(&format!("{key}:"))
-}
-
-fn contains_string_literal(source: &str, value: &str) -> bool {
-    source.contains(&format!("\"{value}\"")) || source.contains(&format!("'{value}'"))
 }
 
 fn push_unique_action(actions: &mut Vec<SourceAction>, action: SourceAction) {
@@ -2391,6 +2475,108 @@ mod tests {
                 .declared_qualities
                 .contains(&SourceQuality::Flac));
         }
+    }
+
+    #[test]
+    fn ast_analysis_should_preserve_utf8_string_arrays() {
+        let parsed = parse_with_oxc(
+            Path::new("unicode.js"),
+            r#"const labels = ["网易云音乐", "晴天", "こんにちは"];
+               globalThis.lx.send(globalThis.lx.EVENT_NAMES.inited, labels);"#,
+        )
+        .expect("Unicode JavaScript should parse");
+
+        assert!(parsed.facts.string_arrays.iter().any(|values| {
+            values
+                == &[
+                    "网易云音乐".to_owned(),
+                    "晴天".to_owned(),
+                    "こんにちは".to_owned(),
+                ]
+        }));
+    }
+
+    #[test]
+    fn ast_analysis_should_extract_multiline_url_template_objects() {
+        let report = analyze_lx_js_source(
+            "templates.js",
+            r#"
+                const CUSTOM_URL_TEMPLATES = {
+                    wy:
+                        "https://example.test/resolve?id={id}&level={level}",
+                    tx: `https://music.example.test/play?id={id}&level={level}`,
+                };
+                const { EVENT_NAMES, on, send } = globalThis.lx;
+                on(EVENT_NAMES.request, () => "musicUrl");
+                send(EVENT_NAMES.inited, { sources: { wy: "网易云音乐", tx: "QQ音乐" } });
+                const qualitys = ["128k", "320k"];
+            "#,
+        )
+        .expect("template JavaScript should analyze");
+
+        assert_eq!(report.endpoint.templates.len(), 2);
+        assert!(report.endpoint.templates.iter().all(|template| {
+            template.family == "custom"
+                && template.has_track_id_placeholder
+                && template.has_quality_placeholder
+        }));
+    }
+
+    #[test]
+    fn metadata_should_be_read_from_all_parser_comments() {
+        let source = format!(
+            "{}\n/**\n * @name Late Metadata\n * @version 2.0.0\n */\nconst value = 'musicUrl';",
+            "\n".repeat(150)
+        );
+
+        let report = analyze_lx_js_source("metadata.js", &source)
+            .expect("metadata JavaScript should analyze");
+
+        assert_eq!(report.metadata.name.as_deref(), Some("Late Metadata"));
+        assert_eq!(report.metadata.version.as_deref(), Some("2.0.0"));
+    }
+
+    #[test]
+    fn append_query_params_should_preserve_existing_query_and_fragment() {
+        let result = append_query_params(
+            "https://example.test/search?existing=1#player",
+            &[
+                ("keyword", "晴天 & friends".to_owned()),
+                ("mode", "lossless".to_owned()),
+            ],
+        )
+        .expect("HTTP URL should accept query parameters");
+        let url = url::Url::parse(&result).expect("result should remain a valid URL");
+        let pairs = url.query_pairs().into_owned().collect::<BTreeMap<_, _>>();
+
+        assert_eq!(url.fragment(), Some("player"));
+        assert_eq!(pairs.get("existing").map(String::as_str), Some("1"));
+        assert_eq!(
+            pairs.get("keyword").map(String::as_str),
+            Some("晴天 & friends")
+        );
+        assert_eq!(pairs.get("mode").map(String::as_str), Some("lossless"));
+    }
+
+    #[test]
+    fn render_template_url_should_encode_placeholders_and_reject_non_http_schemes() {
+        let rendered = render_template_url(
+            "https://example.test/play/{id}?level={level}",
+            "晴天 / live?",
+            "lossless",
+        )
+        .expect("HTTP template should render");
+
+        assert!(rendered.contains("%E6%99%B4%E5%A4%A9%20%2F%20live%3F"));
+        assert!(render_template_url("file:///tmp/{id}", "track", "standard").is_err());
+    }
+
+    #[test]
+    fn extract_domain_should_use_url_host_parsing() {
+        assert_eq!(
+            extract_domain("https://user:secret@[2001:db8::1]:8443/play?id=1"),
+            Some("[2001:db8::1]".to_owned())
+        );
     }
 
     #[test]

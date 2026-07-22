@@ -9,6 +9,7 @@ import {
   Gauge,
   Headphones,
   Library,
+  ListOrdered,
   Menu,
   Music2,
   Pause,
@@ -16,99 +17,40 @@ import {
   Play,
   Plug,
   RefreshCw,
+  Repeat2,
   RotateCcw,
   Settings,
+  Shuffle,
+  SkipBack,
+  SkipForward,
   Volume2,
   X,
 } from "@lucide/vue";
 import PluginManager from "./components/PluginManager.vue";
 import NeteaseSource from "./components/NeteaseSource.vue";
+import NowPlayingPanel from "./components/NowPlayingPanel.vue";
 import type { NeteasePlayback } from "./lib/netease-api";
+import { TAURI_COMMANDS } from "./generated/bindings";
+import type {
+  LocalTrack,
+  LocalTrackPlaybackDetails,
+  MediaSource,
+  RemoteCommandError,
+  RemoteMediaSource,
+  RemoteSearchResults,
+  ResolvedLyrics,
+  ScanProgressEvent,
+  ScanStatus,
+  SourceSearchResult,
+  TrackLyricsQuery,
+} from "./generated/bindings";
 import {
   DEFAULT_UI_PREFERENCES,
   loadUiPreferences,
   saveUiPreferences,
+  type PlaybackMode,
   type ThemePreference,
 } from "./lib/ui-preferences";
-
-type LocalTrack = {
-  id: number;
-  filePath: string;
-  fileName: string;
-  title: string;
-  artist: string | null;
-  album: string | null;
-  durationSeconds: number | null;
-  trackNumber: number | null;
-  discNumber: number | null;
-  fileSizeBytes: number;
-  modifiedAt: number | null;
-  indexedAt: number;
-};
-
-type ScanStatus = {
-  isRunning: boolean;
-  folderPath: string | null;
-  discoveredFiles: number;
-  scannedFiles: number;
-  indexedTracks: number;
-  skippedFiles: number;
-  errorCount: number;
-  lastError: string | null;
-  startedAt: number | null;
-  finishedAt: number | null;
-};
-
-type ScanProgressEvent = {
-  status: ScanStatus;
-  message: string | null;
-};
-
-type MediaSource = {
-  filePath: string;
-  mimeType: string;
-};
-
-type RemoteMediaSource = {
-  url: string;
-  mimeType: string;
-  diagnostics: Array<{
-    sourceId: string;
-    level: string;
-    message: string;
-  }>;
-};
-
-type RemoteCommandError = {
-  message: string;
-  diagnostics?: Array<{
-    sourceId: string;
-    level: string;
-    message: string;
-  }>;
-};
-
-type RemoteSearchResult = {
-  id: string;
-  source: string;
-  title: string;
-  artist: string;
-  album: string | null;
-  durationSeconds: number | null;
-  coverUrl: string | null;
-  rawInfo: Record<string, unknown>;
-};
-
-type RemoteSearchResults = {
-  isEnd: boolean;
-  total: number | null;
-  list: RemoteSearchResult[];
-  diagnostics: Array<{
-    sourceId: string;
-    level: string;
-    message: string;
-  }>;
-};
 
 type PlaybackSource = {
   filePath?: string;
@@ -175,8 +117,14 @@ const isPlaying = ref(false);
 const playbackPosition = ref(0);
 const playbackDuration = ref(0);
 const volume = ref(savedUiPreferences.volume);
+const playbackMode = ref<PlaybackMode>(savedUiPreferences.playbackMode);
 const themePreference = ref(savedUiPreferences.theme);
 const layoutDensity = ref(savedUiPreferences.density);
+const nowPlayingCoverUrl = ref<string | null>(null);
+const activeLyrics = ref<ResolvedLyrics | null>(null);
+const activeRemoteLyricsQuery = ref<TrackLyricsQuery | null>(null);
+const isLoadingLyrics = ref(false);
+const lyricsError = ref<string | null>(null);
 const isLoadingTracks = ref(false);
 const isChoosingFolder = ref(false);
 const isStartingScan = ref(false);
@@ -191,13 +139,14 @@ const remoteQuality = ref(savedUiPreferences.streamQuality);
 const remoteTrackId = ref("");
 const remoteDiagnostics = ref<string[]>([]);
 const remoteSearchKeyword = ref("");
-const remoteSearchResults = ref<RemoteSearchResult[]>([]);
+const remoteSearchResults = ref<SourceSearchResult[]>([]);
 const remoteSearchTotal = ref<number | null>(null);
 const isSearchingRemote = ref(false);
 const activeRemoteRequestId = ref<string | null>(null);
 const isCancellingRemoteRequest = ref(false);
 
 let unlistenScanProgress: UnlistenFn | null = null;
+let playbackDetailsGeneration = 0;
 
 const hasTracks = computed(() => tracks.value.length > 0);
 const visibleTracks = computed(() => tracks.value.slice(0, 200));
@@ -235,6 +184,41 @@ const nowPlayingSubtitle = computed(() => {
 });
 const hasActiveRemoteRequest = computed(() => activeRemoteRequestId.value !== null);
 const volumePercent = computed(() => Math.round(volume.value * 100));
+const activeTrackIndex = computed(() =>
+  activeTrack.value ? tracks.value.findIndex((track) => track.id === activeTrack.value?.id) : -1,
+);
+const canGoPrevious = computed(() => {
+  if (activeTrackIndex.value < 0 || tracks.value.length === 0) {
+    return false;
+  }
+  return playbackMode.value !== "sequential" || activeTrackIndex.value > 0;
+});
+const canGoNext = computed(() => {
+  if (activeTrackIndex.value < 0 || tracks.value.length === 0) {
+    return false;
+  }
+  return playbackMode.value !== "sequential" || activeTrackIndex.value < tracks.value.length - 1;
+});
+const playbackModeLabel = computed(() => {
+  switch (playbackMode.value) {
+    case "shuffle":
+      return "Shuffle";
+    case "repeat":
+      return "Repeat all";
+    default:
+      return "Sequential";
+  }
+});
+const nextPlaybackModeLabel = computed(() => {
+  switch (playbackMode.value) {
+    case "sequential":
+      return "Shuffle";
+    case "shuffle":
+      return "Repeat all";
+    default:
+      return "Sequential";
+  }
+});
 
 watch(themePreference, applyTheme, { immediate: true });
 watch(volume, updateVolume);
@@ -242,12 +226,13 @@ watch(audioUrl, () => {
   playbackPosition.value = 0;
   playbackDuration.value = 0;
 });
-watch([themePreference, layoutDensity, remoteQuality, volume], () => {
+watch([themePreference, layoutDensity, remoteQuality, volume, playbackMode], () => {
   saveUiPreferences({
     theme: themePreference.value,
     density: layoutDensity.value,
     streamQuality: remoteQuality.value,
     volume: volume.value,
+    playbackMode: playbackMode.value,
   });
 });
 
@@ -257,6 +242,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unlistenScanProgress?.();
+  playbackDetailsGeneration += 1;
   void cancelActiveRemoteRequest();
 });
 
@@ -289,6 +275,7 @@ function resetUiPreferences() {
   layoutDensity.value = DEFAULT_UI_PREFERENCES.density;
   remoteQuality.value = DEFAULT_UI_PREFERENCES.streamQuality;
   volume.value = DEFAULT_UI_PREFERENCES.volume;
+  playbackMode.value = DEFAULT_UI_PREFERENCES.playbackMode;
 }
 
 async function cancelActiveRemoteRequest() {
@@ -299,7 +286,7 @@ async function cancelActiveRemoteRequest() {
 
   isCancellingRemoteRequest.value = true;
   try {
-    await invoke("cancel_source_request", { requestId });
+    await invoke(TAURI_COMMANDS.cancelSourceRequest, { requestId });
   } catch (error) {
     appError.value = normalizeError(error);
   } finally {
@@ -319,7 +306,7 @@ async function bindScanProgress() {
 }
 
 async function loadScanStatus() {
-  scanStatus.value = await invoke<ScanStatus>("get_scan_status");
+  scanStatus.value = await invoke<ScanStatus>(TAURI_COMMANDS.getScanStatus);
   selectedFolder.value = scanStatus.value.folderPath;
 }
 
@@ -328,7 +315,7 @@ async function loadTracks() {
   appError.value = null;
 
   try {
-    tracks.value = await invoke<LocalTrack[]>("list_local_tracks");
+    tracks.value = await invoke<LocalTrack[]>(TAURI_COMMANDS.listLocalTracks);
   } catch (error) {
     appError.value = normalizeError(error);
   } finally {
@@ -341,7 +328,7 @@ async function chooseFolder() {
   appError.value = null;
 
   try {
-    const folder = await invoke<string | null>("select_music_folder");
+    const folder = await invoke<string | null>(TAURI_COMMANDS.selectMusicFolder);
     if (folder) {
       selectedFolder.value = folder;
     }
@@ -362,7 +349,7 @@ async function startScan() {
   scanMessage.value = null;
 
   try {
-    scanStatus.value = await invoke<ScanStatus>("start_library_scan", {
+    scanStatus.value = await invoke<ScanStatus>(TAURI_COMMANDS.startLibraryScan, {
       folderPath: selectedFolder.value,
     });
   } catch (error) {
@@ -372,12 +359,108 @@ async function startScan() {
   }
 }
 
+function resetPlaybackDetails(
+  coverUrl: string | null,
+  remoteQuery: TrackLyricsQuery | null = null,
+) {
+  playbackDetailsGeneration += 1;
+  nowPlayingCoverUrl.value = coverUrl;
+  activeLyrics.value = null;
+  activeRemoteLyricsQuery.value = remoteQuery;
+  lyricsError.value = null;
+  isLoadingLyrics.value = false;
+  return playbackDetailsGeneration;
+}
+
+async function loadLocalTrackPlaybackDetails(track: LocalTrack, reset = true) {
+  const generation = reset
+    ? resetPlaybackDetails(null)
+    : ++playbackDetailsGeneration;
+  isLoadingLyrics.value = true;
+  lyricsError.value = null;
+
+  try {
+    const details = await invoke<LocalTrackPlaybackDetails>(
+      TAURI_COMMANDS.localTrackPlaybackDetails,
+      { trackId: track.id },
+    );
+    if (generation !== playbackDetailsGeneration || activeTrack.value?.id !== track.id) {
+      return;
+    }
+    nowPlayingCoverUrl.value = details.coverDataUrl;
+    activeLyrics.value = details.lyrics;
+    lyricsError.value = details.lyricsError;
+  } catch (error) {
+    if (generation === playbackDetailsGeneration && activeTrack.value?.id === track.id) {
+      lyricsError.value = normalizeError(error);
+    }
+  } finally {
+    if (generation === playbackDetailsGeneration) {
+      isLoadingLyrics.value = false;
+    }
+  }
+}
+
+async function loadRemoteTrackLyrics(
+  query: TrackLyricsQuery,
+  coverUrl: string | null,
+  reset = true,
+) {
+  const generation = reset
+    ? resetPlaybackDetails(coverUrl, query)
+    : ++playbackDetailsGeneration;
+  activeRemoteLyricsQuery.value = query;
+  isLoadingLyrics.value = true;
+  lyricsError.value = null;
+
+  try {
+    const lyrics = await invoke<ResolvedLyrics | null>(TAURI_COMMANDS.resolveRemoteTrackLyrics, {
+      query,
+    });
+    if (generation !== playbackDetailsGeneration || activeTrack.value) {
+      return;
+    }
+    activeLyrics.value = lyrics;
+  } catch (error) {
+    if (generation === playbackDetailsGeneration && !activeTrack.value) {
+      lyricsError.value = normalizeError(error);
+    }
+  } finally {
+    if (generation === playbackDetailsGeneration) {
+      isLoadingLyrics.value = false;
+    }
+  }
+}
+
+function lyricsQueryForRemoteTrack(track: SourceSearchResult): TrackLyricsQuery {
+  return {
+    title: track.title,
+    artist: track.artist || null,
+    album: track.album,
+    durationSeconds: track.durationSeconds,
+    source: track.source,
+    trackId: track.id,
+  };
+}
+
+function retryLyrics() {
+  if (activeTrack.value) {
+    void loadLocalTrackPlaybackDetails(activeTrack.value, false);
+  } else if (activeRemoteLyricsQuery.value) {
+    void loadRemoteTrackLyrics(
+      activeRemoteLyricsQuery.value,
+      nowPlayingCoverUrl.value,
+      false,
+    );
+  }
+}
+
 async function playTrack(track: LocalTrack) {
   isPreparingPlayback.value = true;
   appError.value = null;
 
   try {
-    const source = await invoke<MediaSource>("local_track_media_source", {
+    const source = await invoke<MediaSource>(TAURI_COMMANDS.localTrackMediaSource, {
       trackId: track.id,
     });
 
@@ -386,6 +469,7 @@ async function playTrack(track: LocalTrack) {
     activeRemoteProvider.value = null;
     activeSource.value = source;
     audioUrl.value = convertFileSrc(source.filePath);
+    void loadLocalTrackPlaybackDetails(track);
 
     await nextTick();
     if (audioElement.value) {
@@ -417,13 +501,16 @@ async function playRemoteTrack() {
   const requestId = beginRemoteRequest();
 
   try {
-    const source = await invoke<RemoteMediaSource>("resolve_imported_lx_template_music_url", {
+    const source = await invoke<RemoteMediaSource>(
+      TAURI_COMMANDS.resolveImportedLxTemplateMusicUrl,
+      {
       family: remoteFamily.value,
       source: remoteSource.value,
       trackId: remoteTrackId.value.trim(),
       quality: remoteQuality.value,
       requestId,
-    });
+      },
+    );
 
     activeTrack.value = null;
     activeRemoteTitle.value = `${remoteFamily.value}:${remoteSource.value}:${remoteTrackId.value.trim()}`;
@@ -431,6 +518,7 @@ async function playRemoteTrack() {
     activeSource.value = { url: source.url, mimeType: source.mimeType };
     audioUrl.value = source.url;
     remoteDiagnostics.value = source.diagnostics.map((diagnostic) => diagnostic.message);
+    resetPlaybackDetails(null);
 
     await nextTick();
     if (audioElement.value) {
@@ -465,7 +553,7 @@ async function searchRemoteMusic() {
   const requestId = beginRemoteRequest();
 
   try {
-    const response = await invoke<RemoteSearchResults>("search_qishui_music", {
+    const response = await invoke<RemoteSearchResults>(TAURI_COMMANDS.searchQishuiMusic, {
       keyword: remoteSearchKeyword.value.trim(),
       page: 1,
       pageSize: 20,
@@ -485,7 +573,7 @@ async function searchRemoteMusic() {
   }
 }
 
-async function playRemoteSearchResult(result: RemoteSearchResult) {
+async function playRemoteSearchResult(result: SourceSearchResult) {
   if (hasActiveRemoteRequest.value) {
     return;
   }
@@ -496,7 +584,7 @@ async function playRemoteSearchResult(result: RemoteSearchResult) {
   const requestId = beginRemoteRequest();
 
   try {
-    const source = await invoke<RemoteMediaSource>("resolve_qishui_music_url", {
+    const source = await invoke<RemoteMediaSource>(TAURI_COMMANDS.resolveQishuiMusicUrl, {
       musicInfo: result.rawInfo,
       quality: remoteQuality.value,
       requestId,
@@ -508,6 +596,7 @@ async function playRemoteSearchResult(result: RemoteSearchResult) {
     activeSource.value = { url: source.url, mimeType: source.mimeType };
     audioUrl.value = source.url;
     remoteDiagnostics.value = source.diagnostics.map((diagnostic) => diagnostic.message);
+    void loadRemoteTrackLyrics(lyricsQueryForRemoteTrack(result), result.coverUrl);
 
     await nextTick();
     if (audioElement.value) {
@@ -538,6 +627,10 @@ async function playNeteasePlayback(playback: NeteasePlayback) {
     activeRemoteProvider.value = "NetEase Cloud Music";
     activeSource.value = { url: playback.url, mimeType: playback.mimeType };
     audioUrl.value = playback.url;
+    void loadRemoteTrackLyrics(
+      lyricsQueryForRemoteTrack(playback.track),
+      playback.track.coverUrl,
+    );
 
     await nextTick();
     if (audioElement.value) {
@@ -575,15 +668,84 @@ async function togglePlayback() {
   }
 }
 
+function cyclePlaybackMode() {
+  switch (playbackMode.value) {
+    case "sequential":
+      playbackMode.value = "shuffle";
+      break;
+    case "shuffle":
+      playbackMode.value = "repeat";
+      break;
+    default:
+      playbackMode.value = "sequential";
+  }
+}
+
+async function playPreviousTrack() {
+  const currentIndex = activeTrackIndex.value;
+  if (currentIndex < 0 || tracks.value.length === 0) {
+    return;
+  }
+
+  let previousIndex: number;
+  if (playbackMode.value === "shuffle") {
+    previousIndex = randomTrackIndex(currentIndex);
+  } else if (currentIndex > 0) {
+    previousIndex = currentIndex - 1;
+  } else if (playbackMode.value === "repeat") {
+    previousIndex = tracks.value.length - 1;
+  } else {
+    return;
+  }
+
+  const track = tracks.value[previousIndex];
+  if (track) {
+    await playTrack(track);
+  }
+}
+
+async function playNextTrack() {
+  const currentIndex = activeTrackIndex.value;
+  if (currentIndex < 0 || tracks.value.length === 0) {
+    return;
+  }
+
+  let nextIndex: number;
+  if (playbackMode.value === "shuffle") {
+    nextIndex = randomTrackIndex(currentIndex);
+  } else if (currentIndex < tracks.value.length - 1) {
+    nextIndex = currentIndex + 1;
+  } else if (playbackMode.value === "repeat") {
+    nextIndex = 0;
+  } else {
+    return;
+  }
+
+  const track = tracks.value[nextIndex];
+  if (track) {
+    await playTrack(track);
+  }
+}
+
+function randomTrackIndex(currentIndex: number) {
+  if (tracks.value.length <= 1) {
+    return 0;
+  }
+
+  const candidate = Math.floor(Math.random() * (tracks.value.length - 1));
+  return candidate >= currentIndex ? candidate + 1 : candidate;
+}
+
 function updateVolume() {
   if (audioElement.value) {
     audioElement.value.volume = volume.value;
   }
 }
 
-function onAudioEnded() {
+async function onAudioEnded() {
   isPlaying.value = false;
   playbackPosition.value = playbackDuration.value;
+  await playNextTrack();
 }
 
 function onAudioPause() {
@@ -720,13 +882,13 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
 
 <template>
   <div
-    class="drawer min-h-screen bg-base-200 text-base-content md:drawer-open"
+    class="drawer h-screen overflow-hidden bg-base-200 text-base-content md:drawer-open"
     :data-density="layoutDensity"
   >
     <input id="app-sidebar" v-model="sidebarOpen" type="checkbox" class="drawer-toggle" />
 
-    <div class="drawer-content flex min-h-screen min-w-0 flex-col">
-      <header class="navbar sticky top-0 z-30 min-h-16 border-b border-base-300 bg-base-100 px-3 sm:px-4 lg:px-6">
+    <div class="drawer-content flex h-screen min-h-0 min-w-0 flex-col">
+      <header class="navbar z-30 min-h-16 shrink-0 border-b border-base-300 bg-base-100 px-3 sm:px-4 lg:px-6">
         <div class="navbar-start min-w-0 flex-1 gap-2 sm:gap-3">
           <label
             for="app-sidebar"
@@ -779,7 +941,7 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
         </div>
       </header>
 
-      <main class="flex-1">
+      <main class="min-h-0 flex-1 overflow-y-auto">
         <section
           v-if="activeSection === 'local' || activeSection === 'sources'"
           class="mx-auto flex w-full max-w-7xl flex-col"
@@ -802,7 +964,7 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
           <div
             :class="
               activeSection === 'local'
-                ? 'grid gap-4 xl:grid-cols-[minmax(0,1fr)_18rem]'
+                ? 'grid gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]'
                 : 'block'
             "
           >
@@ -867,8 +1029,14 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
                       class="btn btn-square btn-ghost btn-sm"
                       type="button"
                       :disabled="isPreparingPlayback"
-                      :aria-label="`Play ${track.title}`"
-                      @click="playTrack(track)"
+                      :aria-label="
+                        activeTrack?.id === track.id && isPlaying
+                          ? `Pause ${track.title}`
+                          : `Play ${track.title}`
+                      "
+                      @click="
+                        activeTrack?.id === track.id ? togglePlayback() : playTrack(track)
+                      "
                     >
                       <Pause v-if="activeTrack?.id === track.id && isPlaying" :size="16" aria-hidden="true" />
                       <Play v-else :size="16" aria-hidden="true" />
@@ -889,9 +1057,25 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
         </section>
 
           <aside
-            class="flex flex-col gap-4"
-            :class="activeSection === 'sources' ? 'mx-auto w-full max-w-6xl' : ''"
+            :class="
+              activeSection === 'sources'
+                ? 'mx-auto grid w-full max-w-7xl gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]'
+                : 'flex flex-col gap-4'
+            "
           >
+          <NowPlayingPanel
+            :class="activeSection === 'sources' ? 'xl:col-start-2 xl:row-start-1' : ''"
+            :title="nowPlayingTitle"
+            :subtitle="nowPlayingSubtitle"
+            :cover-url="nowPlayingCoverUrl"
+            :lyrics="activeLyrics"
+            :lyrics-loading="isLoadingLyrics"
+            :lyrics-error="lyricsError"
+            :playback-position="playbackPosition"
+            :can-retry="Boolean(activeTrack || activeRemoteLyricsQuery)"
+            @retry-lyrics="retryLyrics"
+          />
+
           <section
             v-if="activeSection === 'local'"
             class="rounded border border-base-300 bg-base-100 p-4"
@@ -931,8 +1115,11 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
             </div>
           </section>
 
-          <NeteaseSource
+          <div
             v-if="activeSection === 'sources'"
+            class="flex min-w-0 flex-col gap-4 xl:col-start-1 xl:row-start-1"
+          >
+          <NeteaseSource
             :stream-quality="remoteQuality"
             @playback-ready="playNeteasePlayback"
             @open-plugins="selectSection('plugins')"
@@ -1064,6 +1251,7 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
               </div>
             </div>
           </section>
+          </div>
 
         </aside>
       </div>
@@ -1199,7 +1387,7 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
       </main>
 
       <footer
-        class="sticky bottom-0 z-30 border-t border-base-300 bg-base-100/95 backdrop-blur"
+        class="z-30 shrink-0 border-t border-base-300 bg-base-100/95 backdrop-blur"
         aria-label="Playback bar"
       >
         <div
@@ -1207,8 +1395,14 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
           :class="layoutDensity === 'compact' ? 'px-3 py-2 lg:px-4' : 'px-4 py-3 lg:px-6'"
         >
           <div class="flex min-w-0 items-center gap-3">
-            <div class="flex size-10 shrink-0 items-center justify-center rounded bg-base-200 sm:size-11">
-              <Music2 :size="21" aria-hidden="true" />
+            <div class="flex size-10 shrink-0 items-center justify-center overflow-hidden rounded bg-base-200 sm:size-11">
+              <img
+                v-if="nowPlayingCoverUrl"
+                class="size-full object-cover"
+                :src="nowPlayingCoverUrl"
+                alt=""
+              />
+              <Music2 v-else :size="21" aria-hidden="true" />
             </div>
             <div class="min-w-0">
               <div class="truncate text-sm font-medium">{{ nowPlayingTitle }}</div>
@@ -1217,39 +1411,87 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
           </div>
 
           <div
-            class="col-span-2 flex min-w-0 items-center gap-2 md:col-span-1 md:col-start-2 md:row-start-1"
+            class="col-span-2 flex min-w-0 flex-col gap-1.5 md:col-span-1 md:col-start-2 md:row-start-1"
           >
-            <button
-              class="btn btn-circle btn-neutral btn-sm shrink-0"
-              type="button"
-              :disabled="isPreparingPlayback || (!activeTrack && !activeRemoteTitle && !tracks.length)"
-              :aria-label="isPlaying ? 'Pause playback' : 'Play playback'"
-              :title="isPlaying ? 'Pause' : 'Play'"
-              @click="togglePlayback"
-            >
-              <RefreshCw v-if="isPreparingPlayback" class="animate-spin" :size="17" aria-hidden="true" />
-              <Pause v-else-if="isPlaying" :size="17" aria-hidden="true" />
-              <Play v-else :size="17" aria-hidden="true" />
-            </button>
+            <div class="flex h-9 items-center justify-center gap-1">
+              <div
+                class="tooltip tooltip-top"
+                :data-tip="`${playbackModeLabel}; next: ${nextPlaybackModeLabel}`"
+              >
+                <button
+                  class="btn btn-square btn-ghost btn-sm"
+                  type="button"
+                  :aria-label="`Playback mode: ${playbackModeLabel}. Change to ${nextPlaybackModeLabel}`"
+                  :title="`Playback mode: ${playbackModeLabel}`"
+                  data-testid="playback-mode"
+                  @click="cyclePlaybackMode"
+                >
+                  <ListOrdered v-if="playbackMode === 'sequential'" :size="16" aria-hidden="true" />
+                  <Shuffle v-else-if="playbackMode === 'shuffle'" :size="16" aria-hidden="true" />
+                  <Repeat2 v-else :size="16" aria-hidden="true" />
+                </button>
+              </div>
 
-            <span class="hidden w-9 text-right text-xs tabular-nums text-base-content/60 sm:block">
-              {{ formatPlaybackTime(playbackPosition) }}
-            </span>
-            <input
-              class="range range-xs min-w-0 flex-1"
-              type="range"
-              min="0"
-              :max="Math.max(playbackDuration, 1)"
-              step="0.1"
-              :value="playbackPosition"
-              :disabled="!audioUrl || playbackDuration <= 0"
-              aria-label="Seek playback"
-              :aria-valuetext="`${formatPlaybackTime(playbackPosition)} of ${formatPlaybackTime(playbackDuration)}`"
-              @input="seekPlayback"
-            />
-            <span class="hidden w-9 text-xs tabular-nums text-base-content/60 sm:block">
-              {{ formatPlaybackTime(playbackDuration) }}
-            </span>
+              <div class="tooltip tooltip-top" data-tip="Previous">
+                <button
+                  class="btn btn-square btn-ghost btn-sm"
+                  type="button"
+                  :disabled="isPreparingPlayback || !canGoPrevious"
+                  aria-label="Previous track"
+                  title="Previous"
+                  @click="playPreviousTrack"
+                >
+                  <SkipBack :size="17" aria-hidden="true" />
+                </button>
+              </div>
+
+              <button
+                class="btn btn-circle btn-neutral btn-sm mx-0.5 shrink-0"
+                type="button"
+                :disabled="isPreparingPlayback || (!activeTrack && !activeRemoteTitle && !tracks.length)"
+                :aria-label="isPlaying ? 'Pause playback' : 'Play playback'"
+                :title="isPlaying ? 'Pause' : 'Play'"
+                @click="togglePlayback"
+              >
+                <RefreshCw v-if="isPreparingPlayback" class="animate-spin" :size="17" aria-hidden="true" />
+                <Pause v-else-if="isPlaying" :size="17" aria-hidden="true" />
+                <Play v-else :size="17" aria-hidden="true" />
+              </button>
+
+              <div class="tooltip tooltip-top" data-tip="Next">
+                <button
+                  class="btn btn-square btn-ghost btn-sm"
+                  type="button"
+                  :disabled="isPreparingPlayback || !canGoNext"
+                  aria-label="Next track"
+                  title="Next"
+                  @click="playNextTrack"
+                >
+                  <SkipForward :size="17" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+
+            <div class="flex min-w-0 items-center gap-2">
+              <span class="hidden w-9 text-right text-xs tabular-nums text-base-content/60 sm:block">
+                {{ formatPlaybackTime(playbackPosition) }}
+              </span>
+              <input
+                class="range range-xs min-w-0 flex-1"
+                type="range"
+                min="0"
+                :max="Math.max(playbackDuration, 1)"
+                step="0.1"
+                :value="playbackPosition"
+                :disabled="!audioUrl || playbackDuration <= 0"
+                aria-label="Seek playback"
+                :aria-valuetext="`${formatPlaybackTime(playbackPosition)} of ${formatPlaybackTime(playbackDuration)}`"
+                @input="seekPlayback"
+              />
+              <span class="hidden w-9 text-xs tabular-nums text-base-content/60 sm:block">
+                {{ formatPlaybackTime(playbackDuration) }}
+              </span>
+            </div>
           </div>
 
           <div class="hidden min-w-0 items-center justify-end gap-2 lg:col-start-3 lg:row-start-1 lg:flex">

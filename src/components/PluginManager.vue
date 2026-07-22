@@ -22,7 +22,7 @@ import {
   setPluginCapabilities,
   setPluginEnabled,
 } from "../lib/plugin-api";
-import type { PluginDiagnostic, PluginRecord } from "../lib/plugin-api";
+import type { PluginDiagnostic, PluginRecord, SourceCapability } from "../lib/plugin-api";
 
 const plugins = ref<PluginRecord[]>([]);
 const expandedPluginId = ref<string | null>(null);
@@ -106,7 +106,11 @@ async function toggleEnabled(plugin: PluginRecord) {
   }
 }
 
-async function updateCapability(plugin: PluginRecord, capability: string, granted: boolean) {
+async function updateCapability(
+  plugin: PluginRecord,
+  capability: SourceCapability,
+  granted: boolean,
+) {
   const nextCapabilities = new Set(plugin.grantedCapabilities);
   if (granted) {
     nextCapabilities.add(capability);
@@ -120,7 +124,11 @@ async function reviewCapabilities(plugin: PluginRecord) {
   await saveCapabilities(plugin, plugin.grantedCapabilities, true);
 }
 
-async function saveCapabilities(plugin: PluginRecord, capabilities: string[], reviewed: boolean) {
+async function saveCapabilities(
+  plugin: PluginRecord,
+  capabilities: SourceCapability[],
+  reviewed: boolean,
+) {
   busyPluginId.value = plugin.id;
   pluginError.value = null;
   pluginNotice.value = null;

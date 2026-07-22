@@ -1,4 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
+import { TAURI_COMMANDS } from "../generated/bindings";
+import type {
+  NeteaseAccount,
+  NeteaseMutationAudit,
+  NeteaseQrLoginPoll,
+  NeteaseQrLoginStart,
+} from "../generated/bindings";
 import {
   dispatchPluginRequest,
   type RemoteTrack,
@@ -15,37 +22,12 @@ import {
 export const NETEASE_PLUGIN_ID = "fika.netease";
 export const NETEASE_SOURCE_ID = "wy";
 
-export type NeteaseAccount = {
-  accountRef: string;
-  userId: string;
-  displayName: string;
-  avatarUrl: string | null;
-  status: "active" | "expired";
-  connectedAt: number;
-  lastVerifiedAt: number;
-};
-
-export type NeteaseQrLoginStart = {
-  sessionId: string;
-  qrImageDataUrl: string;
-  expiresAt: number;
-};
-
-export type NeteaseQrLoginPoll = {
-  status: "waitingForScan" | "waitingForConfirmation" | "connected" | "expired";
-  account: NeteaseAccount | null;
-};
-
-export type NeteaseMutationAudit = {
-  id: number;
-  accountRef: string;
-  operation: "add" | "remove";
-  playlistId: string;
-  trackId: string;
-  outcome: string;
-  message: string | null;
-  occurredAt: number;
-};
+export type {
+  NeteaseAccount,
+  NeteaseMutationAudit,
+  NeteaseQrLoginPoll,
+  NeteaseQrLoginStart,
+} from "../generated/bindings";
 
 export type NeteaseOperationResult<T> = {
   data: T;
@@ -60,27 +42,27 @@ export type NeteasePlayback = {
 };
 
 export function startNeteaseQrLogin() {
-  return invoke<NeteaseQrLoginStart>("start_netease_qr_login");
+  return invoke<NeteaseQrLoginStart>(TAURI_COMMANDS.startNeteaseQrLogin);
 }
 
 export function pollNeteaseQrLogin(sessionId: string) {
-  return invoke<NeteaseQrLoginPoll>("poll_netease_qr_login", { sessionId });
+  return invoke<NeteaseQrLoginPoll>(TAURI_COMMANDS.pollNeteaseQrLogin, { sessionId });
 }
 
 export function cancelNeteaseQrLogin(sessionId: string) {
-  return invoke<void>("cancel_netease_qr_login", { sessionId });
+  return invoke<void>(TAURI_COMMANDS.cancelNeteaseQrLogin, { sessionId });
 }
 
 export function listNeteaseAccounts() {
-  return invoke<NeteaseAccount[]>("list_netease_accounts");
+  return invoke<NeteaseAccount[]>(TAURI_COMMANDS.listNeteaseAccounts);
 }
 
 export function disconnectNeteaseAccount(accountRef: string) {
-  return invoke<void>("disconnect_netease_account", { accountRef });
+  return invoke<void>(TAURI_COMMANDS.disconnectNeteaseAccount, { accountRef });
 }
 
 export function listNeteaseMutationAudit(accountRef?: string, limit = 50) {
-  return invoke<NeteaseMutationAudit[]>("list_netease_mutation_audit", {
+  return invoke<NeteaseMutationAudit[]>(TAURI_COMMANDS.listNeteaseMutationAudit, {
     accountRef: accountRef ?? null,
     limit,
   });

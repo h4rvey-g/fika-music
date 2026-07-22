@@ -23,12 +23,14 @@ describe("UI preferences", () => {
         density: "compact",
         streamQuality: "lossless-plus",
         volume: 4,
+        playbackMode: "repeat-one",
       }),
     ).toEqual({
       theme: "system",
       density: "compact",
       streamQuality: "128k",
       volume: 1,
+      playbackMode: "sequential",
     });
   });
 
@@ -43,6 +45,7 @@ describe("UI preferences", () => {
         density: "comfortable",
         streamQuality: "flac",
         volume: -1,
+        playbackMode: "shuffle",
       },
       storage,
     );
@@ -54,6 +57,7 @@ describe("UI preferences", () => {
         density: "comfortable",
         streamQuality: "flac",
         volume: 0,
+        playbackMode: "shuffle",
       }),
     );
   });

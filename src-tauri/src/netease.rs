@@ -38,8 +38,9 @@ const MAX_UPSTREAM_MESSAGE_CHARS: usize = 512;
 
 type SharedConnection = Arc<Mutex<Connection>>;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct NeteaseAccount {
     pub account_ref: String,
     pub user_id: String,
@@ -50,8 +51,9 @@ pub struct NeteaseAccount {
     pub last_verified_at: i64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub enum NeteaseAccountStatus {
     Active,
     Expired,
@@ -74,16 +76,18 @@ impl NeteaseAccountStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct NeteaseQrLoginStart {
     pub session_id: String,
     pub qr_image_data_url: String,
     pub expires_at: i64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub enum NeteaseQrLoginStatus {
     WaitingForScan,
     WaitingForConfirmation,
@@ -91,15 +95,17 @@ pub enum NeteaseQrLoginStatus {
     Expired,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct NeteaseQrLoginPoll {
     pub status: NeteaseQrLoginStatus,
     pub account: Option<NeteaseAccount>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct NeteaseMutationAudit {
     pub id: i64,
     pub account_ref: String,
@@ -1144,39 +1150,6 @@ impl SourceProvider for NeteaseSourceProvider {
     }
 }
 
-pub fn initialize_database(connection: &Connection) -> Result<(), NeteaseBridgeError> {
-    connection
-        .execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS netease_accounts (
-                account_ref TEXT PRIMARY KEY,
-                provider_id TEXT NOT NULL,
-                user_id TEXT NOT NULL UNIQUE,
-                display_name TEXT NOT NULL,
-                avatar_url TEXT,
-                status TEXT NOT NULL DEFAULT 'active',
-                connected_at INTEGER NOT NULL,
-                last_verified_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS netease_mutation_audit (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_ref TEXT NOT NULL,
-                operation TEXT NOT NULL,
-                playlist_id TEXT NOT NULL,
-                track_id TEXT NOT NULL,
-                outcome TEXT NOT NULL,
-                message TEXT,
-                occurred_at INTEGER NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_netease_audit_account_time
-            ON netease_mutation_audit(account_ref, occurred_at DESC);
-            ",
-        )
-        .map_err(|error| NeteaseBridgeError::Persistence(error.to_string()))
-}
-
 fn new_client() -> Result<NeteaseMusicClient, NeteaseBridgeError> {
     NeteaseMusicClient::builder()
         .timeout(API_TIMEOUT)
@@ -1650,8 +1623,8 @@ mod tests {
     }
 
     fn test_database() -> SharedConnection {
-        let connection = Connection::open_in_memory().expect("test database should open");
-        initialize_database(&connection).expect("NetEase schema should initialize");
+        let mut connection = Connection::open_in_memory().expect("test database should open");
+        crate::database::initialize(&mut connection).expect("test schema should initialize");
         Arc::new(Mutex::new(connection))
     }
 

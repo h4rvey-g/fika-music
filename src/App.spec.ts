@@ -32,8 +32,11 @@ vi.mock("./components/NeteaseSource.vue", () => ({
 
 describe("application shell", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     localStorage.clear();
     document.documentElement.removeAttribute("data-theme");
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
     tauriMocks.listen.mockResolvedValue(vi.fn());
     tauriMocks.invoke.mockImplementation((command: string) => {
       if (command === "list_local_tracks") {
@@ -59,6 +62,7 @@ describe("application shell", () => {
 
   afterEach(() => {
     document.documentElement.removeAttribute("data-theme");
+    vi.restoreAllMocks();
   });
 
   it("navigates between all sidebar sections and closes the mobile drawer", async () => {
@@ -89,6 +93,107 @@ describe("application shell", () => {
     expect(wrapper.get('footer[aria-label="Playback bar"]').element).toBe(playbackBar.element);
     expect(settingsButton?.attributes("aria-current")).toBe("page");
     expect(drawerToggle.element.checked).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("cycles the playback mode from sequential to shuffle to repeat", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const modeButton = wrapper.get('[data-testid="playback-mode"]');
+    expect(modeButton.attributes("aria-label")).toContain("Sequential");
+
+    await modeButton.trigger("click");
+    expect(modeButton.attributes("aria-label")).toContain("Shuffle");
+
+    await modeButton.trigger("click");
+    expect(modeButton.attributes("aria-label")).toContain("Repeat all");
+
+    await modeButton.trigger("click");
+    expect(modeButton.attributes("aria-label")).toContain("Sequential");
+    wrapper.unmount();
+  });
+
+  it("navigates local tracks and wraps at the end in repeat mode", async () => {
+    const localTracks = [
+      {
+        id: 1,
+        filePath: "/music/first.mp3",
+        fileName: "first.mp3",
+        title: "First",
+        artist: "Artist",
+        album: "Album",
+        durationSeconds: 180,
+        trackNumber: 1,
+        discNumber: 1,
+        fileSizeBytes: 1024,
+        modifiedAt: 1,
+        indexedAt: 1,
+      },
+      {
+        id: 2,
+        filePath: "/music/second.mp3",
+        fileName: "second.mp3",
+        title: "Second",
+        artist: "Artist",
+        album: "Album",
+        durationSeconds: 181,
+        trackNumber: 2,
+        discNumber: 1,
+        fileSizeBytes: 2048,
+        modifiedAt: 1,
+        indexedAt: 1,
+      },
+    ];
+    tauriMocks.invoke.mockImplementation((command: string, payload?: { trackId?: number }) => {
+      if (command === "list_local_tracks") {
+        return Promise.resolve(localTracks);
+      }
+      if (command === "get_scan_status") {
+        return Promise.resolve({
+          isRunning: false,
+          folderPath: "/music",
+          discoveredFiles: 2,
+          scannedFiles: 2,
+          indexedTracks: 2,
+          skippedFiles: 0,
+          errorCount: 0,
+          lastError: null,
+          startedAt: null,
+          finishedAt: null,
+        });
+      }
+      if (command === "local_track_media_source") {
+        return Promise.resolve({
+          filePath: payload?.trackId === 2 ? "/music/second.mp3" : "/music/first.mp3",
+          mimeType: "audio/mpeg",
+        });
+      }
+      if (command === "local_track_playback_details") {
+        return Promise.resolve({ coverDataUrl: null, lyrics: null, lyricsError: null });
+      }
+      return Promise.resolve(null);
+    });
+
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get('button[aria-label="Play Second"]').trigger("click");
+    await flushPromises();
+
+    const nextButton = wrapper.get('button[aria-label="Next track"]');
+    expect(nextButton.attributes("disabled")).toBeDefined();
+
+    const modeButton = wrapper.get('[data-testid="playback-mode"]');
+    await modeButton.trigger("click");
+    await modeButton.trigger("click");
+    expect(nextButton.attributes("disabled")).toBeUndefined();
+
+    await nextButton.trigger("click");
+    await flushPromises();
+    expect(tauriMocks.invoke).toHaveBeenLastCalledWith("local_track_playback_details", {
+      trackId: 1,
+    });
+    expect(wrapper.get('button[aria-label="Previous track"]').attributes("disabled")).toBeUndefined();
     wrapper.unmount();
   });
 });

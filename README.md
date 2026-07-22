@@ -29,9 +29,13 @@ npm run tauri dev
 Frontend-only checks:
 
 ```sh
+npm run bindings:check
 npm test
 npm run build
 ```
+
+Regenerate `src/generated/bindings.ts` after changing a Tauri command or an
+IPC DTO with `npm run bindings:generate`.
 
 Rust checks:
 

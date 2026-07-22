@@ -13,12 +13,61 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use walkdir::WalkDir;
 
+mod database;
 pub mod lx_js_importer;
+pub mod lyrics;
 pub mod netease;
 pub mod plugin_system;
 pub mod source_runtime;
 
 const SCAN_PROGRESS_EVENT: &str = "library:scan-progress";
+
+macro_rules! with_tauri_commands {
+    ($consumer:ident) => {
+        $consumer! {
+            select_music_folder,
+            start_library_scan,
+            get_scan_status,
+            list_local_tracks,
+            local_track_media_source,
+            local_track_playback_details,
+            resolve_remote_track_lyrics,
+            cancel_source_request,
+            list_plugins,
+            select_plugin_package,
+            refresh_plugins,
+            install_plugin_package,
+            set_plugin_capabilities,
+            set_plugin_enabled,
+            remove_plugin,
+            clear_plugin_diagnostics,
+            dispatch_plugin_request,
+            start_netease_qr_login,
+            poll_netease_qr_login,
+            cancel_netease_qr_login,
+            list_netease_accounts,
+            disconnect_netease_account,
+            list_netease_mutation_audit,
+            resolve_imported_lx_template_music_url,
+            search_qishui_music,
+            resolve_qishui_music_url,
+        }
+    };
+}
+
+macro_rules! declare_command_names {
+    ($($command:ident),* $(,)?) => {
+        pub const TAURI_COMMAND_NAMES: &[&str] = &[$(stringify!($command)),*];
+    };
+}
+
+macro_rules! generate_command_handler {
+    ($($command:ident),* $(,)?) => {
+        tauri::generate_handler![$($command),*]
+    };
+}
+
+with_tauri_commands!(declare_command_names);
 
 type AppResult<T> = Result<T, AppError>;
 type CommandResult<T> = Result<T, String>;
@@ -27,6 +76,8 @@ type CommandResult<T> = Result<T, String>;
 enum AppError {
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
+    #[error("database migration error: {0}")]
+    Migration(#[from] rusqlite_migration::Error),
     #[error("file system error: {0}")]
     Io(#[from] std::io::Error),
     #[error("tauri error: {0}")]
@@ -52,9 +103,10 @@ enum AppError {
     TrackFileMissing(String),
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct LocalTrack {
+#[ts(export_to = "bindings.ts")]
+pub struct LocalTrack {
     id: i64,
     file_path: String,
     file_name: String,
@@ -83,33 +135,37 @@ struct LocalTrackDraft {
     modified_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct MediaSource {
+#[ts(export_to = "bindings.ts")]
+pub struct MediaSource {
     file_path: String,
     mime_type: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct RemoteMediaSource {
+#[ts(export_to = "bindings.ts")]
+pub struct RemoteMediaSource {
     url: String,
     mime_type: String,
     diagnostics: Vec<source_runtime::SourceDiagnostic>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct RemoteSearchResults {
+#[ts(export_to = "bindings.ts")]
+pub struct RemoteSearchResults {
     is_end: bool,
     total: Option<u64>,
     list: Vec<source_runtime::SourceSearchResult>,
     diagnostics: Vec<source_runtime::SourceDiagnostic>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct RemoteCommandError {
+#[ts(export_to = "bindings.ts")]
+pub struct RemoteCommandError {
     message: String,
     diagnostics: Vec<source_runtime::SourceDiagnostic>,
 }
@@ -132,9 +188,10 @@ fn remote_source_error(error: source_runtime::SourceRuntimeError) -> RemoteComma
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct ScanStatus {
+#[ts(export_to = "bindings.ts")]
+pub struct ScanStatus {
     is_running: bool,
     folder_path: Option<String>,
     discovered_files: usize,
@@ -147,9 +204,10 @@ struct ScanStatus {
     finished_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct ScanProgressEvent {
+#[ts(export_to = "bindings.ts")]
+pub struct ScanProgressEvent {
     status: ScanStatus,
     message: Option<String>,
 }
@@ -192,8 +250,8 @@ impl AppState {
             fs::create_dir_all(parent)?;
         }
 
-        let connection = Connection::open(db_path)?;
-        initialize_database(&connection)?;
+        let mut connection = Connection::open(db_path)?;
+        database::initialize(&mut connection)?;
         let db = Arc::new(Mutex::new(connection));
         let source_host = Arc::new(source_runtime::DefaultSourceHost::new(
             Duration::from_secs(8),
@@ -303,9 +361,10 @@ fn cancel_source_request(state: State<'_, AppState>, request_id: String) -> Comm
     Ok(true)
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct PluginCommandError {
+#[ts(export_to = "bindings.ts")]
+pub struct PluginCommandError {
     message: String,
     diagnostics: Vec<PluginDiagnostic>,
 }
@@ -333,9 +392,10 @@ fn plugin_command_error(message: impl Into<String>) -> PluginCommandError {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-struct NeteaseCommandError {
+#[ts(export_to = "bindings.ts")]
+pub struct NeteaseCommandError {
     code: String,
     message: String,
 }
@@ -727,6 +787,46 @@ fn local_track_media_source(
 }
 
 #[tauri::command]
+async fn local_track_playback_details(
+    state: State<'_, AppState>,
+    track_id: i64,
+) -> CommandResult<lyrics::LocalTrackPlaybackDetails> {
+    let track = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| AppError::StatePoisoned("db").to_string())?;
+        track_by_id(&db, track_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| AppError::TrackNotFound(track_id).to_string())?
+    };
+    let path = PathBuf::from(&track.file_path);
+    if !path.is_file() {
+        return Err(AppError::TrackFileMissing(track.file_path).to_string());
+    }
+    let query = lyrics::TrackLyricsQuery::new(
+        track.title,
+        track.artist,
+        track.album,
+        track.duration_seconds,
+    );
+
+    tauri::async_runtime::spawn_blocking(move || lyrics::resolve_local_track(&path, &query))
+        .await
+        .map_err(|error| format!("playback details task failed: {error}"))
+}
+
+#[tauri::command]
+async fn resolve_remote_track_lyrics(
+    query: lyrics::TrackLyricsQuery,
+) -> CommandResult<Option<lyrics::ResolvedLyrics>> {
+    tauri::async_runtime::spawn_blocking(move || lyrics::resolve_network_lyrics(&query))
+        .await
+        .map_err(|error| format!("remote lyrics task failed: {error}"))?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn resolve_imported_lx_template_music_url(
     state: State<'_, AppState>,
     family: String,
@@ -932,38 +1032,6 @@ fn resolve_qishui_music_url_inner(
             .chain(outcome.diagnostics)
             .collect(),
     })
-}
-
-fn initialize_database(connection: &Connection) -> AppResult<()> {
-    connection.execute_batch(
-        "
-        PRAGMA journal_mode = WAL;
-        PRAGMA foreign_keys = ON;
-
-        CREATE TABLE IF NOT EXISTS local_tracks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_path TEXT NOT NULL UNIQUE,
-            file_name TEXT NOT NULL,
-            title TEXT NOT NULL,
-            artist TEXT,
-            album TEXT,
-            duration_seconds INTEGER,
-            track_number INTEGER,
-            disc_number INTEGER,
-            file_size_bytes INTEGER NOT NULL,
-            modified_at INTEGER,
-            indexed_at INTEGER NOT NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_local_tracks_title ON local_tracks(title);
-        CREATE INDEX IF NOT EXISTS idx_local_tracks_artist ON local_tracks(artist);
-        CREATE INDEX IF NOT EXISTS idx_local_tracks_album ON local_tracks(album);
-        ",
-    )?;
-    plugin_system::initialize_plugin_database(connection)?;
-    netease::initialize_database(connection)?;
-
-    Ok(())
 }
 
 fn run_library_scan(app: AppHandle, folder: PathBuf) {
@@ -1231,6 +1299,33 @@ fn track_by_path(connection: &Connection, file_path: &str) -> AppResult<LocalTra
         .map_err(AppError::from)
 }
 
+fn track_by_id(connection: &Connection, track_id: i64) -> AppResult<Option<LocalTrack>> {
+    connection
+        .query_row(
+            "
+        SELECT
+            id,
+            file_path,
+            file_name,
+            title,
+            artist,
+            album,
+            duration_seconds,
+            track_number,
+            disc_number,
+            file_size_bytes,
+            modified_at,
+            indexed_at
+        FROM local_tracks
+        WHERE id = ?1
+        ",
+            params![track_id],
+            local_track_from_row,
+        )
+        .optional()
+        .map_err(AppError::from)
+}
+
 fn local_track_from_row(row: &Row<'_>) -> rusqlite::Result<LocalTrack> {
     Ok(LocalTrack {
         id: row.get(0)?,
@@ -1321,32 +1416,7 @@ pub fn run() {
             app.manage(state);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            select_music_folder,
-            start_library_scan,
-            get_scan_status,
-            list_local_tracks,
-            local_track_media_source,
-            cancel_source_request,
-            list_plugins,
-            select_plugin_package,
-            refresh_plugins,
-            install_plugin_package,
-            set_plugin_capabilities,
-            set_plugin_enabled,
-            remove_plugin,
-            clear_plugin_diagnostics,
-            dispatch_plugin_request,
-            start_netease_qr_login,
-            poll_netease_qr_login,
-            cancel_netease_qr_login,
-            list_netease_accounts,
-            disconnect_netease_account,
-            list_netease_mutation_audit,
-            resolve_imported_lx_template_music_url,
-            search_qishui_music,
-            resolve_qishui_music_url
-        ])
+        .invoke_handler(with_tauri_commands!(generate_command_handler))
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -1381,8 +1451,8 @@ mod tests {
     }
 
     fn initialized_connection() -> Connection {
-        let connection = Connection::open_in_memory().expect("in-memory database should open");
-        initialize_database(&connection).expect("schema should initialize");
+        let mut connection = Connection::open_in_memory().expect("in-memory database should open");
+        database::initialize(&mut connection).expect("schema should initialize");
         connection
     }
 

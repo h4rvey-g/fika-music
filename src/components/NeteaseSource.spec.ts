@@ -1,9 +1,11 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import NeteaseSource from "./NeteaseSource.vue";
 import type { PluginRecord, RemoteTrack, SourcePlaylist } from "../lib/plugin-api";
 
 const pluginApiMocks = vi.hoisted(() => ({
+  cancelSourceRequest: vi.fn(),
   listPlugins: vi.fn(),
 }));
 
@@ -29,6 +31,7 @@ vi.mock("../lib/netease-api", () => ({
 }));
 
 const accountRef = "netease-account:00000000-0000-4000-8000-000000000001";
+const secondAccountRef = "netease-account:00000000-0000-4000-8000-000000000002";
 
 const track: RemoteTrack = {
   id: "347230",
@@ -70,13 +73,30 @@ function pluginRecord(overrides: Partial<PluginRecord> = {}): PluginRecord {
     diagnostics: [],
     canRemove: false,
     canEnable: true,
+    manifest: null,
     ...overrides,
   };
+}
+
+function mountNeteaseSource() {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, gcTime: Infinity },
+      mutations: { retry: false },
+    },
+  });
+  return mount(NeteaseSource, {
+    props: { streamQuality: "320k" },
+    global: {
+      plugins: [[VueQueryPlugin, { queryClient }]],
+    },
+  });
 }
 
 describe("NeteaseSource", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    pluginApiMocks.cancelSourceRequest.mockResolvedValue(true);
     pluginApiMocks.listPlugins.mockResolvedValue([pluginRecord()]);
     neteaseApiMocks.listNeteaseAccounts.mockResolvedValue([
       {
@@ -114,8 +134,12 @@ describe("NeteaseSource", () => {
     });
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("loads normalized recommendations for an active Account Ref", async () => {
-    const wrapper = mount(NeteaseSource, { props: { streamQuality: "320k" } });
+    const wrapper = mountNeteaseSource();
 
     await flushPromises();
 
@@ -131,7 +155,7 @@ describe("NeteaseSource", () => {
     neteaseApiMocks.getNeteasePlaylists.mockRejectedValue({
       message: "playlist:read capability is not granted",
     });
-    const wrapper = mount(NeteaseSource, { props: { streamQuality: "320k" } });
+    const wrapper = mountNeteaseSource();
 
     await flushPromises();
 
@@ -156,7 +180,7 @@ describe("NeteaseSource", () => {
     neteaseApiMocks.getNeteaseRecommendations.mockRejectedValue({
       message: "NetEase account session expired; reconnect the account",
     });
-    const wrapper = mount(NeteaseSource, { props: { streamQuality: "320k" } });
+    const wrapper = mountNeteaseSource();
 
     await flushPromises();
 
@@ -169,7 +193,7 @@ describe("NeteaseSource", () => {
     pluginApiMocks.listPlugins.mockResolvedValue([
       pluginRecord({ state: "needs-review", enabled: false }),
     ]);
-    const wrapper = mount(NeteaseSource, { props: { streamQuality: "320k" } });
+    const wrapper = mountNeteaseSource();
 
     await flushPromises();
 
@@ -189,7 +213,7 @@ describe("NeteaseSource", () => {
       expiresAt: 300,
     });
     neteaseApiMocks.cancelNeteaseQrLogin.mockResolvedValue(undefined);
-    const wrapper = mount(NeteaseSource, { props: { streamQuality: "320k" } });
+    const wrapper = mountNeteaseSource();
     await flushPromises();
 
     const connect = wrapper
@@ -206,8 +230,44 @@ describe("NeteaseSource", () => {
     wrapper.unmount();
   });
 
+  it("refreshes workspace queries when QR reconnects the active Account Ref", async () => {
+    vi.useFakeTimers();
+    neteaseApiMocks.startNeteaseQrLogin.mockResolvedValue({
+      sessionId: "qr-session",
+      qrImageDataUrl: "data:image/svg+xml;base64,PHN2Zy8+",
+      expiresAt: 300,
+    });
+    neteaseApiMocks.pollNeteaseQrLogin.mockResolvedValue({
+      status: "succeeded",
+      account: {
+        accountRef,
+        userId: "42",
+        displayName: "Fika",
+        avatarUrl: null,
+        status: "active",
+        connectedAt: 1,
+        lastVerifiedAt: 2,
+      },
+    });
+    const wrapper = mountNeteaseSource();
+    await flushPromises();
+
+    const connect = wrapper
+      .findAll("button")
+      .find((button) => button.text().trim() === "Connect");
+    await connect?.trigger("click");
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(1600);
+    await flushPromises();
+
+    expect(neteaseApiMocks.getNeteaseRecommendations).toHaveBeenCalledTimes(2);
+    expect(neteaseApiMocks.getNeteasePlaylists).toHaveBeenCalledTimes(2);
+    expect(neteaseApiMocks.listNeteaseMutationAudit).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
   it("requires confirmation before adding a recommendation to a Playlist", async () => {
-    const wrapper = mount(NeteaseSource, { props: { streamQuality: "320k" } });
+    const wrapper = mountNeteaseSource();
     await flushPromises();
 
     await wrapper.get('button[aria-label="Add Test Track to a Playlist"]').trigger("click");
@@ -223,6 +283,59 @@ describe("NeteaseSource", () => {
       "playlist-1",
       track,
     );
+    wrapper.unmount();
+  });
+
+  it("cancels the previous Account Ref query and keeps its result isolated", async () => {
+    const secondTrack = { ...track, id: "second-track", title: "Second Account Track" };
+    let resolveFirstRecommendations:
+      | ((value: { data: RemoteTrack[]; diagnostics: never[] }) => void)
+      | undefined;
+    const firstRecommendations = new Promise<{ data: RemoteTrack[]; diagnostics: never[] }>(
+      (resolve) => {
+        resolveFirstRecommendations = resolve;
+      },
+    );
+    neteaseApiMocks.listNeteaseAccounts.mockResolvedValue([
+      {
+        accountRef,
+        userId: "42",
+        displayName: "Fika",
+        avatarUrl: null,
+        status: "active",
+        connectedAt: 1,
+        lastVerifiedAt: 1,
+      },
+      {
+        accountRef: secondAccountRef,
+        userId: "84",
+        displayName: "Second",
+        avatarUrl: null,
+        status: "active",
+        connectedAt: 2,
+        lastVerifiedAt: 2,
+      },
+    ]);
+    neteaseApiMocks.getNeteaseRecommendations.mockImplementation(
+      (selectedAccountRef: string) =>
+        selectedAccountRef === accountRef
+          ? firstRecommendations
+          : Promise.resolve({ data: [secondTrack], diagnostics: [] }),
+    );
+
+    const wrapper = mountNeteaseSource();
+    await flushPromises();
+    const firstRequestId = neteaseApiMocks.getNeteaseRecommendations.mock.calls[0]?.[1];
+
+    await wrapper.get('select[aria-label="NetEase account"]').setValue(secondAccountRef);
+    await flushPromises();
+
+    expect(pluginApiMocks.cancelSourceRequest).toHaveBeenCalledWith(firstRequestId);
+    expect(wrapper.text()).toContain("Second Account Track");
+
+    resolveFirstRecommendations?.({ data: [track], diagnostics: [] });
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("Test Track");
     wrapper.unmount();
   });
 });

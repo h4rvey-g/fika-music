@@ -24,8 +24,9 @@ pub const PLUGIN_COMPATIBILITY_TARGET: &str = "fika-music";
 pub const PLUGIN_RUNTIME_API_VERSION: SourceRuntimeApiVersion =
     source_runtime::SOURCE_RUNTIME_API_VERSION;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct PluginManifest {
     pub manifest_version: u32,
     pub id: String,
@@ -52,8 +53,9 @@ pub struct PluginManifest {
     pub required_host_bridges: BTreeSet<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct PluginProviderEntrypoint {
     pub id: String,
     pub entrypoint: String,
@@ -220,8 +222,9 @@ impl PluginManifest {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
+#[ts(export_to = "bindings.ts")]
 pub enum PluginOrigin {
     Bundled,
     User,
@@ -236,8 +239,9 @@ impl PluginOrigin {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
+#[ts(export_to = "bindings.ts")]
 pub enum PluginState {
     Disabled,
     NeedsReview,
@@ -247,8 +251,9 @@ pub enum PluginState {
     Invalid,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct PluginDiagnostic {
     pub code: String,
     pub level: DiagnosticLevel,
@@ -322,8 +327,9 @@ impl PluginDiagnostic {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct PluginProviderState {
     pub id: String,
     pub entrypoint: String,
@@ -333,8 +339,9 @@ pub struct PluginProviderState {
     pub diagnostics: Vec<PluginDiagnostic>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct PluginRecord {
     pub id: String,
     pub name: String,
@@ -1745,51 +1752,6 @@ impl PluginRegistry {
     }
 }
 
-pub fn initialize_plugin_database(connection: &Connection) -> Result<(), rusqlite::Error> {
-    connection.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS plugin_states (
-            plugin_id TEXT PRIMARY KEY,
-            package_path TEXT NOT NULL,
-            origin TEXT NOT NULL,
-            manifest_fingerprint TEXT NOT NULL DEFAULT '',
-            enabled INTEGER NOT NULL DEFAULT 0,
-            permissions_reviewed INTEGER NOT NULL DEFAULT 0,
-            granted_capabilities TEXT NOT NULL DEFAULT '[]',
-            installed_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS plugin_diagnostics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            plugin_id TEXT NOT NULL,
-            code TEXT NOT NULL,
-            level TEXT NOT NULL,
-            source_id TEXT,
-            message TEXT NOT NULL,
-            timestamp INTEGER NOT NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_plugin_diagnostics_plugin
-            ON plugin_diagnostics(plugin_id, id);
-        ",
-    )?;
-
-    let has_manifest_fingerprint = connection.query_row(
-        "SELECT COUNT(*) > 0 FROM pragma_table_info('plugin_states')
-         WHERE name = 'manifest_fingerprint'",
-        [],
-        |row| row.get::<_, bool>(0),
-    )?;
-    if !has_manifest_fingerprint {
-        connection.execute(
-            "ALTER TABLE plugin_states ADD COLUMN manifest_fingerprint TEXT NOT NULL DEFAULT ''",
-            [],
-        )?;
-    }
-    Ok(())
-}
-
 fn load_persisted_states(
     connection: &Connection,
 ) -> Result<BTreeMap<String, PersistedPluginState>, PluginSystemError> {
@@ -2683,8 +2645,8 @@ mod tests {
     }
 
     fn database() -> Connection {
-        let connection = Connection::open_in_memory().expect("test database should open");
-        initialize_plugin_database(&connection).expect("plugin schema should initialize");
+        let mut connection = Connection::open_in_memory().expect("test database should open");
+        crate::database::initialize(&mut connection).expect("plugin schema should initialize");
         connection
     }
 
@@ -2742,9 +2704,8 @@ mod tests {
         manifest
             .validate()
             .expect("bundled NetEase manifest should validate");
-        let connection = Connection::open_in_memory().expect("test database should open");
-        crate::netease::initialize_database(&connection)
-            .expect("NetEase test database should initialize");
+        let mut connection = Connection::open_in_memory().expect("test database should open");
+        crate::database::initialize(&mut connection).expect("test database should initialize");
         let bridge: Arc<dyn NeteaseProviderBridge> = Arc::new(
             crate::netease::NeteaseServiceBridge::new(
                 Arc::new(Mutex::new(connection)),
