@@ -8,6 +8,10 @@ The current v0.1 implementation includes:
 - Local MP3, FLAC, M4A, and AAC indexing and playback.
 - A capability-enforced Rust Source Runtime.
 - Bundled and user package lifecycle through the Plugin System.
+- Local-file and HTTP(S) URL import for LX Music JavaScript sources using the
+  reviewed Nianxin and Changqing Rust adapters, plus scripts with statically
+  extractable URL templates. Imported JavaScript is analyzed and retained for
+  provenance but is never executed.
 - A bundled NetEase Cloud Music Plugin with QR account connection,
   recommendations, Remote Track playback, Playlist list/read, confirmed
   add/remove mutations, and audit history.

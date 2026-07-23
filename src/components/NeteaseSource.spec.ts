@@ -9,6 +9,10 @@ const pluginApiMocks = vi.hoisted(() => ({
   listPlugins: vi.fn(),
 }));
 
+const audioSourceApiMocks = vi.hoisted(() => ({
+  resolveAudioSourceTrack: vi.fn(),
+}));
+
 const neteaseApiMocks = vi.hoisted(() => ({
   addNeteasePlaylistTrack: vi.fn(),
   cancelNeteaseQrLogin: vi.fn(),
@@ -20,11 +24,20 @@ const neteaseApiMocks = vi.hoisted(() => ({
   listNeteaseMutationAudit: vi.fn(),
   pollNeteaseQrLogin: vi.fn(),
   removeNeteasePlaylistTrack: vi.fn(),
-  resolveNeteaseTrack: vi.fn(),
   startNeteaseQrLogin: vi.fn(),
 }));
 
 vi.mock("../lib/plugin-api", () => pluginApiMocks);
+vi.mock("../lib/audio-source-api", () => ({
+  AUDIO_SOURCE_OPTIONS: [
+    { value: "nianxin", label: "念心音源" },
+    { value: "changqing", label: "长青音源" },
+  ],
+  audioSourceLabel: (family: string) =>
+    family === "changqing" ? "长青音源" : "念心音源",
+  isAudioSourceFamily: (value: unknown) => value === "nianxin" || value === "changqing",
+  ...audioSourceApiMocks,
+}));
 vi.mock("../lib/netease-api", () => ({
   NETEASE_PLUGIN_ID: "fika.netease",
   ...neteaseApiMocks,
@@ -86,7 +99,14 @@ function mountNeteaseSource() {
     },
   });
   return mount(NeteaseSource, {
-    props: { streamQuality: "320k" },
+    props: {
+      streamQuality: "320k",
+      playbackSource: "nianxin",
+      audioSources: [
+        { value: "nianxin", label: "念心音源" },
+        { value: "changqing", label: "长青音源" },
+      ],
+    },
     global: {
       plugins: [[VueQueryPlugin, { queryClient }]],
     },
@@ -98,6 +118,13 @@ describe("NeteaseSource", () => {
     vi.resetAllMocks();
     pluginApiMocks.cancelSourceRequest.mockResolvedValue(true);
     pluginApiMocks.listPlugins.mockResolvedValue([pluginRecord()]);
+    audioSourceApiMocks.resolveAudioSourceTrack.mockResolvedValue({
+      url: "https://cdn.example.test/Test%20Track.mp3",
+      mimeType: "audio/mpeg",
+      diagnostics: [
+        { sourceId: "nianxin", level: "info", message: "resolved through audio source" },
+      ],
+    });
     neteaseApiMocks.listNeteaseAccounts.mockResolvedValue([
       {
         accountRef,
@@ -149,6 +176,65 @@ describe("NeteaseSource", () => {
     );
     expect(wrapper.text()).toContain("Test Track");
     wrapper.unmount();
+  });
+
+  it("resolves a NetEase play click through the selected audio source", async () => {
+    const wrapper = mountNeteaseSource();
+    await flushPromises();
+
+    await wrapper.get('button[aria-label="Play Test Track"]').trigger("click");
+    await flushPromises();
+
+    expect(audioSourceApiMocks.resolveAudioSourceTrack).toHaveBeenCalledWith({
+      family: "nianxin",
+      source: "wy",
+      trackId: "347230",
+      quality: "320k",
+      requestId: expect.any(String),
+    });
+    expect(wrapper.emitted("playbackReady")?.[0]?.[0]).toMatchObject({
+      track,
+      url: "https://cdn.example.test/Test%20Track.mp3",
+      mimeType: "audio/mpeg",
+      providerName: "念心音源",
+    });
+    expect(wrapper.text()).toContain("resolved through audio source");
+    wrapper.unmount();
+  });
+
+  it("shares playback source changes with the application", async () => {
+    const wrapper = mountNeteaseSource();
+    await flushPromises();
+
+    await wrapper
+      .get<HTMLSelectElement>('select[aria-label="NetEase playback source"]')
+      .setValue("changqing");
+
+    expect(wrapper.emitted("update:playbackSource")?.[0]).toEqual(["changqing"]);
+    wrapper.unmount();
+  });
+
+  it("cancels an in-flight audio source request when the workspace closes", async () => {
+    let finishRequest: (() => void) | undefined;
+    audioSourceApiMocks.resolveAudioSourceTrack.mockReturnValue(
+      new Promise((resolve) => {
+        finishRequest = () =>
+          resolve({
+            url: "https://cdn.example.test/cancelled.mp3",
+            mimeType: "audio/mpeg",
+            diagnostics: [],
+          });
+      }),
+    );
+    const wrapper = mountNeteaseSource();
+    await flushPromises();
+
+    await wrapper.get('button[aria-label="Play Test Track"]').trigger("click");
+    const requestId = audioSourceApiMocks.resolveAudioSourceTrack.mock.calls[0]?.[0]?.requestId;
+    wrapper.unmount();
+
+    expect(pluginApiMocks.cancelSourceRequest).toHaveBeenCalledWith(requestId);
+    finishRequest?.();
   });
 
   it("keeps recommendations available when Playlist permission is denied", async () => {

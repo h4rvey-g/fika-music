@@ -473,32 +473,145 @@ impl SourceProvider for QishuiRustProvider {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LxJsImportAdapter {
+    Nianxin,
+    Changqing,
+    StaticTemplates,
+}
+
+impl LxJsImportAdapter {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Nianxin => "nianxin",
+            Self::Changqing => "changqing",
+            Self::StaticTemplates => "static-templates",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "nianxin" => Some(Self::Nianxin),
+            "changqing" => Some(Self::Changqing),
+            "static-templates" => Some(Self::StaticTemplates),
+            _ => None,
+        }
+    }
+}
+
+pub fn supported_import_adapter(report: &LxJsImportReport) -> Option<LxJsImportAdapter> {
+    let name = report.metadata.name.as_deref().unwrap_or_default();
+    if name.contains("念心") {
+        return Some(LxJsImportAdapter::Nianxin);
+    }
+    if name.contains("长青") {
+        return Some(LxJsImportAdapter::Changqing);
+    }
+    report
+        .endpoint
+        .templates
+        .iter()
+        .any(|template| template.has_track_id_placeholder)
+        .then_some(LxJsImportAdapter::StaticTemplates)
+}
+
+pub fn import_adapter_templates(
+    report: &LxJsImportReport,
+    adapter: LxJsImportAdapter,
+) -> Result<Vec<LxUrlTemplate>, LxJsImportError> {
+    let (templates, family) = match adapter {
+        LxJsImportAdapter::StaticTemplates => (report.endpoint.templates.clone(), None),
+        LxJsImportAdapter::Nianxin | LxJsImportAdapter::Changqing => {
+            let reference = analyze_lx_js_source(
+                "quantouya-aggregate-v4.1.js",
+                include_str!("../fixtures/lx-js-sources/quantouya-aggregate-v4.1.js"),
+            )?;
+            (reference.endpoint.templates, Some(adapter.as_str()))
+        }
+    };
+    let templates = templates
+        .into_iter()
+        .filter(|template| family.is_none_or(|family| template.family == family))
+        .filter(|template| template.has_track_id_placeholder)
+        .filter(|template| LX_SOURCE_KEYS.contains(&template.source_id.as_str()))
+        .collect::<Vec<_>>();
+    if templates.is_empty() {
+        return Err(LxJsImportError::Unsupported(format!(
+            "the {} adapter did not expose a track URL template",
+            adapter.as_str()
+        )));
+    }
+    Ok(templates)
+}
+
 #[derive(Debug, Clone)]
 pub struct ImportedLxTemplateProvider {
     provider_id: String,
-    manifest: ImportedLxManifest,
-    family: String,
-    templates_by_source: BTreeMap<String, LxUrlTemplate>,
+    display_name: String,
+    adapter_name: String,
+    source_catalog: BTreeMap<String, SourceInfo>,
+    templates_by_source: BTreeMap<String, Vec<LxUrlTemplate>>,
 }
 
 impl ImportedLxTemplateProvider {
     pub fn from_report(report: &LxJsImportReport, family: &str) -> Result<Self, LxJsImportError> {
-        Ok(Self {
-            provider_id: format!("{}-{family}-template-preview", report.manifest.provider_id),
-            manifest: report.manifest.clone(),
-            family: family.to_owned(),
-            templates_by_source: report
-                .endpoint
-                .templates
-                .iter()
-                .filter(|template| template.family == family)
-                .map(|template| (template.source_id.clone(), template.clone()))
-                .collect(),
-        })
+        let templates = report
+            .endpoint
+            .templates
+            .iter()
+            .filter(|template| template.family == family)
+            .cloned()
+            .collect();
+        Ok(Self::with_templates(
+            format!("{}-{family}-template-preview", report.manifest.provider_id),
+            report.manifest.display_name.clone(),
+            family,
+            report.manifest.to_source_catalog(),
+            templates,
+        ))
     }
 
-    fn template_for_source(&self, source: &str) -> Option<&LxUrlTemplate> {
-        self.templates_by_source.get(source)
+    pub fn for_imported_package(
+        provider_id: impl Into<String>,
+        report: &LxJsImportReport,
+        source_catalog: BTreeMap<String, SourceInfo>,
+        adapter: LxJsImportAdapter,
+    ) -> Result<Self, LxJsImportError> {
+        let templates = import_adapter_templates(report, adapter)?;
+        Ok(Self::with_templates(
+            provider_id,
+            report.manifest.display_name.clone(),
+            adapter.as_str(),
+            source_catalog,
+            templates,
+        ))
+    }
+
+    fn with_templates(
+        provider_id: impl Into<String>,
+        display_name: impl Into<String>,
+        adapter_name: impl Into<String>,
+        source_catalog: BTreeMap<String, SourceInfo>,
+        templates: Vec<LxUrlTemplate>,
+    ) -> Self {
+        let mut templates_by_source = BTreeMap::<String, Vec<LxUrlTemplate>>::new();
+        for template in templates {
+            templates_by_source
+                .entry(template.source_id.clone())
+                .or_default()
+                .push(template);
+        }
+        Self {
+            provider_id: provider_id.into(),
+            display_name: display_name.into(),
+            adapter_name: adapter_name.into(),
+            source_catalog,
+            templates_by_source,
+        }
+    }
+
+    fn templates_for_source(&self, source: &str) -> Option<&[LxUrlTemplate]> {
+        self.templates_by_source.get(source).map(Vec::as_slice)
     }
 
     fn resolved_template_url(
@@ -524,10 +637,10 @@ impl SourceProvider for ImportedLxTemplateProvider {
         context: &mut SourceRuntimeContext,
     ) -> Result<BTreeMap<String, SourceInfo>, SourceRuntimeError> {
         context.warn(format!(
-            "loaded {} URL template preview for {}; URLs are candidates until the Rust port validates responses",
-            self.family, self.manifest.display_name
+            "loaded {} Rust URL-template adapter for {}; imported JavaScript was not executed",
+            self.adapter_name, self.display_name
         ));
-        Ok(self.manifest.to_source_catalog())
+        Ok(self.source_catalog.clone())
     }
 
     fn handle_request(
@@ -545,10 +658,10 @@ impl SourceProvider for ImportedLxTemplateProvider {
         };
         context.require_capability(SourceCapability::NetworkAny, "build imported URL template")?;
 
-        let Some(template) = self.template_for_source(&source) else {
+        let Some(templates) = self.templates_for_source(&source) else {
             return Err(context.provider_error(format!(
                 "no {} URL template candidate for source {}",
-                self.family, source
+                self.adapter_name, source
             )));
         };
         let Some(track_id) = extract_track_id(&music_info) else {
@@ -556,16 +669,33 @@ impl SourceProvider for ImportedLxTemplateProvider {
         };
 
         let level = quality_to_template_level(quality);
-        let url = render_template_url(&template.url, &track_id, level)
-            .map_err(|error| context.provider_error(format!("invalid URL template: {error}")))?;
+        let mut failures = Vec::new();
+        for template in templates {
+            let url = match render_template_url(&template.url, &track_id, level) {
+                Ok(url) => url,
+                Err(error) => {
+                    failures.push(format!("{}: {error}", template.family));
+                    continue;
+                }
+            };
+            match self.resolved_template_url(context, &url) {
+                Ok(resolved_url) => {
+                    context.info(format!(
+                        "resolved playable musicUrl via imported {} Rust template provider",
+                        template.family
+                    ));
+                    return Ok(SourceResponse::MusicUrl(resolved_url));
+                }
+                Err(error @ SourceRuntimeError::Cancelled { .. }) => return Err(error),
+                Err(error) => failures.push(format!("{}: {error}", template.family)),
+            }
+        }
 
-        let resolved_url = self.resolved_template_url(context, &url)?;
-
-        context.info(format!(
-            "resolved playable musicUrl via imported {} Rust template provider",
-            self.family
-        ));
-        Ok(SourceResponse::MusicUrl(resolved_url))
+        Err(context.provider_error(format!(
+            "all {} URL template candidates failed: {}",
+            self.adapter_name,
+            failures.join("; ")
+        )))
     }
 }
 
@@ -1165,6 +1295,8 @@ pub enum LxJsImportError {
         path: String,
         diagnostics: Vec<String>,
     },
+    #[error("LX JS source is not safely importable: {0}")]
+    Unsupported(String),
 }
 
 struct ParsedJs {
@@ -1366,6 +1498,8 @@ fn build_import_manifest(
 }
 
 fn provider_id_from_metadata(metadata: &LxJsMetadata) -> String {
+    const MAX_PROVIDER_SLUG_BYTES: usize = 48;
+
     let seed = metadata
         .name
         .as_deref()
@@ -1375,6 +1509,9 @@ fn provider_id_from_metadata(metadata: &LxJsMetadata) -> String {
     let mut previous_dash = false;
 
     for character in seed.chars() {
+        if normalized.len() >= MAX_PROVIDER_SLUG_BYTES {
+            break;
+        }
         if character.is_ascii_alphanumeric() {
             normalized.push(character.to_ascii_lowercase());
             previous_dash = false;
@@ -1400,7 +1537,6 @@ fn metadata_fingerprint(metadata: &LxJsMetadata) -> String {
     let mut hash = FNV_OFFSET;
     for value in [
         metadata.name.as_deref(),
-        metadata.version.as_deref(),
         metadata.author.as_deref(),
         metadata.homepage.as_deref(),
         metadata.update_url.as_deref(),
@@ -2534,6 +2670,23 @@ mod tests {
 
         assert_eq!(report.metadata.name.as_deref(), Some("Late Metadata"));
         assert_eq!(report.metadata.version.as_deref(), Some("2.0.0"));
+    }
+
+    #[test]
+    fn imported_provider_identity_should_remain_stable_across_source_versions() {
+        let first = LxJsMetadata {
+            name: Some("Versioned Source".to_owned()),
+            version: Some("1.0.0".to_owned()),
+            author: Some("Fika Tests".to_owned()),
+            ..LxJsMetadata::default()
+        };
+        let mut second = first.clone();
+        second.version = Some("2.0.0".to_owned());
+
+        assert_eq!(
+            provider_id_from_metadata(&first),
+            provider_id_from_metadata(&second)
+        );
     }
 
     #[test]

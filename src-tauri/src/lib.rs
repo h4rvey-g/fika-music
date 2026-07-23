@@ -69,8 +69,11 @@ macro_rules! with_tauri_commands {
             cancel_source_request,
             list_plugins,
             select_plugin_package,
+            select_lx_js_source,
             refresh_plugins,
             install_plugin_package,
+            import_lx_js_source,
+            import_lx_js_source_url,
             set_plugin_capabilities,
             set_plugin_enabled,
             remove_plugin,
@@ -560,6 +563,16 @@ async fn select_plugin_package() -> Result<Option<String>, PluginCommandError> {
 }
 
 #[tauri::command]
+async fn select_lx_js_source() -> Result<Option<String>, PluginCommandError> {
+    let file = rfd::AsyncFileDialog::new()
+        .set_title("Choose an LX Music source")
+        .add_filter("JavaScript source", &["js", "mjs", "cjs"])
+        .pick_file()
+        .await;
+    Ok(file.map(|handle| handle.path().to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
 fn refresh_plugins(state: State<'_, AppState>) -> Result<Vec<PluginRecord>, PluginCommandError> {
     let db = state.db.lock().map_err(|_| plugin_lock_error("database"))?;
     let mut registry = state
@@ -589,6 +602,55 @@ fn install_plugin_package(
     registry
         .install(&db, Path::new(package_path))
         .map_err(Into::into)
+}
+
+#[tauri::command]
+fn import_lx_js_source(
+    state: State<'_, AppState>,
+    source_path: String,
+) -> Result<PluginRecord, PluginCommandError> {
+    let source_path = source_path.trim();
+    if source_path.is_empty() {
+        return Err(plugin_command_error(
+            "LX JavaScript source path must not be empty",
+        ));
+    }
+    let db = state.db.lock().map_err(|_| plugin_lock_error("database"))?;
+    let mut registry = state
+        .plugin_registry
+        .lock()
+        .map_err(|_| plugin_lock_error("registry"))?;
+    registry
+        .import_lx_js(&db, Path::new(source_path))
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn import_lx_js_source_url(
+    app: AppHandle,
+    source_url: String,
+) -> Result<PluginRecord, PluginCommandError> {
+    let source_url = source_url.trim().to_owned();
+    if source_url.is_empty() {
+        return Err(plugin_command_error(
+            "LX JavaScript source URL must not be empty",
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let prepared = plugin_system::prepare_lx_js_import_from_url(&source_url)
+            .map_err(PluginCommandError::from)?;
+        let state = app.state::<AppState>();
+        let db = state.db.lock().map_err(|_| plugin_lock_error("database"))?;
+        let mut registry = state
+            .plugin_registry
+            .lock()
+            .map_err(|_| plugin_lock_error("registry"))?;
+        registry
+            .install_prepared_lx_js(&db, prepared)
+            .map_err(Into::into)
+    })
+    .await
+    .map_err(|error| plugin_command_error(format!("LX URL import task failed: {error}")))?
 }
 
 #[tauri::command]

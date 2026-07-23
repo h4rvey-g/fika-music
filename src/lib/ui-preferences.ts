@@ -1,3 +1,5 @@
+import { isAudioSourceFamily, type AudioSourceFamily } from "./audio-source-api";
+
 export const THEME_OPTIONS = [
   { value: "system", label: "System" },
   { value: "light", label: "Light" },
@@ -46,6 +48,7 @@ export type UiPreferences = {
   theme: ThemePreference;
   density: LayoutDensity;
   streamQuality: StreamQuality;
+  audioSourceFamily: AudioSourceFamily;
   volume: number;
   playbackMode: PlaybackMode;
 };
@@ -59,6 +62,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   theme: "system",
   density: "comfortable",
   streamQuality: "128k",
+  audioSourceFamily: "nianxin",
   volume: 0.8,
   playbackMode: "sequential",
 };
@@ -100,6 +104,9 @@ export function parseUiPreferences(value: unknown): UiPreferences {
     streamQuality: isStreamQuality(candidate.streamQuality)
       ? candidate.streamQuality
       : DEFAULT_UI_PREFERENCES.streamQuality,
+    audioSourceFamily: isAudioSourceFamily(candidate.audioSourceFamily)
+      ? candidate.audioSourceFamily
+      : DEFAULT_UI_PREFERENCES.audioSourceFamily,
     volume:
       typeof candidate.volume === "number" && Number.isFinite(candidate.volume)
         ? Math.min(1, Math.max(0, candidate.volume))

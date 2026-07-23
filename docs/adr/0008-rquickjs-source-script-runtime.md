@@ -12,4 +12,8 @@ This supersedes the earlier `rquickjs` runtime direction. `rquickjs` is not part
 - LX Compatibility means matching the useful LX source model: source keys, actions, qualities, request payloads, response shapes, diagnostics, and host-mediated capabilities.
 - Capability enforcement, diagnostics, account refs, network access, cache access, and playlist mutation remain mandatory runtime boundaries.
 - Existing LX JavaScript can be used as behavioral reference material, but must be ported into Rust before shipping.
+- A JavaScript source may be imported from a local file or an explicitly
+  requested HTTP(S) URL as metadata and provenance when Fika can map it to a
+  reviewed Rust adapter or statically extracted URL-template adapter;
+  importing never authorizes JavaScript execution.
 - The NetEase implementation must be a Rust Source Provider and/or Rust Service Bridge, not a QuickJS-compatible script bundle.

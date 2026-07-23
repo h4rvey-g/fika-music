@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref } from "vue";
 import {
   AlertCircle,
   ChevronDown,
   CircleCheck,
+  Link,
+  PackagePlus,
   Plug,
   Power,
   RefreshCw,
@@ -14,10 +16,13 @@ import {
 } from "@lucide/vue";
 import {
   clearPluginDiagnostics,
+  importLxJsSource,
+  importLxJsSourceUrl,
   installPluginPackage,
   listPlugins,
   refreshPluginRegistry,
   removePluginPackage,
+  selectLxJsSource,
   selectPluginPackage,
   setPluginCapabilities,
   setPluginEnabled,
@@ -32,6 +37,12 @@ const plugins = ref<PluginRecord[]>([]);
 const expandedPluginId = ref<string | null>(null);
 const isLoading = ref(false);
 const isInstalling = ref(false);
+const sourceImportMode = ref<"local" | "url" | null>(null);
+const isImportingSource = computed(() => sourceImportMode.value !== null);
+const isUrlImportDialogOpen = ref(false);
+const lxSourceUrl = ref("");
+const sourceUrlError = ref<string | null>(null);
+const sourceUrlInput = ref<HTMLInputElement | null>(null);
 const busyPluginId = ref<string | null>(null);
 const pluginError = ref<string | null>(null);
 const pluginNotice = ref<string | null>(null);
@@ -92,6 +103,70 @@ async function installPlugin() {
   } finally {
     isInstalling.value = false;
   }
+}
+
+async function importLocalLxSource() {
+  sourceImportMode.value = "local";
+  pluginError.value = null;
+  pluginNotice.value = null;
+
+  try {
+    const sourcePath = await selectLxJsSource();
+    if (!sourcePath) {
+      return;
+    }
+    const imported = await importLxJsSource(sourcePath);
+    finishSourceImport(imported);
+  } catch (error) {
+    pluginError.value = normalizeError(error);
+  } finally {
+    sourceImportMode.value = null;
+  }
+}
+
+async function openUrlImportDialog() {
+  sourceUrlError.value = null;
+  isUrlImportDialogOpen.value = true;
+  await nextTick();
+  sourceUrlInput.value?.focus();
+}
+
+function closeUrlImportDialog() {
+  if (sourceImportMode.value === "url") {
+    return;
+  }
+  isUrlImportDialogOpen.value = false;
+  sourceUrlError.value = null;
+}
+
+async function importLxSourceFromUrl() {
+  const sourceUrl = lxSourceUrl.value.trim();
+  if (!sourceUrl) {
+    sourceUrlError.value = "Source URL is required.";
+    return;
+  }
+
+  sourceImportMode.value = "url";
+  sourceUrlError.value = null;
+  pluginError.value = null;
+  pluginNotice.value = null;
+
+  try {
+    const imported = await importLxJsSourceUrl(sourceUrl);
+    finishSourceImport(imported);
+    lxSourceUrl.value = "";
+    isUrlImportDialogOpen.value = false;
+  } catch (error) {
+    sourceUrlError.value = normalizeError(error);
+  } finally {
+    sourceImportMode.value = null;
+  }
+}
+
+function finishSourceImport(imported: PluginRecord) {
+  replacePlugin(imported);
+  expandedPluginId.value = imported.id;
+  pluginNotice.value = `${imported.name} imported. Review its network permission before enabling it.`;
 }
 
 async function toggleEnabled(plugin: PluginRecord) {
@@ -313,7 +388,7 @@ function normalizeError(error: unknown) {
         <button
           class="btn btn-sm"
           type="button"
-          :disabled="isLoading || isInstalling"
+          :disabled="isLoading || isInstalling || isImportingSource"
           title="Refresh Plugin registry"
           @click="refreshPlugins"
         >
@@ -321,16 +396,104 @@ function normalizeError(error: unknown) {
           Refresh
         </button>
         <button
-          class="btn btn-primary btn-sm"
+          class="btn btn-sm"
           type="button"
-          :disabled="isInstalling"
+          :disabled="isInstalling || isImportingSource"
           @click="installPlugin"
         >
-          <Upload :size="16" aria-hidden="true" />
+          <PackagePlus :size="16" aria-hidden="true" />
           Install package
+        </button>
+        <button
+          class="btn btn-primary btn-sm"
+          type="button"
+          :disabled="isInstalling || isImportingSource"
+          @click="importLocalLxSource"
+        >
+          <RefreshCw v-if="sourceImportMode === 'local'" class="animate-spin" :size="16" aria-hidden="true" />
+          <Upload v-else :size="16" aria-hidden="true" />
+          Import local JS
+        </button>
+        <button
+          class="btn btn-sm"
+          type="button"
+          :disabled="isInstalling || isImportingSource"
+          @click="openUrlImportDialog"
+        >
+          <Link :size="16" aria-hidden="true" />
+          Import from URL
         </button>
       </div>
     </div>
+
+    <dialog
+      v-if="isUrlImportDialogOpen"
+      open
+      class="modal"
+      aria-labelledby="lx-url-import-title"
+      @cancel.prevent="closeUrlImportDialog"
+    >
+      <form class="modal-box max-w-xl" @submit.prevent="importLxSourceFromUrl">
+        <div class="flex items-center justify-between gap-3">
+          <h3 id="lx-url-import-title" class="text-base font-semibold">Import source from URL</h3>
+          <button
+            class="btn btn-square btn-ghost btn-sm"
+            type="button"
+            aria-label="Close URL import"
+            :disabled="sourceImportMode === 'url'"
+            @click="closeUrlImportDialog"
+          >
+            <X :size="17" aria-hidden="true" />
+          </button>
+        </div>
+
+        <fieldset class="fieldset mt-4">
+          <legend class="fieldset-legend">Source URL</legend>
+          <input
+            ref="sourceUrlInput"
+            v-model="lxSourceUrl"
+            class="input w-full"
+            type="url"
+            inputmode="url"
+            autocomplete="url"
+            spellcheck="false"
+            placeholder="https://example.com/source.js"
+            aria-label="LX JavaScript source URL"
+            :disabled="sourceImportMode === 'url'"
+            required
+          />
+        </fieldset>
+
+        <div v-if="sourceUrlError" role="alert" class="alert alert-error alert-soft mt-3">
+          <AlertCircle :size="18" aria-hidden="true" />
+          <span>{{ sourceUrlError }}</span>
+        </div>
+
+        <div class="modal-action">
+          <button
+            class="btn"
+            type="button"
+            :disabled="sourceImportMode === 'url'"
+            @click="closeUrlImportDialog"
+          >
+            Cancel
+          </button>
+          <button class="btn btn-primary" type="submit" :disabled="sourceImportMode === 'url'">
+            <RefreshCw
+              v-if="sourceImportMode === 'url'"
+              class="animate-spin"
+              :size="16"
+              aria-hidden="true"
+            />
+            <Link v-else :size="16" aria-hidden="true" />
+            Import
+          </button>
+        </div>
+      </form>
+      <form method="dialog" class="modal-backdrop" @submit.prevent="closeUrlImportDialog">
+        <button type="submit" :disabled="sourceImportMode === 'url'">Close</button>
+      </form>
+    </dialog>
 
     <div v-if="pluginError" role="alert" class="alert alert-error m-4">
       <AlertCircle :size="18" aria-hidden="true" />

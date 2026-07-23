@@ -38,6 +38,7 @@ export type NeteasePlayback = {
   track: RemoteTrack;
   url: string;
   mimeType: string;
+  providerName: string;
   diagnostics: SourceDiagnostic[];
 };
 
@@ -159,6 +160,7 @@ export async function resolveNeteaseTrack(
     track,
     url: result.data,
     mimeType: neteaseMediaType(result.data, quality),
+    providerName: "NetEase Cloud Music",
     diagnostics: result.diagnostics,
   };
 }

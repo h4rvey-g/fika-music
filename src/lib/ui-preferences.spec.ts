@@ -23,6 +23,7 @@ describe("UI preferences", () => {
         theme: "sepia",
         density: "compact",
         streamQuality: "lossless-plus",
+        audioSourceFamily: "missing",
         volume: 4,
         playbackMode: "repeat-one",
       }),
@@ -30,6 +31,7 @@ describe("UI preferences", () => {
       theme: "system",
       density: "compact",
       streamQuality: "128k",
+      audioSourceFamily: "nianxin",
       volume: 1,
       playbackMode: "sequential",
     });
@@ -39,6 +41,14 @@ describe("UI preferences", () => {
     for (const theme of THEME_OPTIONS) {
       expect(parseUiPreferences({ theme: theme.value }).theme).toBe(theme.value);
     }
+  });
+
+  it("preserves a managed imported Plugin as the selected audio source", () => {
+    expect(
+      parseUiPreferences({
+        audioSourceFamily: "plugin:imported-lx-source",
+      }).audioSourceFamily,
+    ).toBe("plugin:imported-lx-source");
   });
 
   it("writes normalized preferences to the application key", () => {
@@ -51,6 +61,7 @@ describe("UI preferences", () => {
         theme: "dark",
         density: "comfortable",
         streamQuality: "flac",
+        audioSourceFamily: "changqing",
         volume: -1,
         playbackMode: "shuffle",
       },
@@ -63,6 +74,7 @@ describe("UI preferences", () => {
         theme: "dark",
         density: "comfortable",
         streamQuality: "flac",
+        audioSourceFamily: "changqing",
         volume: 0,
         playbackMode: "shuffle",
       }),

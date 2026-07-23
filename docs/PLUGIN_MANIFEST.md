@@ -50,7 +50,8 @@ Capabilities are never granted implicitly by installing a package, and an
 entrypoint-only capability is not exposed to sibling Providers.
 
 The MVP accepts symbolic built-in entrypoints (`builtin:runtime-demo`,
-`builtin:catalog`, `builtin:qishui`, and `builtin:netease`). The NetEase
+`builtin:catalog`, `builtin:qishui`, and `builtin:netease`) plus importer-owned
+`builtin:lx-js:<adapter>:<source-fingerprint>` entrypoints. The NetEase
 entrypoint is available only when the host provides the
 `netease-api-enhanced` Service Bridge. User packages cannot load a dynamic
 library or launch a sidecar. This keeps package discovery, permission review,
@@ -59,6 +60,35 @@ untrusted native-code execution boundary.
 
 `builtin:netease` is reserved for package `fika.netease` and Provider
 `fika-netease`; another package cannot use that host bridge entrypoint.
+
+## LX JavaScript source imports
+
+The Plugin view can import an LX Music source from a local `.js`, `.mjs`, or
+`.cjs` file, or from an HTTP(S) URL. GitHub `blob` file URLs are requested as
+raw content. Remote downloads use a 20-second timeout, follow at most five
+HTTP(S) redirects, reject HTTPS-to-HTTP downgrades and HTML pages, and enforce
+the same 4 MiB limit while streaming the response. The backend parses the
+source with Oxc, verifies the LX `musicUrl` contract, and creates a managed
+Plugin package containing:
+
+- the generated `plugin.json`,
+- the original `source.js` for provenance, and
+- an `import-report.json` containing metadata, contract, endpoint,
+  obfuscation analysis, and local-file or redacted remote-URL provenance.
+
+Fika does not execute the imported JavaScript. Playback is available only when
+the source maps to a reviewed Rust adapter (currently Nianxin or Changqing), or
+when track URL templates can be extracted statically. The generated Provider
+publishes only the `musicUrl` routes backed by those templates. Requests still
+run through the host HTTP boundary and require an explicit `network:any`
+review before the Plugin can be enabled.
+
+The generated entrypoint contains the source's full hexadecimal SHA-256
+digest. Activation hashes the managed source again and fails closed if it no
+longer matches the reviewed manifest. Local files and downloaded responses are
+limited to 4 MiB. Scripts without a supported LX contract or safe Rust adapter
+are rejected with an import error rather than installed as nonfunctional
+Plugins.
 
 ## Locations and lifecycle
 

@@ -32,6 +32,11 @@ import PluginWorkspace from "./components/PluginWorkspace.vue";
 import NeteaseSource from "./components/NeteaseSource.vue";
 import NowPlayingPanel from "./components/NowPlayingPanel.vue";
 import { NETEASE_PLUGIN_ID, type NeteasePlayback } from "./lib/netease-api";
+import {
+  audioSourceLabel,
+  buildAudioSourceOptions,
+  resolveAudioSourceTrack,
+} from "./lib/audio-source-api";
 import { listPlugins, type PluginRecord } from "./lib/plugin-api";
 import { PlayCountTracker } from "./lib/play-count-tracker";
 import { TAURI_COMMANDS } from "./generated/bindings";
@@ -155,7 +160,7 @@ const localQueueTotal = ref(0);
 const localQueueIndex = ref(-1);
 const queuedLocalTrack = ref<LocalTrack | null>(null);
 const localQueueActive = ref(false);
-const remoteFamily = ref("nianxin");
+const remoteFamily = ref(savedUiPreferences.audioSourceFamily);
 const remoteSource = ref("wy");
 const remoteQuality = ref(savedUiPreferences.streamQuality);
 const remoteTrackId = ref("");
@@ -172,6 +177,7 @@ let playbackDetailsGeneration = 0;
 const playCountTracker = new PlayCountTracker();
 
 const enabledPlugins = computed(() => pluginRecords.value.filter((plugin) => plugin.enabled));
+const availableAudioSources = computed(() => buildAudioSourceOptions(pluginRecords.value));
 const activePlugin = computed(
   () => enabledPlugins.value.find((plugin) => plugin.id === activePluginId.value) ?? null,
 );
@@ -250,11 +256,12 @@ watch(audioUrl, () => {
   playbackPosition.value = 0;
   playbackDuration.value = 0;
 });
-watch([themePreference, layoutDensity, remoteQuality, volume, playbackMode], () => {
+watch([themePreference, layoutDensity, remoteQuality, remoteFamily, volume, playbackMode], () => {
   saveUiPreferences({
     theme: themePreference.value,
     density: layoutDensity.value,
     streamQuality: remoteQuality.value,
+    audioSourceFamily: remoteFamily.value,
     volume: volume.value,
     playbackMode: playbackMode.value,
   });
@@ -299,6 +306,10 @@ async function loadPluginNavigation() {
 
 function updatePluginRecords(records: PluginRecord[]) {
   pluginRecords.value = records;
+  const sourceOptions = buildAudioSourceOptions(records);
+  if (!sourceOptions.some((source) => source.value === remoteFamily.value)) {
+    remoteFamily.value = DEFAULT_UI_PREFERENCES.audioSourceFamily;
+  }
   if (
     activeSection.value === "plugin" &&
     !records.some((plugin) => plugin.id === activePluginId.value && plugin.enabled)
@@ -325,6 +336,7 @@ function resetUiPreferences() {
   themePreference.value = DEFAULT_UI_PREFERENCES.theme;
   layoutDensity.value = DEFAULT_UI_PREFERENCES.density;
   remoteQuality.value = DEFAULT_UI_PREFERENCES.streamQuality;
+  remoteFamily.value = DEFAULT_UI_PREFERENCES.audioSourceFamily;
   volume.value = DEFAULT_UI_PREFERENCES.volume;
   playbackMode.value = DEFAULT_UI_PREFERENCES.playbackMode;
 }
@@ -574,20 +586,20 @@ async function playRemoteTrack() {
   try {
     sampleListeningTime();
     clearLocalPlaybackQueue();
-    const source = await invoke<RemoteMediaSource>(
-      TAURI_COMMANDS.resolveImportedLxTemplateMusicUrl,
-      {
+    const source = await resolveAudioSourceTrack({
       family: remoteFamily.value,
       source: remoteSource.value,
       trackId: remoteTrackId.value.trim(),
       quality: remoteQuality.value,
       requestId,
-      },
-    );
+    });
 
     activeTrack.value = null;
     activeRemoteTitle.value = `${remoteFamily.value}:${remoteSource.value}:${remoteTrackId.value.trim()}`;
-    activeRemoteProvider.value = "Remote LX template source";
+    activeRemoteProvider.value = audioSourceLabel(
+      remoteFamily.value,
+      availableAudioSources.value,
+    );
     activeSource.value = { url: source.url, mimeType: source.mimeType };
     audioUrl.value = source.url;
     remoteDiagnostics.value = source.diagnostics.map((diagnostic) => diagnostic.message);
@@ -701,7 +713,7 @@ async function playNeteasePlayback(playback: NeteasePlayback) {
   try {
     activeTrack.value = null;
     activeRemoteTitle.value = `${playback.track.title} - ${playback.track.artist}`;
-    activeRemoteProvider.value = "NetEase Cloud Music";
+    activeRemoteProvider.value = playback.providerName;
     activeSource.value = { url: playback.url, mimeType: playback.mimeType };
     audioUrl.value = playback.url;
     void loadRemoteTrackLyrics(
@@ -1237,10 +1249,15 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
 
             <div class="mt-4 grid grid-cols-2 gap-2">
               <label class="flex flex-col gap-1 text-xs">
-                <span>Family</span>
+                <span>Audio source</span>
                 <select v-model="remoteFamily" class="select select-sm w-full">
-                  <option value="nianxin">念心</option>
-                  <option value="changqing">长青</option>
+                  <option
+                    v-for="source in availableAudioSources"
+                    :key="source.value"
+                    :value="source.value"
+                  >
+                    {{ source.label }}
+                  </option>
                 </select>
               </label>
               <label class="flex flex-col gap-1 text-xs">
@@ -1320,6 +1337,8 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
             v-if="activePlugin.id === NETEASE_PLUGIN_ID"
             class="min-w-0 xl:col-start-1 xl:row-start-1"
             :stream-quality="remoteQuality"
+            v-model:playback-source="remoteFamily"
+            :audio-sources="availableAudioSources"
             @playback-ready="playNeteasePlayback"
             @open-plugins="selectSection('plugins')"
           />

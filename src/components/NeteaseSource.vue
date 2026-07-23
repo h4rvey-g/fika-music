@@ -23,6 +23,12 @@ import {
   type SourceQuality,
 } from "../lib/plugin-api";
 import {
+  audioSourceLabel,
+  resolveAudioSourceTrack,
+  type AudioSourceFamily,
+  type AudioSourceOption,
+} from "../lib/audio-source-api";
+import {
   NETEASE_PLUGIN_ID,
   addNeteasePlaylistTrack,
   cancelNeteaseQrLogin,
@@ -34,7 +40,6 @@ import {
   listNeteaseMutationAudit,
   pollNeteaseQrLogin,
   removeNeteasePlaylistTrack,
-  resolveNeteaseTrack,
   startNeteaseQrLogin,
   type NeteasePlayback,
   type NeteaseQrLoginStart,
@@ -42,10 +47,13 @@ import {
 
 const props = defineProps<{
   streamQuality: SourceQuality;
+  playbackSource: AudioSourceFamily;
+  audioSources: AudioSourceOption[];
 }>();
 
 const emit = defineEmits<{
   playbackReady: [playback: NeteasePlayback];
+  "update:playbackSource": [source: AudioSourceFamily];
   openPlugins: [];
 }>();
 
@@ -432,29 +440,43 @@ async function playTrack(track: RemoteTrack) {
   isPlayingTrackId.value = track.id;
   manualError.value = null;
   const requestId = crypto.randomUUID();
+  const playbackSource = props.playbackSource;
   activePlaybackRequestId = requestId;
   try {
-    const playback = await resolveNeteaseTrack(
-      track,
-      props.streamQuality,
-      activeAccountRef.value || undefined,
+    const source = await resolveAudioSourceTrack({
+      family: playbackSource,
+      source: track.source,
+      trackId: track.id,
+      quality: props.streamQuality,
       requestId,
-    );
+    });
     if (activePlaybackRequestId !== requestId) {
       return;
     }
-    operationDiagnostics.value = playback.diagnostics.map((diagnostic) => diagnostic.message);
-    emit("playbackReady", playback);
+    operationDiagnostics.value = source.diagnostics.map((diagnostic) => diagnostic.message);
+    emit("playbackReady", {
+      track,
+      url: source.url,
+      mimeType: source.mimeType,
+      providerName: audioSourceLabel(playbackSource, props.audioSources),
+      diagnostics: source.diagnostics,
+    });
   } catch (error) {
     if (activePlaybackRequestId === requestId) {
       manualError.value = normalizeError(error);
-      await refreshAccountStatuses();
     }
   } finally {
     if (activePlaybackRequestId === requestId) {
       activePlaybackRequestId = null;
       isPlayingTrackId.value = null;
     }
+  }
+}
+
+function selectPlaybackSource(event: Event) {
+  const value = (event.target as HTMLSelectElement).value;
+  if (props.audioSources.some((source) => source.value === value)) {
+    emit("update:playbackSource", value);
   }
 }
 
@@ -629,7 +651,7 @@ function normalizeError(error: unknown): string {
 
 <template>
   <section class="overflow-hidden rounded border border-base-300 bg-base-100">
-    <header class="flex flex-col gap-3 border-b border-base-300 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+    <header class="flex flex-col gap-3 border-b border-base-300 px-4 py-3 2xl:flex-row 2xl:items-center 2xl:justify-between">
       <div class="flex min-w-0 items-center gap-3">
         <div class="flex size-10 shrink-0 items-center justify-center rounded bg-neutral text-neutral-content">
           <ListMusic :size="19" aria-hidden="true" />
@@ -648,6 +670,22 @@ function normalizeError(error: unknown): string {
       </div>
 
       <div class="flex flex-wrap items-center gap-2">
+        <select
+          :value="playbackSource"
+          class="select select-sm w-32 max-w-full"
+          :disabled="Boolean(isPlayingTrackId)"
+          aria-label="NetEase playback source"
+          title="Playback source"
+          @change="selectPlaybackSource"
+        >
+          <option
+            v-for="source in audioSources"
+            :key="source.value"
+            :value="source.value"
+          >
+            {{ source.label }}
+          </option>
+        </select>
         <select
           v-if="accounts.length"
           v-model="activeAccountRef"

@@ -112,7 +112,10 @@ describe("NetEase API", () => {
 
     await expect(
       resolveNeteaseTrack(track, "flac", accountRef, "request-2"),
-    ).resolves.toMatchObject({ mimeType: "audio/flac" });
+    ).resolves.toMatchObject({
+      mimeType: "audio/flac",
+      providerName: "NetEase Cloud Music",
+    });
     expect(invokeMock).toHaveBeenCalledWith("dispatch_plugin_request", {
       pluginId: "fika.netease",
       request: {

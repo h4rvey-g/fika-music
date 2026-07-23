@@ -5,10 +5,13 @@ import type { PluginRecord } from "../lib/plugin-api";
 
 const apiMocks = vi.hoisted(() => ({
   clearPluginDiagnostics: vi.fn(),
+  importLxJsSource: vi.fn(),
+  importLxJsSourceUrl: vi.fn(),
   installPluginPackage: vi.fn(),
   listPlugins: vi.fn(),
   refreshPluginRegistry: vi.fn(),
   removePluginPackage: vi.fn(),
+  selectLxJsSource: vi.fn(),
   selectPluginPackage: vi.fn(),
   setPluginCapabilities: vi.fn(),
   setPluginEnabled: vi.fn(),
@@ -92,6 +95,71 @@ describe("PluginManager", () => {
     expect(apiMocks.setPluginEnabled).toHaveBeenCalledWith("fika.runtime-demo", true);
     const pluginChanges = wrapper.emitted("pluginsChanged") ?? [];
     expect(pluginChanges[pluginChanges.length - 1]).toEqual([[enabled]]);
+    wrapper.unmount();
+  });
+
+  it("imports an LX JavaScript source as a reviewable Plugin", async () => {
+    const imported = pluginRecord({
+      id: "imported-lx-test",
+      name: "Imported LX Source",
+      origin: "user",
+      path: "/plugins/imported-lx-test",
+      canRemove: true,
+    });
+    apiMocks.selectLxJsSource.mockResolvedValue("/downloads/source.js");
+    apiMocks.importLxJsSource.mockResolvedValue(imported);
+    const wrapper = mount(PluginManager);
+    await flushPromises();
+
+    const importButton = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("Import local JS"));
+    expect(importButton).toBeDefined();
+    await importButton?.trigger("click");
+    await flushPromises();
+
+    expect(apiMocks.selectLxJsSource).toHaveBeenCalledOnce();
+    expect(apiMocks.importLxJsSource).toHaveBeenCalledWith("/downloads/source.js");
+    expect(wrapper.text()).toContain("Imported LX Source imported");
+    const pluginChanges = wrapper.emitted("pluginsChanged") ?? [];
+    expect(pluginChanges[pluginChanges.length - 1]).toEqual([
+      [pluginRecord(), imported],
+    ]);
+    wrapper.unmount();
+  });
+
+  it("imports an LX JavaScript source from a URL", async () => {
+    const imported = pluginRecord({
+      id: "imported-lx-remote",
+      name: "Remote LX Source",
+      origin: "user",
+      path: "/plugins/imported-lx-remote",
+      canRemove: true,
+    });
+    apiMocks.importLxJsSourceUrl.mockResolvedValue(imported);
+    const wrapper = mount(PluginManager);
+    await flushPromises();
+
+    const openButton = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("Import from URL"));
+    expect(openButton).toBeDefined();
+    await openButton?.trigger("click");
+    await wrapper
+      .get('input[aria-label="LX JavaScript source URL"]')
+      .setValue("  https://example.com/source.js  ");
+    await wrapper.get("dialog form.modal-box").trigger("submit");
+    await flushPromises();
+
+    expect(apiMocks.importLxJsSourceUrl).toHaveBeenCalledWith(
+      "https://example.com/source.js",
+    );
+    expect(wrapper.text()).toContain("Remote LX Source imported");
+    expect(wrapper.find("dialog").exists()).toBe(false);
+    const pluginChanges = wrapper.emitted("pluginsChanged") ?? [];
+    expect(pluginChanges[pluginChanges.length - 1]).toEqual([
+      [pluginRecord(), imported],
+    ]);
     wrapper.unmount();
   });
 
