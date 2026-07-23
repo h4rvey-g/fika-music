@@ -1,6 +1,5 @@
-use crate::lx_js_importer::{
-    self, ImportedLxTemplateProvider, LxJsImportAdapter, LxJsImportReport, LxUrlTemplate,
-};
+use crate::lx_js_importer::{self, LxJsImportAdapter, LxJsImportReport};
+use crate::lx_js_runtime::ImportedLxJsProvider;
 use crate::plugin_system::PluginManifest;
 use crate::source_runtime::{
     self, DiagnosticLevel, SourceAction, SourceCapability, SourceInfo, SourceProvider,
@@ -471,7 +470,7 @@ impl AudioSourceRegistry {
         let mut seen_ids = BTreeSet::new();
         let mut seen_provider_ids = BTreeSet::new();
         for path in discover_audio_source_paths(&self.audio_sources_dir)? {
-            let manifest = match read_manifest(&path) {
+            let mut manifest = match read_manifest(&path) {
                 Ok(manifest) => manifest,
                 Err(error) => {
                     self.insert_invalid_record(path, error.to_string());
@@ -497,6 +496,10 @@ impl AudioSourceRegistry {
                         manifest.provider_id
                     ),
                 );
+                continue;
+            }
+            if let Err(error) = upgrade_legacy_execution_manifest(&path, &mut manifest) {
+                self.insert_invalid_record(path, error.to_string());
                 continue;
             }
             let record = record_for_manifest(
@@ -1403,13 +1406,10 @@ fn prepare_import_contents(
     }
     let adapter = lx_js_importer::supported_import_adapter(&report).ok_or_else(|| {
         AudioSourceSystemError::Package(
-            "LX source requires a Rust port; no supported URL-template adapter was found"
-                .to_owned(),
+            "LX source does not expose a supported musicUrl request contract".to_owned(),
         )
     })?;
-    let templates = lx_js_importer::import_adapter_templates(&report, adapter)
-        .map_err(|error| AudioSourceSystemError::Package(error.to_string()))?;
-    let source_catalog = imported_source_catalog(&report, &templates);
+    let source_catalog = imported_javascript_source_catalog(&report);
     if source_catalog.is_empty() {
         return Err(AudioSourceSystemError::Package(
             "LX source did not expose a supported music source catalog".to_owned(),
@@ -1431,16 +1431,13 @@ fn prepare_import_contents(
         )
     };
     let provider_id = format!("{audio_source_id}-provider");
-    let adapter_note = format!(
-        "Imported from LX Music JavaScript with the {} Rust URL-template adapter. The JavaScript file is stored for provenance and is not executed.",
-        adapter.as_str()
-    );
+    let adapter_note = "Imported from LX Music JavaScript and executed in Fika's constrained QuickJS Audio Source runtime.";
     let description = report
         .metadata
         .description
         .as_deref()
         .map(|description| format!("{description} {adapter_note}"))
-        .unwrap_or(adapter_note);
+        .unwrap_or_else(|| adapter_note.to_owned());
     let name = truncate_text(&report.manifest.display_name, 120);
     let name = if name.is_empty() {
         "Imported LX Source".to_owned()
@@ -1477,6 +1474,28 @@ fn build_provider(
     manifest: &AudioSourceManifest,
     package_path: &Path,
 ) -> Result<Arc<dyn SourceProvider>, AudioSourceSystemError> {
+    let (source, report) = read_verified_source(manifest, package_path)?;
+    let catalog = imported_javascript_source_catalog(&report);
+    if catalog != manifest.source_catalog {
+        return Err(AudioSourceSystemError::ProviderLoad {
+            audio_source_id: manifest.id.clone(),
+            message: "source.js does not match the declared source catalog".to_owned(),
+        });
+    }
+    let provider = ImportedLxJsProvider::new(
+        manifest.provider_id.clone(),
+        report.manifest.display_name,
+        source,
+        report.metadata,
+        catalog,
+    );
+    Ok(Arc::new(provider))
+}
+
+fn read_verified_source(
+    manifest: &AudioSourceManifest,
+    package_path: &Path,
+) -> Result<(String, LxJsImportReport), AudioSourceSystemError> {
     let source_path = package_path.join(AUDIO_SOURCE_FILE);
     let source_metadata = fs::symlink_metadata(&source_path).map_err(|error| {
         AudioSourceSystemError::ProviderLoad {
@@ -1513,37 +1532,13 @@ fn build_provider(
             message: error.to_string(),
         }
     })?;
-    let adapter = LxJsImportAdapter::parse(&manifest.adapter).ok_or_else(|| {
+    LxJsImportAdapter::parse(&manifest.adapter).ok_or_else(|| {
         AudioSourceSystemError::ProviderLoad {
             audio_source_id: manifest.id.clone(),
             message: format!("unsupported adapter: {}", manifest.adapter),
         }
     })?;
-    let templates =
-        lx_js_importer::import_adapter_templates(&report, adapter).map_err(|error| {
-            AudioSourceSystemError::ProviderLoad {
-                audio_source_id: manifest.id.clone(),
-                message: error.to_string(),
-            }
-        })?;
-    let catalog = imported_source_catalog(&report, &templates);
-    if catalog != manifest.source_catalog {
-        return Err(AudioSourceSystemError::ProviderLoad {
-            audio_source_id: manifest.id.clone(),
-            message: "source.js does not match the declared source catalog".to_owned(),
-        });
-    }
-    let provider = ImportedLxTemplateProvider::for_imported_package(
-        manifest.provider_id.clone(),
-        &report,
-        catalog,
-        adapter,
-    )
-    .map_err(|error| AudioSourceSystemError::ProviderLoad {
-        audio_source_id: manifest.id.clone(),
-        message: error.to_string(),
-    })?;
-    Ok(Arc::new(provider))
+    Ok((source, report))
 }
 
 fn download_audio_source(
@@ -1746,42 +1741,40 @@ fn remote_source_looks_like_html(content_type: Option<&str>, bytes: &[u8]) -> bo
     prefix.starts_with("<!doctype html") || prefix.starts_with("<html")
 }
 
-fn imported_source_catalog(
-    report: &LxJsImportReport,
-    templates: &[LxUrlTemplate],
-) -> BTreeMap<String, SourceInfo> {
-    let analyzed = report.manifest.to_source_catalog();
-    templates
-        .iter()
-        .map(|template| template.source_id.as_str())
-        .collect::<BTreeSet<_>>()
+fn imported_javascript_source_catalog(report: &LxJsImportReport) -> BTreeMap<String, SourceInfo> {
+    report
+        .manifest
+        .to_source_catalog()
         .into_iter()
-        .map(|source_id| {
-            let (name, qualities) = analyzed
-                .get(source_id)
-                .map(|source| {
-                    let qualities = if source.qualities.is_empty() {
-                        source_runtime::standard_lx_qualities()
-                    } else {
-                        source.qualities.clone()
-                    };
-                    (source.name.clone(), qualities)
-                })
-                .unwrap_or_else(|| {
-                    (
-                        imported_source_name(source_id).to_owned(),
-                        source_runtime::standard_lx_qualities(),
-                    )
-                });
-            (
-                source_id.to_owned(),
-                source_runtime::lx_music_source(
-                    source_id,
-                    name,
-                    vec![SourceAction::MusicUrl],
-                    qualities,
-                ),
-            )
+        .filter(|(source_id, source)| {
+            matches!(
+                source_id.as_str(),
+                source_runtime::LX_SOURCE_WY
+                    | source_runtime::LX_SOURCE_TX
+                    | source_runtime::LX_SOURCE_KW
+                    | source_runtime::LX_SOURCE_KG
+                    | source_runtime::LX_SOURCE_MG
+                    | source_runtime::LX_SOURCE_LOCAL
+            ) && source.actions.contains(&SourceAction::MusicUrl)
+        })
+        .map(|(source_id, source)| {
+            let qualities = if source.qualities.is_empty() {
+                source_runtime::standard_lx_qualities()
+            } else {
+                source.qualities
+            };
+            let name = if source.name.trim().is_empty() {
+                imported_source_name(&source_id).to_owned()
+            } else {
+                source.name
+            };
+            let source = source_runtime::lx_music_source(
+                source_id.clone(),
+                name,
+                vec![SourceAction::MusicUrl],
+                qualities,
+            );
+            (source_id, source)
         })
         .collect()
 }
@@ -1883,6 +1876,46 @@ fn read_manifest(path: &Path) -> Result<AudioSourceManifest, AudioSourceSystemEr
         )));
     }
     Ok(serde_json::from_slice(&fs::read(manifest_path)?)?)
+}
+
+fn upgrade_legacy_execution_manifest(
+    package_path: &Path,
+    manifest: &mut AudioSourceManifest,
+) -> Result<(), AudioSourceSystemError> {
+    if manifest.adapter == LxJsImportAdapter::QuickJs.as_str() {
+        return Ok(());
+    }
+    let (_, report) = read_verified_source(manifest, package_path)?;
+    let source_catalog = imported_javascript_source_catalog(&report);
+    if source_catalog.is_empty() {
+        return Err(AudioSourceSystemError::ProviderLoad {
+            audio_source_id: manifest.id.clone(),
+            message: "source.js did not expose a supported music source catalog".to_owned(),
+        });
+    }
+    let legacy_note_prefix = "Imported from LX Music JavaScript with the ";
+    let legacy_note_suffix =
+        " Rust URL-template adapter. The JavaScript file is stored for provenance and is not executed.";
+    if let Some(description) = manifest.description.as_mut() {
+        if let Some(note_start) = description.find(legacy_note_prefix) {
+            let note_end = description[note_start..]
+                .find(legacy_note_suffix)
+                .map(|offset| note_start + offset + legacy_note_suffix.len());
+            if let Some(note_end) = note_end {
+                description.replace_range(
+                    note_start..note_end,
+                    "Imported from LX Music JavaScript and executed in Fika's constrained QuickJS Audio Source runtime.",
+                );
+            }
+        }
+    }
+    manifest.adapter = LxJsImportAdapter::QuickJs.as_str().to_owned();
+    manifest.source_catalog = source_catalog;
+    fs::write(
+        package_path.join(AUDIO_SOURCE_MANIFEST_FILE),
+        serde_json::to_vec_pretty(manifest)?,
+    )?;
+    Ok(())
 }
 
 fn discover_audio_source_paths(root: &Path) -> Result<Vec<PathBuf>, AudioSourceSystemError> {
@@ -2290,6 +2323,11 @@ mod tests {
             .expect("reference source should import");
 
         assert_eq!(imported.state, AudioSourceState::NeedsReview);
+        assert_eq!(imported.adapter.as_deref(), Some("quickjs"));
+        assert!(imported
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("constrained QuickJS")));
         assert_eq!(
             imported.declared_capabilities,
             BTreeSet::from([SourceCapability::NetworkAny])
@@ -2466,6 +2504,76 @@ mod tests {
                 .granted_capabilities,
             BTreeSet::from([SourceCapability::NetworkAny])
         );
+    }
+
+    #[test]
+    fn legacy_adapter_upgrade_should_require_permission_review_before_script_execution() {
+        let root = tempfile::tempdir().expect("test directory should exist");
+        let audio_sources_dir = root.path().join("audio-sources");
+        let connection = database();
+        let mut registry =
+            AudioSourceRegistry::new(&audio_sources_dir, Arc::new(SourceRuntime::new()));
+        registry
+            .refresh(&connection)
+            .expect("empty registry should refresh");
+        let imported = registry
+            .import_file(&connection, &reference_source())
+            .expect("reference source should import");
+        registry
+            .set_capabilities(
+                &connection,
+                &imported.id,
+                [SourceCapability::NetworkAny],
+                true,
+            )
+            .expect("network access should be reviewed");
+        registry
+            .set_enabled(&connection, &imported.id, true)
+            .expect("source should enable before simulating a legacy package");
+
+        let manifest_path = Path::new(&imported.path).join(AUDIO_SOURCE_MANIFEST_FILE);
+        let mut legacy_manifest =
+            read_manifest(Path::new(&imported.path)).expect("managed manifest should be readable");
+        legacy_manifest.adapter = LxJsImportAdapter::StaticTemplates.as_str().to_owned();
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&legacy_manifest).expect("legacy manifest should serialize"),
+        )
+        .expect("legacy manifest should write");
+        connection
+            .execute(
+                "UPDATE audio_source_states
+                 SET manifest_fingerprint = ?2, enabled = 1, permissions_reviewed = 1
+                 WHERE audio_source_id = ?1",
+                params![
+                    imported.id,
+                    manifest_fingerprint(&legacy_manifest)
+                        .expect("legacy manifest should fingerprint")
+                ],
+            )
+            .expect("legacy persisted state should update");
+        drop(registry);
+
+        let mut restarted =
+            AudioSourceRegistry::new(&audio_sources_dir, Arc::new(SourceRuntime::new()));
+        let records = restarted
+            .refresh(&connection)
+            .expect("legacy execution adapter should upgrade");
+        let upgraded_manifest = read_manifest(Path::new(&records[0].path))
+            .expect("upgraded manifest should be readable");
+
+        assert_eq!(upgraded_manifest.adapter, "quickjs");
+        assert!(upgraded_manifest
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("constrained QuickJS")));
+        assert_eq!(records[0].state, AudioSourceState::NeedsReview);
+        assert!(!records[0].enabled);
+        assert!(!records[0].permissions_reviewed);
+        assert!(records[0]
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("reviewed again")));
     }
 
     #[test]

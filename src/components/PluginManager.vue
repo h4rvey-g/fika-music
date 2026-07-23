@@ -219,6 +219,7 @@ function capabilityLabel(capability: string) {
     "metadata:read": "Read metadata",
     "cache:read-write": "Read and write cache",
     "bridge:netease-api-enhanced": "NetEase service bridge",
+    "bridge:kugou-music-api": "KuGou service bridge",
   };
   return labels[capability] || capability;
 }

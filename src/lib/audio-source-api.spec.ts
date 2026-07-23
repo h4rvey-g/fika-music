@@ -92,6 +92,7 @@ describe("audio source API", () => {
         audioSourceId: "imported-source",
         source: "wy",
         trackId: "347230",
+        musicInfo: { id: 1, songmid: "track-mid", name: "Test Track" },
         quality: "320k",
         requestId: "request-1",
       }),
@@ -104,7 +105,7 @@ describe("audio source API", () => {
       request: {
         action: "musicUrl",
         source: "wy",
-        musicInfo: { id: "347230" },
+        musicInfo: { id: 1, songmid: "track-mid", name: "Test Track" },
         quality: "320k",
       },
       requestId: "request-1",

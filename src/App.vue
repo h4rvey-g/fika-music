@@ -28,11 +28,13 @@ import {
 } from "@lucide/vue";
 import LibraryBrowser from "./components/LibraryBrowser.vue";
 import AudioSourceManager from "./components/AudioSourceManager.vue";
+import KugouSource from "./components/KugouSource.vue";
 import PluginManager from "./components/PluginManager.vue";
 import PluginWorkspace from "./components/PluginWorkspace.vue";
 import NeteaseSource from "./components/NeteaseSource.vue";
 import NowPlayingPanel from "./components/NowPlayingPanel.vue";
 import { NETEASE_PLUGIN_ID, type NeteasePlayback } from "./lib/netease-api";
+import { KUGOU_PLUGIN_ID } from "./lib/kugou-api";
 import {
   buildAudioSourceOptions,
   listAudioSources,
@@ -560,7 +562,7 @@ function showLibraryError(message: string) {
   appError.value = message;
 }
 
-async function playNeteasePlayback(playback: NeteasePlayback) {
+async function playRemotePlayback(playback: NeteasePlayback) {
   sampleListeningTime();
   clearLocalPlaybackQueue();
   isPreparingPlayback.value = true;
@@ -1021,7 +1023,17 @@ function normalizeError(error: unknown) {
             :stream-quality="remoteQuality"
             v-model:playback-source="playbackAudioSourceId"
             :audio-sources="availableAudioSources"
-            @playback-ready="playNeteasePlayback"
+            @playback-ready="playRemotePlayback"
+            @open-plugins="selectSection('plugins')"
+            @open-audio-sources="selectSection('sources')"
+          />
+          <KugouSource
+            v-else-if="activePlugin.id === KUGOU_PLUGIN_ID"
+            class="min-w-0 xl:col-start-1 xl:row-start-1"
+            :stream-quality="remoteQuality"
+            v-model:playback-source="playbackAudioSourceId"
+            :audio-sources="availableAudioSources"
+            @playback-ready="playRemotePlayback"
             @open-plugins="selectSection('plugins')"
             @open-audio-sources="selectSection('sources')"
           />

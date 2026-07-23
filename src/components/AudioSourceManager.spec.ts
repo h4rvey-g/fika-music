@@ -113,7 +113,7 @@ describe("AudioSourceManager", () => {
     await flushPromises();
 
     await wrapper.get('button[aria-label="Inspect Imported Source"]').trigger("click");
-    const grant = wrapper.get<HTMLInputElement>('input[aria-label="Grant Network requests"]');
+    const grant = wrapper.get<HTMLInputElement>('input[aria-label="Grant Any network host"]');
     await grant.setValue(true);
     await flushPromises();
     expect(apiMocks.setAudioSourceCapabilities).toHaveBeenCalledWith(

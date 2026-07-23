@@ -74,6 +74,8 @@ pub enum SourceCapability {
     CacheReadWrite,
     #[serde(rename = "bridge:netease-api-enhanced")]
     BridgeNeteaseApiEnhanced,
+    #[serde(rename = "bridge:kugou-music-api")]
+    BridgeKugouMusicApi,
 }
 
 impl SourceCapability {
@@ -86,6 +88,7 @@ impl SourceCapability {
             Self::MetadataRead => "metadata:read",
             Self::CacheReadWrite => "cache:read-write",
             Self::BridgeNeteaseApiEnhanced => "bridge:netease-api-enhanced",
+            Self::BridgeKugouMusicApi => "bridge:kugou-music-api",
         }
     }
 }
@@ -536,6 +539,10 @@ impl SourceAccountRef {
 pub enum SourceHttpMethod {
     Get,
     Post,
+    Put,
+    Patch,
+    Delete,
+    Head,
 }
 
 impl SourceHttpMethod {
@@ -543,6 +550,10 @@ impl SourceHttpMethod {
         match self {
             Self::Get => "GET",
             Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Patch => "PATCH",
+            Self::Delete => "DELETE",
+            Self::Head => "HEAD",
         }
     }
 }
@@ -551,7 +562,10 @@ impl SourceHttpMethod {
 pub struct SourceHttpRequest {
     pub method: SourceHttpMethod,
     pub url: String,
+    pub headers: BTreeMap<String, String>,
+    pub body: Option<Vec<u8>>,
     pub json_body: Option<JsonValue>,
+    pub timeout: Option<Duration>,
 }
 
 impl SourceHttpRequest {
@@ -559,7 +573,10 @@ impl SourceHttpRequest {
         Self {
             method: SourceHttpMethod::Get,
             url: url.into(),
+            headers: BTreeMap::new(),
+            body: None,
             json_body: None,
+            timeout: None,
         }
     }
 
@@ -567,7 +584,10 @@ impl SourceHttpRequest {
         Self {
             method: SourceHttpMethod::Post,
             url: url.into(),
+            headers: BTreeMap::new(),
+            body: None,
             json_body: Some(body),
+            timeout: None,
         }
     }
 }
@@ -576,6 +596,7 @@ impl SourceHttpRequest {
 pub struct SourceHttpResponse {
     pub status: u16,
     pub final_url: String,
+    pub headers: BTreeMap<String, String>,
     pub content_type: Option<String>,
     pub body: Vec<u8>,
 }
@@ -833,11 +854,35 @@ impl SourceHost for DefaultSourceHost {
         let mut request_builder = match request.method {
             SourceHttpMethod::Get => self.http_client.get(parsed_url.clone()),
             SourceHttpMethod::Post => self.http_client.post(parsed_url),
+            SourceHttpMethod::Put => self.http_client.put(parsed_url),
+            SourceHttpMethod::Patch => self.http_client.patch(parsed_url),
+            SourceHttpMethod::Delete => self.http_client.delete(parsed_url),
+            SourceHttpMethod::Head => self.http_client.head(parsed_url),
         }
-        .timeout(self.network_timeout)
+        .timeout(
+            request
+                .timeout
+                .unwrap_or(self.network_timeout)
+                .min(self.network_timeout),
+        )
         .header(reqwest::header::USER_AGENT, "FikaMusic/0.1 source-runtime");
+        for (name, value) in &request.headers {
+            let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                SourceHostError::InvalidResponse {
+                    message: "network request contains an invalid header name".to_owned(),
+                }
+            })?;
+            let value = reqwest::header::HeaderValue::from_str(value).map_err(|_| {
+                SourceHostError::InvalidResponse {
+                    message: "network request contains an invalid header value".to_owned(),
+                }
+            })?;
+            request_builder = request_builder.header(name, value);
+        }
         if let Some(body) = &request.json_body {
             request_builder = request_builder.json(body);
+        } else if let Some(body) = &request.body {
+            request_builder = request_builder.body(body.clone());
         }
 
         let mut response = request_builder.send().map_err(|error| {
@@ -858,6 +903,16 @@ impl SourceHost for DefaultSourceHost {
 
         let status = response.status().as_u16();
         let final_url = response.url().to_string();
+        let headers = response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.as_str().to_owned(), value.to_owned()))
+            })
+            .collect();
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -890,6 +945,7 @@ impl SourceHost for DefaultSourceHost {
         Ok(SourceHttpResponse {
             status,
             final_url,
+            headers,
             content_type,
             body,
         })
@@ -1014,6 +1070,27 @@ impl SourceRuntimeContext {
 
     pub fn has_capability(&self, capability: SourceCapability) -> bool {
         self.granted_capabilities.contains(&capability)
+    }
+
+    pub(crate) fn cancellation_token(&self) -> SourceCancellationToken {
+        self.cancellation.clone()
+    }
+
+    pub(crate) fn fork_for_host_calls(&self) -> Self {
+        Self {
+            source_id: self.source_id.clone(),
+            declared_capabilities: self.declared_capabilities.clone(),
+            granted_capabilities: self.granted_capabilities.clone(),
+            host: Arc::clone(&self.host),
+            cancellation: self.cancellation.clone(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    pub(crate) fn append_nested_diagnostics(&mut self, diagnostics: &[SourceDiagnostic]) {
+        for diagnostic in diagnostics {
+            self.push_diagnostic(diagnostic.level, diagnostic.message.clone());
+        }
     }
 
     pub fn require_capability(
@@ -2351,6 +2428,7 @@ mod tests {
             Ok(SourceHttpResponse {
                 status: 200,
                 final_url: request.url.clone(),
+                headers: BTreeMap::new(),
                 content_type: Some("application/json".to_owned()),
                 body: br#"{"ok":true}"#.to_vec(),
             })
@@ -3391,7 +3469,7 @@ mod tests {
     }
 
     #[test]
-    fn lx_js_reference_sources_should_be_checked_in_for_rust_porting() {
+    fn lx_js_reference_sources_should_be_checked_in_for_sandbox_regressions() {
         for (file_name, display_name) in LX_JS_REFERENCE_SOURCES {
             let path = lx_js_reference_dir().join(file_name);
             assert!(Path::new(&path).is_file(), "missing {file_name}");
@@ -3408,7 +3486,7 @@ mod tests {
     }
 
     #[test]
-    fn lx_js_reference_sources_should_not_be_runtime_execution_inputs() {
+    fn rust_native_providers_should_initialize_without_javascript_inputs() {
         let provider = MockRustSourceProvider::default();
         let report = SourceRuntime::new()
             .initialize_provider(&provider)

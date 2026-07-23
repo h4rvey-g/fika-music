@@ -1,7 +1,7 @@
 # Fika Music
 
 Fika Music is a local-first Tauri music player for indexed local audio and
-LX-compatible Rust Source Providers.
+LX-compatible Rust Source Providers and constrained imported Audio Sources.
 
 The current v0.1 implementation includes:
 
@@ -9,10 +9,10 @@ The current v0.1 implementation includes:
 - A capability-enforced Rust Source Runtime.
 - Bundled and user Plugin package lifecycle through the Plugin System.
 - A separate Audio Source Registry and configuration view for local-file and
-  HTTP(S) URL import of LX Music JavaScript sources using the
-  reviewed Nianxin and Changqing Rust adapters, plus scripts with statically
-  extractable URL templates. Imported JavaScript is analyzed and retained for
-  provenance but is never executed. No Audio Sources are built in.
+  HTTP(S) URL import of LX Music JavaScript sources. Imported scripts are
+  statically checked, fingerprinted, permission-reviewed, and executed in a
+  resource-limited QuickJS runtime with host-mediated network access. No Audio
+  Sources are built in.
 - A bundled NetEase Cloud Music Plugin with QR account connection,
   recommendations, Remote Track playback, Playlist list/read, confirmed
   add/remove mutations, and audit history.

@@ -123,6 +123,7 @@ Earlier provisional terms such as **Track**, **Library**, **Playlist**, **Connec
 - ADR 0011: [Core LX-compatible Source Runtime MVP structure](./adr/0011-core-lx-compatible-source-runtime-mvp.md).
 - ADR 0012: [Plugin System built on the Source Runtime](./adr/0012-plugin-system-built-on-source-runtime.md).
 - ADR 0013: [Separate imported Audio Sources from Plugins](./adr/0013-separate-audio-source-lifecycle.md).
+- ADR 0014: [Embedded QuickJS for imported Audio Sources](./adr/0014-embedded-quickjs-audio-sources.md).
 
 ## Earlier provisional domain terms
 
@@ -151,7 +152,7 @@ Future changes should update `CONTEXT.md` first, then this roadmap only when del
 | Persistence | SQLite via Rust | Local-first, portable, reliable, low operational overhead. |
 | Async runtime | Tokio | Needed for network, indexing, Source Runtime supervision, filesystem jobs. |
 | Metadata parsing | Rust crates behind an adapter | Keeps parser choice replaceable. |
-| Source runtime | Rust-native Source Provider dispatcher | Keeps LX-compatible source behavior in audited Rust code instead of executing original LX JavaScript. |
+| Source runtime | Rust-native dispatcher with constrained QuickJS Audio Source adapter | Keeps Plugins typed and audited while allowing permission-reviewed playback scripts behind the same host controls. |
 | Source Provider manifests | JSON/TOML manifest with semver | Supports permission review and compatibility checks. |
 | API contracts | TypeScript types generated from Rust models or shared schemas | Reduces Tauri command drift. |
 
@@ -168,7 +169,7 @@ Future changes should update `CONTEXT.md` first, then this roadmap only when del
    - Network decision: Source Providers may make arbitrary network requests through the host-mediated network API; requests must still be timeout-bound, logged, cancellable, and visible in diagnostics.
    - Filesystem decision: Source Providers have no direct local file access; Rust owns local library scanning and file IO, while providers use host-mediated cache APIs and app-provided metadata.
    - Service Bridge decision: v0.1 Source Providers can only use host-provided Service Bridges; they cannot bundle, install, or launch arbitrary Node/native sidecars.
-   - Source runtime decision: do not execute original LX JavaScript; rewrite LX-compatible behavior as Rust Source Providers.
+   - Source runtime decision: bundled and Plugin integrations use Rust Source Providers; user-imported playback-only Audio Sources may execute in constrained QuickJS under ADR 0014.
    - Plugin System decision: installable/bundled Plugin package lifecycle is built above the Source Runtime; LX Compatibility remains core runtime behavior.
    - Audio Source decision: imported LX playback sources use an independent registry, lifecycle model, package directory, and UI. They are not Plugins, and none are built in.
 
@@ -390,6 +391,10 @@ Deliverables:
 - Dedicated `AudioSourceRecord` and `audio-source.json` models.
 - Managed app-data Audio Source directory and SQLite lifecycle tables.
 - Local-file and HTTP(S) URL import with static analysis and integrity checks.
+- Resource-limited QuickJS execution behind the Source Runtime's host-mediated
+  network and cancellation controls.
+- Compatibility activation for earlier adapter identifiers without copied
+  endpoint templates.
 - Independent permission review, enable/disable, removal, diagnostics, and
   `musicUrl` dispatch commands.
 - Configuration-only Audio Sources view with no search, Track ID lookup,

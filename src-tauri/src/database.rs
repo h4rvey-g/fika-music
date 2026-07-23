@@ -2,7 +2,7 @@ use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
 
 #[cfg(test)]
-const CURRENT_SCHEMA_VERSION: i64 = 6;
+const CURRENT_SCHEMA_VERSION: i64 = 7;
 
 const INITIAL_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS local_tracks (
@@ -177,6 +177,20 @@ fn migrations() -> Migrations<'static> {
                 ON audio_source_diagnostics(audio_source_id, id);
             ",
         ),
+        M::up(
+            "
+            CREATE TABLE IF NOT EXISTS kugou_accounts (
+                account_ref TEXT PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                user_id TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                avatar_url TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                connected_at INTEGER NOT NULL,
+                last_verified_at INTEGER NOT NULL
+            );
+            ",
+        ),
     ])
 }
 
@@ -264,6 +278,7 @@ mod tests {
         assert!(has_table(&connection, "album_art_lookups"));
         assert!(has_table(&connection, "audio_source_states"));
         assert!(has_table(&connection, "audio_source_diagnostics"));
+        assert!(has_table(&connection, "kugou_accounts"));
         assert!(has_column(
             &connection,
             "album_art_lookups",

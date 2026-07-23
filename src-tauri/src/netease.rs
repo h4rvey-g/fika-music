@@ -7,17 +7,18 @@ use crate::source_runtime::{
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use netease_music::{
-    ApiResponse, LoginQrCheckParams, NeteaseMusicClient, PlaylistTrackAllParams, SongQualityLevel,
-    SongUrlV1Params, UserPlaylistParams,
+    ApiResponse, LoginQrCheckParams, NeteaseMusicClient, PlaylistDetailParams, SongDetailParams,
+    SongQualityLevel, SongUrlV1Params, UserPlaylistParams,
 };
 use qrcode::render::svg;
 use qrcode::QrCode;
+use rayon::prelude::*;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -32,13 +33,17 @@ const QR_SESSION_TTL_SECONDS: i64 = 300;
 const MAX_PENDING_QR_SESSIONS: usize = 8;
 const API_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_API_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-// playlist_track_all merges chunked track-detail responses into one aggregate payload.
+// Playlist detail responses can include every track id and embedded track metadata.
 const MAX_PLAYLIST_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+const PLAYLIST_TRACK_BATCH_SIZE: usize = 500;
+const MAX_PLAYLIST_TRACK_CONCURRENCY: usize = 4;
 const MAX_AUDIT_RECORDS: u32 = 200;
 const MAX_AUDIT_MESSAGE_CHARS: usize = 512;
 const MAX_UPSTREAM_MESSAGE_CHARS: usize = 512;
 
 type SharedConnection = Arc<Mutex<Connection>>;
+
+static PLAYLIST_TRACK_POOL: OnceLock<Result<rayon::ThreadPool, String>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
@@ -763,14 +768,7 @@ impl NeteaseProviderBridge for NeteaseServiceBridge {
         validate_netease_playlist_id(playlist_id)?;
         let account = self.account(account_ref)?;
         let client = self.client_for_account(account_ref)?;
-        let result = client
-            .playlist_track_all(PlaylistTrackAllParams {
-                id: playlist_id.to_owned(),
-                s: Some(8),
-            })
-            .map_err(|error| bridge_failure("read playlist", error))
-            .and_then(checked_playlist_body);
-        let body = self.account_result(account_ref, result)?;
+        let body = self.playlist_body(account_ref, playlist_id, &client)?;
         let playlist_json =
             body.get("playlist")
                 .ok_or_else(|| NeteaseBridgeError::InvalidResponse {
@@ -783,13 +781,16 @@ impl NeteaseProviderBridge for NeteaseServiceBridge {
                 message: "playlist metadata was incomplete".to_owned(),
             }
         })?;
-        let tracks = playlist_json
-            .get("tracks")
-            .and_then(JsonValue::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(remote_track_from_json)
-            .collect();
+        let track_ids = playlist_track_ids(playlist_json);
+        let embedded_tracks = complete_embedded_playlist_tracks(playlist_json, &track_ids);
+        drop(body);
+        let tracks = match embedded_tracks {
+            Some(tracks) => tracks,
+            None => {
+                let result = fetch_playlist_tracks(&client, &track_ids);
+                self.account_result(account_ref, result)?
+            }
+        };
         Ok(SourcePlaylistDetail { playlist, tracks })
     }
 
@@ -887,13 +888,13 @@ impl NeteaseServiceBridge {
         find_account(&db, account_ref)?.ok_or(NeteaseBridgeError::AccountNotFound)
     }
 
-    fn account_result(
+    fn account_result<T>(
         &self,
         account_ref: &str,
-        result: Result<JsonValue, NeteaseBridgeError>,
-    ) -> Result<JsonValue, NeteaseBridgeError> {
+        result: Result<T, NeteaseBridgeError>,
+    ) -> Result<T, NeteaseBridgeError> {
         match result {
-            Ok(body) => {
+            Ok(value) => {
                 if let Ok(db) = self.db.lock() {
                     let _ = db.execute(
                         "UPDATE netease_accounts
@@ -902,7 +903,7 @@ impl NeteaseServiceBridge {
                         params![account_ref, now_timestamp()],
                     );
                 }
-                Ok(body)
+                Ok(value)
             }
             Err(NeteaseBridgeError::CredentialExpired) => {
                 self.mark_account_expired(account_ref);
@@ -910,6 +911,22 @@ impl NeteaseServiceBridge {
             }
             Err(error) => Err(error),
         }
+    }
+
+    fn playlist_body(
+        &self,
+        account_ref: &str,
+        playlist_id: &str,
+        client: &NeteaseMusicClient,
+    ) -> Result<JsonValue, NeteaseBridgeError> {
+        let result = client
+            .playlist_detail(PlaylistDetailParams {
+                id: playlist_id.to_owned(),
+                s: Some(8),
+            })
+            .map_err(|error| bridge_failure("read playlist", error))
+            .and_then(checked_playlist_body);
+        self.account_result(account_ref, result)
     }
 
     fn mutate_playlist_inner(
@@ -925,10 +942,21 @@ impl NeteaseServiceBridge {
             ));
         }
         validate_netease_track_id(&track.id)?;
-        if !self.playlist(account_ref, playlist_id)?.playlist.can_mutate {
+        validate_netease_playlist_id(playlist_id)?;
+        let account = self.account(account_ref)?;
+        let client = self.client_for_account(account_ref)?;
+        let body = self.playlist_body(account_ref, playlist_id, &client)?;
+        let playlist = body
+            .get("playlist")
+            .and_then(|value| playlist_from_json(value, &account.user_id))
+            .ok_or_else(|| NeteaseBridgeError::InvalidResponse {
+                operation: "read playlist",
+                message: "playlist metadata was incomplete".to_owned(),
+            })?;
+        if !playlist.can_mutate {
             return Err(NeteaseBridgeError::ReadOnlyPlaylist);
         }
-        let client = self.client_for_account(account_ref)?;
+        drop(body);
         let op = mutation_kind_str(operation);
         let tracks = vec![track.id.clone()];
         let request = || {
@@ -1308,6 +1336,102 @@ fn json_string(value: Option<&JsonValue>) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn playlist_track_ids(playlist: &JsonValue) -> Vec<String> {
+    playlist
+        .get("trackIds")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|track| json_id(track.get("id")))
+        .collect()
+}
+
+fn complete_embedded_playlist_tracks(
+    playlist: &JsonValue,
+    track_ids: &[String],
+) -> Option<Vec<RemoteTrack>> {
+    let values = playlist.get("tracks").and_then(JsonValue::as_array)?;
+    if !track_ids.is_empty() && values.len() != track_ids.len() {
+        return None;
+    }
+    let tracks = values
+        .iter()
+        .map(remote_track_from_json)
+        .collect::<Option<Vec<_>>>()?;
+    if track_ids.is_empty()
+        || tracks
+            .iter()
+            .zip(track_ids)
+            .all(|(track, expected_id)| track.id == expected_id.as_str())
+    {
+        Some(tracks)
+    } else {
+        None
+    }
+}
+
+fn fetch_playlist_tracks(
+    client: &NeteaseMusicClient,
+    track_ids: &[String],
+) -> Result<Vec<RemoteTrack>, NeteaseBridgeError> {
+    collect_playlist_track_batches(track_ids, |batch| {
+        let body = client
+            .song_detail(SongDetailParams {
+                ids: batch.to_vec(),
+            })
+            .map_err(|error| bridge_failure("read playlist tracks", error))
+            .and_then(|response| checked_body(response, "read playlist tracks"))?;
+        let songs = body
+            .get("songs")
+            .and_then(JsonValue::as_array)
+            .ok_or_else(|| NeteaseBridgeError::InvalidResponse {
+                operation: "read playlist tracks",
+                message: "track detail response did not include tracks".to_owned(),
+            })?;
+        Ok(songs.iter().filter_map(remote_track_from_json).collect())
+    })
+}
+
+fn collect_playlist_track_batches<F>(
+    track_ids: &[String],
+    fetch_batch: F,
+) -> Result<Vec<RemoteTrack>, NeteaseBridgeError>
+where
+    F: Fn(&[String]) -> Result<Vec<RemoteTrack>, NeteaseBridgeError> + Send + Sync,
+{
+    if track_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    if track_ids.len() <= PLAYLIST_TRACK_BATCH_SIZE {
+        return fetch_batch(track_ids);
+    }
+    let pool = playlist_track_pool()?;
+    let batches = pool.install(|| {
+        track_ids
+            .par_chunks(PLAYLIST_TRACK_BATCH_SIZE)
+            .map(fetch_batch)
+            .collect::<Result<Vec<_>, _>>()
+    })?;
+    let mut tracks = Vec::with_capacity(track_ids.len());
+    for batch in batches {
+        tracks.extend(batch);
+    }
+    Ok(tracks)
+}
+
+fn playlist_track_pool() -> Result<&'static rayon::ThreadPool, NeteaseBridgeError> {
+    PLAYLIST_TRACK_POOL
+        .get_or_init(|| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(MAX_PLAYLIST_TRACK_CONCURRENCY)
+                .thread_name(|index| format!("netease-playlist-{index}"))
+                .build()
+                .map_err(|error| format!("create playlist fetch pool: {error}"))
+        })
+        .as_ref()
+        .map_err(|message| NeteaseBridgeError::Bridge(message.clone()))
+}
+
 fn remote_track_from_json(value: &JsonValue) -> Option<RemoteTrack> {
     let id = json_id(value.get("id"))?;
     let title = json_string(value.get("name"))?;
@@ -1324,6 +1448,7 @@ fn remote_track_from_json(value: &JsonValue) -> Option<RemoteTrack> {
         .get("dt")
         .or_else(|| value.get("duration"))
         .and_then(JsonValue::as_u64);
+    let raw_info = json!({ "id": id.clone() });
     Some(RemoteTrack {
         id,
         source: source_runtime::LX_SOURCE_WY.to_owned(),
@@ -1338,7 +1463,7 @@ fn remote_track_from_json(value: &JsonValue) -> Option<RemoteTrack> {
         cover_url: album
             .and_then(|album| json_string(album.get("picUrl")))
             .or_else(|| json_string(value.get("picUrl"))),
-        raw_info: value.clone(),
+        raw_info,
     })
 }
 
@@ -1537,7 +1662,7 @@ fn now_timestamp() -> i64 {
 mod tests {
     use super::*;
     use crate::source_runtime::{DefaultSourceHost, SourceHost, SourceRuntime, SourceRuntimeError};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     const TEST_ACCOUNT_REF: &str = "netease-account:00000000-0000-4000-8000-000000000001";
 
@@ -1664,6 +1789,78 @@ mod tests {
         .expect("track should normalize");
 
         assert_eq!(track.duration_seconds, Some(326));
+    }
+
+    #[test]
+    fn remote_track_parser_should_not_copy_unneeded_upstream_payload() {
+        let track = remote_track_from_json(&json!({
+            "id": 347230,
+            "name": "Test Track",
+            "ar": [{ "name": "Test Artist", "aliases": vec!["x".repeat(8_192)] }],
+            "al": { "name": "Test Album", "picUrl": "https://example.test/cover.jpg" },
+            "dt": 180_000,
+            "privilege": { "payload": "x".repeat(8_192) }
+        }))
+        .expect("track should normalize");
+
+        assert!(
+            serde_json::to_vec(&track)
+                .expect("track should serialize")
+                .len()
+                < 1_024,
+            "normalized tracks should not retain the full upstream payload"
+        );
+    }
+
+    #[test]
+    fn playlist_track_batches_should_use_bounded_parallelism() {
+        let ids = (0..(PLAYLIST_TRACK_BATCH_SIZE * MAX_PLAYLIST_TRACK_CONCURRENCY))
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>();
+        let active = AtomicUsize::new(0);
+        let maximum_active = AtomicUsize::new(0);
+
+        collect_playlist_track_batches(&ids, |_| {
+            let active_now = active.fetch_add(1, Ordering::AcqRel) + 1;
+            maximum_active.fetch_max(active_now, Ordering::AcqRel);
+            std::thread::sleep(Duration::from_millis(20));
+            active.fetch_sub(1, Ordering::AcqRel);
+            Ok(Vec::new())
+        })
+        .expect("track batches should complete");
+
+        assert!(
+            (2..=MAX_PLAYLIST_TRACK_CONCURRENCY).contains(&maximum_active.load(Ordering::Acquire))
+        );
+    }
+
+    #[test]
+    fn playlist_track_batches_should_preserve_playlist_order() {
+        let ids = (0..(PLAYLIST_TRACK_BATCH_SIZE + 1))
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>();
+
+        let tracks = collect_playlist_track_batches(&ids, |batch| {
+            Ok(batch
+                .iter()
+                .map(|id| RemoteTrack {
+                    id: id.clone(),
+                    source: source_runtime::LX_SOURCE_WY.to_owned(),
+                    title: id.clone(),
+                    artist: "Artist".to_owned(),
+                    album: None,
+                    duration_seconds: None,
+                    cover_url: None,
+                    raw_info: json!({ "id": id }),
+                })
+                .collect())
+        })
+        .expect("track batches should complete");
+
+        assert_eq!(
+            tracks.into_iter().map(|track| track.id).collect::<Vec<_>>(),
+            ids
+        );
     }
 
     #[test]

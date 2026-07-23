@@ -160,6 +160,18 @@ vi.mock("./components/NeteaseSource.vue", () => ({
   }),
 }));
 
+vi.mock("./components/KugouSource.vue", () => ({
+  default: defineComponent({
+    name: "KugouSource",
+    props: {
+      playbackSource: { type: String, required: true },
+      audioSources: { type: Array, required: true },
+    },
+    emits: ["playbackReady", "update:playbackSource", "openPlugins", "openAudioSources"],
+    template: '<div data-testid="kugou-source">KuGou source</div>',
+  }),
+}));
+
 describe("application shell", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -344,6 +356,30 @@ describe("application shell", () => {
     );
     expect(wrapper.get('footer[aria-label="Playback bar"]').text()).toContain("Test Track");
     expect(wrapper.get('footer[aria-label="Playback bar"]').text()).toContain("Source Two");
+    wrapper.unmount();
+  });
+
+  it("opens the dedicated KuGou workspace for the bundled plugin", async () => {
+    listedPlugins = [
+      pluginRecord({
+        id: "fika.kugou",
+        name: "KuGou Music",
+        state: "enabled",
+        enabled: true,
+      }),
+    ];
+    listedAudioSources = [audioSourceRecord({ id: "source-one", name: "Source One" })];
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.get('button[data-plugin-id="fika.kugou"]').trigger("click");
+
+    const kugouSource = wrapper.getComponent({ name: "KugouSource" });
+    expect(kugouSource.props("playbackSource")).toBe("source-one");
+    expect(kugouSource.props("audioSources")).toContainEqual({
+      value: "source-one",
+      label: "Source One",
+    });
     wrapper.unmount();
   });
 

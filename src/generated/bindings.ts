@@ -20,6 +20,18 @@ export type AudioSourceState = "disabled" | "needs-review" | "enabled" | "incomp
 
 export type DiagnosticLevel = "info" | "warn" | "error" | "security";
 
+export type KugouAccount = { accountRef: string, userId: string, displayName: string, avatarUrl: string | null, status: KugouAccountStatus, connectedAt: number, lastVerifiedAt: number, };
+
+export type KugouAccountStatus = "active" | "expired";
+
+export type KugouCommandError = { code: string, message: string, };
+
+export type KugouQrLoginPoll = { status: KugouQrLoginStatus, account: KugouAccount | null, };
+
+export type KugouQrLoginStart = { sessionId: string, qrImageDataUrl: string, expiresAt: number, };
+
+export type KugouQrLoginStatus = "waitingForScan" | "waitingForConfirmation" | "connected" | "expired";
+
 export type LibraryAlbumGroup = { id: string, title: string | null, albumArtist: string | null, year: number | null, matchedTracks: number, totalTracks: number, totalDurationSeconds: number, startIndex: number, endIndex: number, isUngrouped: boolean, };
 
 export type LibraryGroupToggleResult = { snapshotId: string, groupId: string, collapsed: boolean, virtualTotal: number, groupVirtualIndex: number, offset: number, items: Array<LibraryViewItem>, };
@@ -106,7 +118,7 @@ export type ScanStatus = { isRunning: boolean, folderPath: string | null, discov
 
 export type SourceAction = "musicSearch" | "musicUrl" | "lyric" | "pic" | "musicRecommendations" | "playlistList" | "playlistRead" | "playlistAddTrack" | "playlistRemoveTrack";
 
-export type SourceCapability = "network:any" | "account:ref" | "playlist:read" | "playlist:write" | "metadata:read" | "cache:read-write" | "bridge:netease-api-enhanced";
+export type SourceCapability = "network:any" | "account:ref" | "playlist:read" | "playlist:write" | "metadata:read" | "cache:read-write" | "bridge:netease-api-enhanced" | "bridge:kugou-music-api";
 
 export type SourceDiagnostic = { sourceId: string, level: DiagnosticLevel, message: string, };
 
@@ -194,6 +206,11 @@ export const TAURI_COMMANDS = {
   listNeteaseAccounts: "list_netease_accounts",
   disconnectNeteaseAccount: "disconnect_netease_account",
   listNeteaseMutationAudit: "list_netease_mutation_audit",
+  startKugouQrLogin: "start_kugou_qr_login",
+  pollKugouQrLogin: "poll_kugou_qr_login",
+  cancelKugouQrLogin: "cancel_kugou_qr_login",
+  listKugouAccounts: "list_kugou_accounts",
+  disconnectKugouAccount: "disconnect_kugou_account",
 } as const;
 
 export type TauriCommand = (typeof TAURI_COMMANDS)[keyof typeof TAURI_COMMANDS];

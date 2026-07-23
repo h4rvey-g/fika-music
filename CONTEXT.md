@@ -29,7 +29,7 @@ A Rust-native online music source module loaded by Fika's **Source Runtime**.
 _Avoid_: Original LX JavaScript script, plugin, scraper
 
 **Audio Source**:
-A user-imported, playback-only source that resolves playable audio for a **Remote Track**.
+A user-imported, playback-only LX source that resolves playable audio for a **Remote Track** through a constrained host adapter.
 _Avoid_: Plugin, built-in source, content integration
 
 **Audio Source Registry**:
@@ -37,8 +37,8 @@ The app layer that imports, permission-reviews, enables/disables, removes, and d
 _Avoid_: Plugin System, Source Runtime
 
 **LX Compatibility**:
-Fika's core ability to model LX Music-style source actions and data contracts through Rust-native **Source Providers**.
-_Avoid_: Running original LX JavaScript, plugin feature, plugin compatibility
+Fika's core ability to model LX Music-style source actions and data contracts through Rust-native **Source Providers** and constrained imported **Audio Sources**.
+_Avoid_: Unrestricted JavaScript execution, plugin feature, plugin compatibility
 
 **Plugin**:
 A packaged, installable or bundled content integration that may contain Source Providers and assets.
@@ -80,6 +80,7 @@ _Avoid_: Access flag, scope
 - A **Source Provider** exposes online music source behavior through granted **Capabilities**.
 - An **Audio Source** supplies playback resolution only; it does not own search, lyrics, artwork, or playback UI.
 - An **Audio Source** is user-imported; Fika does not provide a built-in **Audio Source**.
+- An **Audio Source** may execute its integrity-checked LX JavaScript only through the constrained host adapter and granted **Capabilities**.
 - The **Audio Source Registry** manages **Audio Sources** independently of the **Plugin System**.
 - A **Source Provider** does not access local files directly; local file IO belongs to the app core.
 - A **Source Provider** may call a **Service Bridge** only through app-provided APIs.

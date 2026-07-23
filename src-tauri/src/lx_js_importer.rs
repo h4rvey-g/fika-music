@@ -1,11 +1,12 @@
 use crate::source_runtime::{
-    lx_music_source, SourceAction, SourceCapability, SourceHttpRequest, SourceInfo, SourceProvider,
-    SourceQuality, SourceRequest, SourceResponse, SourceRuntimeContext, SourceRuntimeError,
-    LX_SOURCE_KG, LX_SOURCE_KIND_MUSIC, LX_SOURCE_KW, LX_SOURCE_LOCAL, LX_SOURCE_MG, LX_SOURCE_TX,
-    LX_SOURCE_WY,
+    lx_music_source, SourceAction, SourceInfo, SourceQuality, LX_SOURCE_KG, LX_SOURCE_KIND_MUSIC,
+    LX_SOURCE_KW, LX_SOURCE_LOCAL, LX_SOURCE_MG, LX_SOURCE_TX, LX_SOURCE_WY,
 };
 #[cfg(test)]
-use crate::source_runtime::{SourceSearchResponse, SourceSearchResult};
+use crate::source_runtime::{
+    SourceCapability, SourceHttpRequest, SourceProvider, SourceRequest, SourceResponse,
+    SourceRuntimeContext, SourceRuntimeError, SourceSearchResponse, SourceSearchResult,
+};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Argument, ArrayExpression, Expression, Function, ObjectExpression, TemplateLiteral,
@@ -15,6 +16,7 @@ use oxc_ast::ast_kind::AstKind;
 use oxc_ast_visit::Visit;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
+#[cfg(test)]
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -145,11 +147,13 @@ impl ImportedLxManifest {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct ImportedLxManifestProvider {
     manifest: ImportedLxManifest,
 }
 
+#[cfg(test)]
 impl ImportedLxManifestProvider {
     pub fn new(manifest: ImportedLxManifest) -> Self {
         Self { manifest }
@@ -160,6 +164,7 @@ impl ImportedLxManifestProvider {
     }
 }
 
+#[cfg(test)]
 impl SourceProvider for ImportedLxManifestProvider {
     fn id(&self) -> &str {
         &self.manifest.provider_id
@@ -174,7 +179,7 @@ impl SourceProvider for ImportedLxManifestProvider {
         context: &mut SourceRuntimeContext,
     ) -> Result<BTreeMap<String, SourceInfo>, SourceRuntimeError> {
         context.info(format!(
-            "loaded imported LX manifest for {}; Rust provider port still required",
+            "loaded static LX manifest preview for {}",
             self.manifest.display_name
         ));
         for warning in &self.manifest.warnings {
@@ -189,12 +194,11 @@ impl SourceProvider for ImportedLxManifestProvider {
         request: SourceRequest,
     ) -> Result<SourceResponse, SourceRuntimeError> {
         context.warn(format!(
-            "imported LX manifest {} has no Rust port for {:?}",
+            "static LX manifest preview {} has no handler for {:?}",
             self.manifest.display_name,
             request.action()
         ));
-        Err(context
-            .provider_error("imported LX JS manifests are catalog-only until ported to Rust"))
+        Err(context.provider_error("static LX manifest previews are catalog-only"))
     }
 }
 
@@ -486,6 +490,7 @@ impl SourceProvider for QishuiRustProvider {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LxJsImportAdapter {
+    QuickJs,
     Nianxin,
     Changqing,
     StaticTemplates,
@@ -494,6 +499,7 @@ pub enum LxJsImportAdapter {
 impl LxJsImportAdapter {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::QuickJs => "quickjs",
             Self::Nianxin => "nianxin",
             Self::Changqing => "changqing",
             Self::StaticTemplates => "static-templates",
@@ -502,6 +508,7 @@ impl LxJsImportAdapter {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
+            "quickjs" => Some(Self::QuickJs),
             "nianxin" => Some(Self::Nianxin),
             "changqing" => Some(Self::Changqing),
             "static-templates" => Some(Self::StaticTemplates),
@@ -511,33 +518,26 @@ impl LxJsImportAdapter {
 }
 
 pub fn supported_import_adapter(report: &LxJsImportReport) -> Option<LxJsImportAdapter> {
-    let name = report.metadata.name.as_deref().unwrap_or_default();
-    if name.contains("念心") {
-        return Some(LxJsImportAdapter::Nianxin);
-    }
-    if name.contains("长青") {
-        return Some(LxJsImportAdapter::Changqing);
-    }
-    report
-        .endpoint
-        .templates
-        .iter()
-        .any(|template| template.has_track_id_placeholder)
-        .then_some(LxJsImportAdapter::StaticTemplates)
+    (report.contract.uses_global_lx
+        && report.contract.registers_request_handler
+        && report
+            .contract
+            .declared_actions
+            .contains(&SourceAction::MusicUrl))
+    .then_some(LxJsImportAdapter::QuickJs)
 }
 
+#[cfg(test)]
 pub fn import_adapter_templates(
     report: &LxJsImportReport,
     adapter: LxJsImportAdapter,
 ) -> Result<Vec<LxUrlTemplate>, LxJsImportError> {
     let (templates, family) = match adapter {
-        LxJsImportAdapter::StaticTemplates => (report.endpoint.templates.clone(), None),
+        LxJsImportAdapter::QuickJs | LxJsImportAdapter::StaticTemplates => {
+            (report.endpoint.templates.clone(), None)
+        }
         LxJsImportAdapter::Nianxin | LxJsImportAdapter::Changqing => {
-            let reference = analyze_lx_js_source(
-                "quantouya-aggregate-v4.1.js",
-                include_str!("../fixtures/lx-js-sources/quantouya-aggregate-v4.1.js"),
-            )?;
-            (reference.endpoint.templates, Some(adapter.as_str()))
+            (report.endpoint.templates.clone(), Some(adapter.as_str()))
         }
     };
     let templates = templates
@@ -546,7 +546,7 @@ pub fn import_adapter_templates(
         .filter(|template| template.has_track_id_placeholder)
         .filter(|template| LX_SOURCE_KEYS.contains(&template.source_id.as_str()))
         .collect::<Vec<_>>();
-    if templates.is_empty() {
+    if templates.is_empty() && adapter != LxJsImportAdapter::QuickJs {
         return Err(LxJsImportError::Unsupported(format!(
             "the {} adapter did not expose a track URL template",
             adapter.as_str()
@@ -555,6 +555,7 @@ pub fn import_adapter_templates(
     Ok(templates)
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct ImportedLxTemplateProvider {
     provider_id: String,
@@ -565,6 +566,7 @@ pub struct ImportedLxTemplateProvider {
     aggregate_primary_endpoint: Option<String>,
 }
 
+#[cfg(test)]
 impl ImportedLxTemplateProvider {
     pub fn from_report(report: &LxJsImportReport, family: &str) -> Result<Self, LxJsImportError> {
         let templates = report
@@ -642,6 +644,7 @@ impl ImportedLxTemplateProvider {
     }
 }
 
+#[cfg(test)]
 impl SourceProvider for ImportedLxTemplateProvider {
     fn id(&self) -> &str {
         &self.provider_id
@@ -656,7 +659,7 @@ impl SourceProvider for ImportedLxTemplateProvider {
         context: &mut SourceRuntimeContext,
     ) -> Result<BTreeMap<String, SourceInfo>, SourceRuntimeError> {
         context.warn(format!(
-            "loaded {} Rust URL-template adapter for {}; imported JavaScript was not executed",
+            "loaded test-only {} URL-template preview for {}",
             self.adapter_name, self.display_name
         ));
         Ok(self.source_catalog.clone())
@@ -738,6 +741,7 @@ impl SourceProvider for ImportedLxTemplateProvider {
  * resolution here as a pure response normalizer prevents imported sources from
  * acquiring a second, unreviewed HTTP boundary.
  */
+#[cfg(test)]
 fn resolve_template_endpoint(
     context: &mut SourceRuntimeContext,
     endpoint_url: &str,
@@ -750,6 +754,7 @@ fn resolve_template_endpoint(
     )
 }
 
+#[cfg(test)]
 fn resolve_aggregate_endpoint(
     context: &mut SourceRuntimeContext,
     endpoint_url: &str,
@@ -762,6 +767,7 @@ fn resolve_aggregate_endpoint(
     )
 }
 
+#[cfg(test)]
 fn resolve_music_url_endpoint(
     context: &mut SourceRuntimeContext,
     endpoint_url: &str,
@@ -803,6 +809,7 @@ fn resolve_music_url_endpoint(
     Err(context.provider_error(format!("{endpoint_name} did not return a playable URL")))
 }
 
+#[cfg(test)]
 fn find_url_in_json(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(text) if is_http_url(text) => Some(text.clone()),
@@ -819,6 +826,7 @@ fn find_url_in_json(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn is_http_url(value: &str) -> bool {
     url::Url::parse(value)
         .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
@@ -1539,7 +1547,10 @@ fn build_import_manifest(
         warnings.push("no LX source catalog entries could be inferred".to_owned());
     }
     if contract.requires_deobfuscation_for_full_manifest {
-        warnings.push("source requires Rust porting before it can resolve playback".to_owned());
+        warnings.push(
+            "static source details may be incomplete; runtime initialization verifies the LX contract"
+                .to_owned(),
+        );
     }
     if obfuscation.likely_obfuscated && deobfuscation.rotation.is_none() {
         warnings.push("obfuscated string table rotation could not be inferred".to_owned());
@@ -1556,7 +1567,7 @@ fn build_import_manifest(
         homepage: metadata.homepage.clone(),
         update_url: metadata.update_url.clone(),
         sources: contract.declared_sources.clone(),
-        requires_rust_port: true,
+        requires_rust_port: false,
         warnings,
     }
 }
@@ -1619,6 +1630,7 @@ fn metadata_fingerprint(metadata: &LxJsMetadata) -> String {
     format!("{hash:016x}")
 }
 
+#[cfg(test)]
 fn extract_track_id(info: &serde_json::Value) -> Option<String> {
     for pointer in [
         "/id",
@@ -1656,6 +1668,7 @@ fn extract_track_id(info: &serde_json::Value) -> Option<String> {
     None
 }
 
+#[cfg(test)]
 fn quality_to_template_level(quality: SourceQuality) -> &'static str {
     match quality {
         SourceQuality::Flac | SourceQuality::Flac24Bit => "lossless",
@@ -1664,6 +1677,7 @@ fn quality_to_template_level(quality: SourceQuality) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn find_aggregate_primary_endpoint(report: &LxJsImportReport) -> Option<String> {
     report.endpoint.urls.iter().find_map(|candidate| {
         let url = parse_http_url(candidate).ok()?;
@@ -1674,6 +1688,7 @@ fn find_aggregate_primary_endpoint(report: &LxJsImportReport) -> Option<String> 
     })
 }
 
+#[cfg(test)]
 fn render_aggregate_primary_url(
     endpoint: &str,
     source: &str,
@@ -1692,6 +1707,7 @@ fn render_aggregate_primary_url(
     Ok(Some(url.into()))
 }
 
+#[cfg(test)]
 fn aggregate_source_name(source: &str) -> Option<&'static str> {
     match source {
         LX_SOURCE_WY => Some("netease"),
@@ -1703,6 +1719,7 @@ fn aggregate_source_name(source: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg(test)]
 fn aggregate_quality_bitrate(quality: SourceQuality) -> &'static str {
     match quality {
         SourceQuality::K128 => "128",
@@ -1712,6 +1729,7 @@ fn aggregate_quality_bitrate(quality: SourceQuality) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn render_template_url(
     template: &str,
     track_id: &str,
@@ -1733,6 +1751,7 @@ fn render_template_url(
     parse_http_url(&rendered).map(Into::into)
 }
 
+#[cfg(test)]
 fn parse_http_url(value: &str) -> Result<url::Url, url::ParseError> {
     let url = url::Url::parse(value)?;
     if matches!(url.scheme(), "http" | "https") && url.host_str().is_some() {
@@ -2304,6 +2323,7 @@ mod tests {
             Ok(SourceHttpResponse {
                 status,
                 final_url: request.url.clone(),
+                headers: BTreeMap::new(),
                 content_type,
                 body,
             })
@@ -2476,7 +2496,7 @@ mod tests {
 
         assert!(report.manifest.provider_id.starts_with("imported-lx-"));
         assert_eq!(report.manifest.version.as_deref(), Some("v4.1"));
-        assert!(report.manifest.requires_rust_port);
+        assert!(!report.manifest.requires_rust_port);
         assert_eq!(catalog.len(), 5);
         assert_eq!(catalog[LX_SOURCE_WY].name, "网易云音乐");
         assert_eq!(catalog[LX_SOURCE_WY].kind, SourceKind::Music);
@@ -2518,7 +2538,7 @@ mod tests {
     }
 
     #[test]
-    fn imported_manifest_provider_should_initialize_catalog_but_reject_requests_until_ported() {
+    fn static_manifest_preview_should_initialize_catalog_but_reject_requests() {
         let report = analyze_lx_js_file(fixture_path("quantouya-aggregate-v4.1.js"))
             .expect("fixture should analyze");
         let provider = ImportedLxManifestProvider::new(report.manifest);
@@ -2532,7 +2552,7 @@ mod tests {
         assert!(init_report
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("Rust provider port")));
+            .any(|diagnostic| diagnostic.message.contains("static LX manifest preview")));
 
         let error = runtime
             .dispatch_request(&provider, mock_music_url_request(LX_SOURCE_WY, "track-1"))
@@ -2549,14 +2569,14 @@ mod tests {
             let runtime = SourceRuntime::new();
             let init_report = runtime
                 .initialize_provider(&provider)
-                .expect("imported catalog should initialize without JS execution");
+                .expect("static catalog preview should initialize");
 
             assert!(!init_report.sources.is_empty(), "{file_name}");
             assert!(
                 init_report
                     .diagnostics
                     .iter()
-                    .any(|diagnostic| diagnostic.message.contains("Rust provider port")),
+                    .any(|diagnostic| diagnostic.message.contains("static LX manifest preview")),
                 "{file_name}"
             );
         }
@@ -2747,12 +2767,12 @@ mod tests {
         assert_eq!(report.manifest.version.as_deref(), Some("1.2.0"));
         assert!(report.manifest.homepage.is_some());
         assert!(report.manifest.update_url.is_some());
-        assert!(report.manifest.requires_rust_port);
+        assert!(!report.manifest.requires_rust_port);
         assert!(report
             .manifest
             .warnings
             .iter()
-            .any(|warning| warning.contains("Rust porting")));
+            .any(|warning| warning.contains("runtime initialization")));
         assert!(catalog.contains_key(LX_SOURCE_KG));
         assert!(catalog[LX_SOURCE_KG]
             .actions
@@ -2861,6 +2881,56 @@ mod tests {
                 && template.has_track_id_placeholder
                 && template.has_quality_placeholder
         }));
+    }
+
+    #[test]
+    fn dynamic_music_url_contract_should_select_quickjs_without_static_templates() {
+        let report = analyze_lx_js_source(
+            "dynamic.js",
+            r#"
+                const { EVENT_NAMES, on, send } = globalThis.lx;
+                on(EVENT_NAMES.request, ({ action }) => {
+                  if (action !== 'musicUrl') return Promise.reject(new Error('unsupported'));
+                  return Promise.resolve(['https:', '', 'cdn.example.test', 'song.mp3'].join('/'));
+                });
+                send(EVENT_NAMES.inited, {
+                  sources: { kg: { name: 'Kugou', type: 'music', actions: ['musicUrl'], qualitys: ['128k'] } },
+                });
+            "#,
+        )
+        .expect("dynamic LX JavaScript should analyze");
+
+        assert!(report.endpoint.templates.is_empty());
+        assert_eq!(
+            supported_import_adapter(&report),
+            Some(LxJsImportAdapter::QuickJs)
+        );
+    }
+
+    #[test]
+    fn legacy_named_adapter_should_use_only_templates_from_the_imported_script() {
+        let report = analyze_lx_js_source(
+            "fresh-nianxin.js",
+            r#"
+                const NIANXIN_URL_TEMPLATES = {
+                  kg: 'https://fresh.example.test/kg.php?id={id}&level={level}',
+                };
+                const { EVENT_NAMES, on, send } = globalThis.lx;
+                on(EVENT_NAMES.request, () => Promise.resolve('musicUrl'));
+                send(EVENT_NAMES.inited, {
+                  sources: { kg: { name: 'Kugou', type: 'music', actions: ['musicUrl'], qualitys: ['128k'] } },
+                });
+            "#,
+        )
+        .expect("legacy-named LX source should analyze");
+        let templates = import_adapter_templates(&report, LxJsImportAdapter::Nianxin)
+            .expect("script-derived Nianxin template should import");
+
+        assert_eq!(templates.len(), 1);
+        assert!(templates[0].url.contains("fresh.example.test"));
+        assert!(templates
+            .iter()
+            .all(|template| !template.url.contains("music.nxinxz.com")));
     }
 
     #[test]

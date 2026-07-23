@@ -1,6 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ref } from "vue";
 import NeteaseSource from "./NeteaseSource.vue";
 import type { PluginRecord, RemoteTrack, SourcePlaylist } from "../lib/plugin-api";
 
@@ -36,6 +37,23 @@ vi.mock("../lib/audio-source-api", () => ({
 vi.mock("../lib/netease-api", () => ({
   NETEASE_PLUGIN_ID: "fika.netease",
   ...neteaseApiMocks,
+}));
+vi.mock("@tanstack/vue-virtual", () => ({
+  useVirtualizer: (options: { value: { count: number; estimateSize: () => number } }) =>
+    ref({
+      getVirtualItems: () =>
+        Array.from({ length: Math.min(options.value.count, 20) }, (_, index) => ({
+          index,
+          key: index,
+          start: index * options.value.estimateSize(),
+          size: options.value.estimateSize(),
+          end: (index + 1) * options.value.estimateSize(),
+          lane: 0,
+        })),
+      getTotalSize: () => options.value.count * options.value.estimateSize(),
+      measure: vi.fn(),
+      scrollToIndex: vi.fn(),
+    }),
 }));
 
 const accountRef = "netease-account:00000000-0000-4000-8000-000000000001";
@@ -190,6 +208,13 @@ describe("NeteaseSource", () => {
       audioSourceId: "source-one",
       source: "wy",
       trackId: "347230",
+      musicInfo: {
+        id: 347230,
+        name: "Test Track",
+        singer: "Test Artist",
+        artist: "Test Artist",
+        album: "Test Album",
+      },
       quality: "320k",
       requestId: expect.any(String),
     });
@@ -386,6 +411,61 @@ describe("NeteaseSource", () => {
       "playlist-1",
       track,
     );
+    wrapper.unmount();
+  });
+
+  it("keeps the rendered row count bounded for large Playlists", async () => {
+    const tracks = Array.from({ length: 2_000 }, (_, index) => ({
+      ...track,
+      id: `playlist-track-${index}`,
+      title: `Playlist Track ${index}`,
+      rawInfo: { id: `playlist-track-${index}` },
+    }));
+    neteaseApiMocks.getNeteasePlaylist.mockResolvedValue({
+      data: {
+        playlist: { ...playlist, trackCount: tracks.length },
+        tracks,
+      },
+      diagnostics: [],
+    });
+    const wrapper = mountNeteaseSource();
+    await flushPromises();
+
+    const playlistsTab = wrapper
+      .findAll('[role="tab"]')
+      .find((tab) => tab.text().trim() === "Playlists");
+    await playlistsTab?.trigger("click");
+
+    expect(
+      wrapper.findAll('button[aria-label^="Play Playlist Track"]'),
+    ).toHaveLength(20);
+    wrapper.unmount();
+  });
+
+  it("reuses a recently loaded Playlist when switching back to it", async () => {
+    const secondPlaylist = { ...playlist, id: "playlist-2", name: "Second Playlist" };
+    neteaseApiMocks.getNeteasePlaylists.mockResolvedValue({
+      data: [playlist, secondPlaylist],
+      diagnostics: [],
+    });
+    const wrapper = mountNeteaseSource();
+    await flushPromises();
+
+    const playlistsTab = wrapper
+      .findAll('[role="tab"]')
+      .find((tab) => tab.text().trim() === "Playlists");
+    await playlistsTab?.trigger("click");
+    const playlistButtons = wrapper.findAll("aside li button");
+    await playlistButtons[1].trigger("click");
+    await flushPromises();
+    await playlistButtons[0].trigger("click");
+    await flushPromises();
+
+    expect(
+      neteaseApiMocks.getNeteasePlaylist.mock.calls.filter(
+        ([, playlistId]) => playlistId === playlist.id,
+      ),
+    ).toHaveLength(1);
     wrapper.unmount();
   });
 

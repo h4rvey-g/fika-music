@@ -3,6 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use fika_music_lib::audio_source_system::{AudioSourceCommandError, AudioSourceRecord};
+use fika_music_lib::kugou::{KugouAccount, KugouQrLoginPoll, KugouQrLoginStart};
 use fika_music_lib::lyrics::{LocalTrackPlaybackDetails, TrackLyricsQuery};
 use fika_music_lib::netease::{
     NeteaseAccount, NeteaseMutationAudit, NeteaseQrLoginPoll, NeteaseQrLoginStart,
@@ -11,12 +12,12 @@ use fika_music_lib::plugin_system::PluginRecord;
 use fika_music_lib::source_runtime::{SourceRequest, SourceRequestOutcome};
 use fika_music_lib::{
     AlbumArtSettings, AlbumArtTaskStatus, AlbumCoverCandidate, AlbumCoverResult, AlbumCoverStatus,
-    LibraryAlbumGroup, LibraryGroupToggleResult, LibraryPlaybackQueue, LibraryQueryPage,
-    LibraryQueryRequest, LibraryQueueTrack, LibrarySelectionRange, LibrarySelectionRequest,
-    LibrarySortDirection, LibrarySortField, LibraryTaskState, LibraryTextField, LibraryViewItem,
-    LibraryViewItemKind, LibraryViewRange, LocalTrack, MediaSource, MetadataLookupItemResult,
-    MetadataLookupTaskStatus, NeteaseCommandError, PluginCommandError, RemoteCommandError,
-    ScanProgressEvent, ScanStatus, TAURI_COMMAND_NAMES,
+    KugouCommandError, LibraryAlbumGroup, LibraryGroupToggleResult, LibraryPlaybackQueue,
+    LibraryQueryPage, LibraryQueryRequest, LibraryQueueTrack, LibrarySelectionRange,
+    LibrarySelectionRequest, LibrarySortDirection, LibrarySortField, LibraryTaskState,
+    LibraryTextField, LibraryViewItem, LibraryViewItemKind, LibraryViewRange, LocalTrack,
+    MediaSource, MetadataLookupItemResult, MetadataLookupTaskStatus, NeteaseCommandError,
+    PluginCommandError, RemoteCommandError, ScanProgressEvent, ScanStatus, TAURI_COMMAND_NAMES,
 };
 use ts_rs::{Config, TS};
 
@@ -90,6 +91,7 @@ fn generate(output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     export_all::<PluginCommandError>(&config)?;
     export_all::<AudioSourceCommandError>(&config)?;
     export_all::<NeteaseCommandError>(&config)?;
+    export_all::<KugouCommandError>(&config)?;
     export_all::<PluginRecord>(&config)?;
     export_all::<AudioSourceRecord>(&config)?;
     export_all::<SourceRequest>(&config)?;
@@ -98,6 +100,9 @@ fn generate(output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     export_all::<NeteaseQrLoginStart>(&config)?;
     export_all::<NeteaseQrLoginPoll>(&config)?;
     export_all::<NeteaseMutationAudit>(&config)?;
+    export_all::<KugouAccount>(&config)?;
+    export_all::<KugouQrLoginStart>(&config)?;
+    export_all::<KugouQrLoginPoll>(&config)?;
     append_command_names(&output_file)?;
     Ok(())
 }

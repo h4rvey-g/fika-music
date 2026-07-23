@@ -246,7 +246,7 @@ function toggleDetails(audioSourceId: string) {
 
 function capabilityLabel(capability: string) {
   const labels: Record<string, string> = {
-    "network:any": "Network requests",
+    "network:any": "Any network host",
     "account:ref": "Account references",
     "playlist:read": "Read playlists",
     "playlist:write": "Change playlists",
@@ -549,7 +549,9 @@ function normalizeError(error: unknown): string {
                 class="alert alert-warning alert-soft alert-vertical sm:alert-horizontal"
               >
                 <AlertCircle :size="17" aria-hidden="true" />
-                <span class="text-sm">Confirm the selected permissions before enabling.</span>
+                <span class="text-sm">
+                  Confirm before enabling. This imported JavaScript can contact any network host through Fika.
+                </span>
                 <button
                   class="btn btn-sm"
                   type="button"

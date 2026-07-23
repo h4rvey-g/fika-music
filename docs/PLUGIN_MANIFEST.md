@@ -54,12 +54,12 @@ declaration and each Source Provider receives only its own intersection.
 Capabilities are never granted implicitly by installing a package, and an
 entrypoint-only capability is not exposed to sibling Providers.
 
-The production runtime accepts the reserved `builtin:netease` entrypoint for
-the bundled NetEase package. The NetEase entrypoint is available only when the host provides the
-`netease-api-enhanced` Service Bridge. User packages cannot load a dynamic
-library or launch a sidecar. This keeps package discovery, permission review,
-and lifecycle management in place without turning installation into an
-untrusted native-code execution boundary.
+The production runtime accepts reserved entrypoints for bundled integrations:
+`builtin:netease` requires the `netease-api-enhanced` Service Bridge, while
+`builtin:kugou` requires the `kugou-music-api` Service Bridge. User packages
+cannot load a dynamic library or launch a sidecar. This keeps package
+discovery, permission review, and lifecycle management in place without
+turning installation into an untrusted native-code execution boundary.
 
 `builtin:runtime-demo` and `builtin:catalog` exist only in Rust test builds.
 `builtin:qishui` is not a production entrypoint. Legacy
@@ -68,6 +68,8 @@ for startup migration and are rejected as new Plugin packages.
 
 `builtin:netease` is reserved for package `fika.netease` and Provider
 `fika-netease`; another package cannot use that host bridge entrypoint.
+`builtin:kugou` is likewise reserved for package `fika.kugou` and Provider
+`fika-kugou`.
 
 ## Audio Source boundary
 

@@ -26,6 +26,7 @@ export type AudioSourceTrackRequest = {
   audioSourceId: AudioSourceId;
   source: string;
   trackId: string;
+  musicInfo?: Record<string, unknown>;
   quality: SourceQuality;
   requestId?: string;
 };
@@ -136,7 +137,10 @@ export async function resolveAudioSourceTrack(
     {
       action: "musicUrl",
       source: request.source,
-      musicInfo: { id: request.trackId },
+      musicInfo: {
+        ...request.musicInfo,
+        id: request.musicInfo?.id ?? request.trackId,
+      },
       quality: request.quality,
     },
     request.requestId,

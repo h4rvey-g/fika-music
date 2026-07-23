@@ -20,8 +20,10 @@ use walkdir::WalkDir;
 mod album_art;
 pub mod audio_source_system;
 mod database;
+pub mod kugou;
 mod library;
 pub mod lx_js_importer;
+mod lx_js_runtime;
 pub mod lyrics;
 pub mod netease;
 pub mod plugin_system;
@@ -95,6 +97,11 @@ macro_rules! with_tauri_commands {
             list_netease_accounts,
             disconnect_netease_account,
             list_netease_mutation_audit,
+            start_kugou_qr_login,
+            poll_kugou_qr_login,
+            cancel_kugou_qr_login,
+            list_kugou_accounts,
+            disconnect_kugou_account,
         }
     };
 }
@@ -139,6 +146,8 @@ enum AppError {
     AudioSource(#[from] AudioSourceSystemError),
     #[error("NetEase service error: {0}")]
     Netease(#[from] netease::NeteaseBridgeError),
+    #[error("KuGou service error: {0}")]
+    Kugou(#[from] kugou::KugouBridgeError),
     #[error("music folder does not exist or is not a directory: {0}")]
     InvalidMusicFolder(String),
     #[error("a library scan is already running")]
@@ -256,6 +265,7 @@ struct AppState {
     audio_source_registry: Mutex<AudioSourceRegistry>,
     plugin_registry: Mutex<PluginRegistry>,
     netease_bridge: Arc<netease::NeteaseServiceBridge>,
+    kugou_bridge: Arc<kugou::KugouServiceBridge>,
 }
 
 #[derive(Debug, Default)]
@@ -307,9 +317,14 @@ impl AppState {
         let source_runtime = Arc::new(source_runtime::SourceRuntime::with_host(runtime_host, []));
         let netease_bridge = Arc::new(netease::NeteaseServiceBridge::new(
             Arc::clone(&db),
-            source_host,
+            Arc::clone(&source_host),
         )?);
         let provider_bridge: Arc<dyn netease::NeteaseProviderBridge> = netease_bridge.clone();
+        let kugou_bridge = Arc::new(kugou::KugouServiceBridge::new(
+            Arc::clone(&db),
+            source_host,
+        )?);
+        let kugou_provider_bridge: Arc<dyn kugou::KugouProviderBridge> = kugou_bridge.clone();
         let audio_sources_dir = user_plugins_dir
             .parent()
             .map(|path| path.join("audio-sources"))
@@ -329,8 +344,12 @@ impl AppState {
             bundled_plugins_dir,
             Arc::clone(&source_runtime),
         )
-        .with_available_host_bridges([netease::NETEASE_HOST_BRIDGE_ID.to_owned()])
-        .with_netease_bridge(provider_bridge);
+        .with_available_host_bridges([
+            netease::NETEASE_HOST_BRIDGE_ID.to_owned(),
+            kugou::KUGOU_HOST_BRIDGE_ID.to_owned(),
+        ])
+        .with_netease_bridge(provider_bridge)
+        .with_kugou_bridge(kugou_provider_bridge);
         {
             let connection = db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
             audio_source_registry.refresh(&connection)?;
@@ -346,6 +365,7 @@ impl AppState {
             audio_source_registry: Mutex::new(audio_source_registry),
             plugin_registry: Mutex::new(plugin_registry),
             netease_bridge,
+            kugou_bridge,
         })
     }
 }
@@ -568,6 +588,79 @@ fn list_netease_mutation_audit(
         .netease_bridge
         .mutation_audit(account_ref.as_deref(), limit.unwrap_or(50))
         .map_err(Into::into)
+}
+
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct KugouCommandError {
+    code: String,
+    message: String,
+}
+
+impl From<kugou::KugouBridgeError> for KugouCommandError {
+    fn from(error: kugou::KugouBridgeError) -> Self {
+        Self {
+            code: error.code().to_owned(),
+            message: error.to_string(),
+        }
+    }
+}
+
+async fn run_kugou_task<T, F>(task: F) -> Result<T, KugouCommandError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, kugou::KugouBridgeError> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(task)
+        .await
+        .map_err(|error| KugouCommandError {
+            code: "bridge-failure".to_owned(),
+            message: format!("KuGou bridge task failed: {error}"),
+        })?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn start_kugou_qr_login(
+    state: State<'_, AppState>,
+) -> Result<kugou::KugouQrLoginStart, KugouCommandError> {
+    let bridge = Arc::clone(&state.kugou_bridge);
+    run_kugou_task(move || bridge.start_qr_login()).await
+}
+
+#[tauri::command]
+async fn poll_kugou_qr_login(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<kugou::KugouQrLoginPoll, KugouCommandError> {
+    let bridge = Arc::clone(&state.kugou_bridge);
+    run_kugou_task(move || bridge.poll_qr_login(session_id.trim())).await
+}
+
+#[tauri::command]
+async fn cancel_kugou_qr_login(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), KugouCommandError> {
+    let bridge = Arc::clone(&state.kugou_bridge);
+    run_kugou_task(move || bridge.cancel_qr_login(session_id.trim())).await
+}
+
+#[tauri::command]
+fn list_kugou_accounts(
+    state: State<'_, AppState>,
+) -> Result<Vec<kugou::KugouAccount>, KugouCommandError> {
+    state.kugou_bridge.accounts().map_err(Into::into)
+}
+
+#[tauri::command]
+async fn disconnect_kugou_account(
+    state: State<'_, AppState>,
+    account_ref: String,
+) -> Result<(), KugouCommandError> {
+    let bridge = Arc::clone(&state.kugou_bridge);
+    run_kugou_task(move || bridge.disconnect_account(account_ref.trim())).await
 }
 
 #[tauri::command]

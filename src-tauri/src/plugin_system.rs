@@ -1,3 +1,4 @@
+use crate::kugou::{KugouProviderBridge, KugouSourceProvider, KUGOU_PLUGIN_ID, KUGOU_PROVIDER_ID};
 use crate::netease::{
     NeteaseProviderBridge, NeteaseSourceProvider, NETEASE_PLUGIN_ID, NETEASE_PROVIDER_ID,
 };
@@ -651,6 +652,7 @@ pub struct PluginRegistry {
     runtime: Arc<SourceRuntime>,
     available_host_bridges: BTreeSet<String>,
     netease_bridge: Option<Arc<dyn NeteaseProviderBridge>>,
+    kugou_bridge: Option<Arc<dyn KugouProviderBridge>>,
     plugins: BTreeMap<String, PluginEntryRuntime>,
 }
 
@@ -662,6 +664,7 @@ impl std::fmt::Debug for PluginRegistry {
             .field("bundled_plugins_dir", &self.bundled_plugins_dir)
             .field("available_host_bridges", &self.available_host_bridges)
             .field("has_netease_bridge", &self.netease_bridge.is_some())
+            .field("has_kugou_bridge", &self.kugou_bridge.is_some())
             .field("plugin_count", &self.plugins.len())
             .finish_non_exhaustive()
     }
@@ -679,6 +682,7 @@ impl PluginRegistry {
             runtime,
             available_host_bridges: BTreeSet::new(),
             netease_bridge: None,
+            kugou_bridge: None,
             plugins: BTreeMap::new(),
         }
     }
@@ -693,6 +697,11 @@ impl PluginRegistry {
 
     pub fn with_netease_bridge(mut self, bridge: Arc<dyn NeteaseProviderBridge>) -> Self {
         self.netease_bridge = Some(bridge);
+        self
+    }
+
+    pub fn with_kugou_bridge(mut self, bridge: Arc<dyn KugouProviderBridge>) -> Self {
+        self.kugou_bridge = Some(bridge);
         self
     }
 
@@ -1388,6 +1397,7 @@ impl PluginRegistry {
                 &entry,
                 &package_path,
                 self.netease_bridge.clone(),
+                self.kugou_bridge.clone(),
             ) {
                 Ok(provider) => provider,
                 Err(error) => {
@@ -2076,6 +2086,7 @@ fn build_provider(
     entrypoint: &PluginProviderEntrypoint,
     _package_path: &Path,
     netease_bridge: Option<Arc<dyn NeteaseProviderBridge>>,
+    kugou_bridge: Option<Arc<dyn KugouProviderBridge>>,
 ) -> Result<Arc<dyn SourceProvider>, PluginSystemError> {
     let capabilities = provider_declared_capabilities(manifest, entrypoint);
     match entrypoint.entrypoint.as_str() {
@@ -2106,6 +2117,21 @@ fn build_provider(
                     plugin_id: manifest.id.clone(),
                     entrypoint: entrypoint.entrypoint.clone(),
                     message: "the NetEase Service Bridge is unavailable".to_owned(),
+                })
+        }
+        "builtin:kugou" if manifest.id == KUGOU_PLUGIN_ID && entrypoint.id == KUGOU_PROVIDER_ID => {
+            kugou_bridge
+                .map(|bridge| {
+                    Arc::new(KugouSourceProvider::new(
+                        entrypoint.id.clone(),
+                        capabilities,
+                        bridge,
+                    )) as Arc<dyn SourceProvider>
+                })
+                .ok_or_else(|| PluginSystemError::ProviderLoad {
+                    plugin_id: manifest.id.clone(),
+                    entrypoint: entrypoint.entrypoint.clone(),
+                    message: "the KuGou Service Bridge is unavailable".to_owned(),
                 })
         }
         _ => Err(PluginSystemError::ProviderLoad {
@@ -2649,6 +2675,7 @@ fn capability_from_str(value: &str) -> Option<SourceCapability> {
         "metadata:read" => Some(SourceCapability::MetadataRead),
         "cache:read-write" => Some(SourceCapability::CacheReadWrite),
         "bridge:netease-api-enhanced" => Some(SourceCapability::BridgeNeteaseApiEnhanced),
+        "bridge:kugou-music-api" => Some(SourceCapability::BridgeKugouMusicApi),
         _ => None,
     }
 }
@@ -2776,6 +2803,7 @@ mod tests {
             &manifest.provider_entrypoints[0],
             Path::new("."),
             Some(bridge),
+            None,
         )
         .expect("bundled NetEase Provider should load through its Plugin entrypoint");
 
@@ -2792,8 +2820,64 @@ mod tests {
             &impostor.provider_entrypoints[0],
             Path::new("."),
             None,
+            None,
         ) {
             Ok(_) => panic!("a noncanonical package must not construct the NetEase Provider"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            PluginSystemError::ProviderLoad { message, .. }
+                if message.contains("only built-in provider entrypoints")
+        ));
+    }
+
+    #[test]
+    fn bundled_kugou_manifest_should_validate_and_load() {
+        let manifest =
+            serde_json::from_str::<PluginManifest>(include_str!("../plugins/kugou/plugin.json"))
+                .expect("bundled KuGou manifest should deserialize");
+        manifest
+            .validate()
+            .expect("bundled KuGou manifest should validate");
+        let mut connection = Connection::open_in_memory().expect("test database should open");
+        crate::database::initialize(&mut connection).expect("test database should initialize");
+        let bridge: Arc<dyn KugouProviderBridge> = Arc::new(
+            crate::kugou::KugouServiceBridge::new(
+                Arc::new(Mutex::new(connection)),
+                Arc::new(source_runtime::DefaultSourceHost::new(
+                    std::time::Duration::from_secs(1),
+                    1024,
+                )),
+            )
+            .expect("KuGou Service Bridge should initialize"),
+        );
+        let provider = build_provider(
+            &manifest,
+            &manifest.provider_entrypoints[0],
+            Path::new("."),
+            None,
+            Some(bridge),
+        )
+        .expect("bundled KuGou Provider should load through its Plugin entrypoint");
+
+        assert_eq!(provider.id(), crate::kugou::KUGOU_PROVIDER_ID);
+    }
+
+    #[test]
+    fn builtin_kugou_entrypoint_should_be_reserved_for_the_bundled_package() {
+        let mut impostor = manifest("user.kugou", "builtin:kugou", &[]);
+        impostor.provider_entrypoints[0].id = KUGOU_PROVIDER_ID.to_owned();
+
+        let error = match build_provider(
+            &impostor,
+            &impostor.provider_entrypoints[0],
+            Path::new("."),
+            None,
+            None,
+        ) {
+            Ok(_) => panic!("a noncanonical package must not construct the KuGou Provider"),
             Err(error) => error,
         };
 

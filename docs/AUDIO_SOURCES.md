@@ -38,7 +38,7 @@ import-report.json
   "name": "Imported Source",
   "version": "1.0.0",
   "providerId": "imported-source-provider",
-  "adapter": "static-templates",
+  "adapter": "quickjs",
   "sourceFingerprint": "<sha256>",
   "capabilities": ["network:any"],
   "supportedApiVersion": { "major": 1, "minor": 1 },
@@ -46,16 +46,35 @@ import-report.json
 }
 ```
 
-The original JavaScript is retained for provenance and static analysis; Fika
-does not execute it. The importer accepts a source only when Oxc analysis finds
-an LX `musicUrl` contract and a reviewed Rust adapter. Supported adapters cover
-Nianxin, Changqing, statically extractable URL templates, and the reviewed
-aggregate primary API signature used by the reference multi-source source.
-Only analyzed `musicUrl` routes are published.
+The importer accepts a source only when Oxc analysis finds an LX `musicUrl`
+request handler and a supported source catalog. Only analyzed `musicUrl` routes
+are published. The managed `source.js` is then executed by a Rust adapter in a
+fresh embedded QuickJS runtime for each initialization and playback request.
+
+The runtime exposes the LX event contract (`EVENT_NAMES`, `on`, and `send`),
+host-mediated `request`, cancellable microtask timers, `currentScriptInfo`, buffer helpers,
+and the documented MD5, random-byte, AES-128-CBC/ECB, and RSA helpers. It does
+not expose Node.js, Tauri, DOM, direct filesystem, database, account-secret, or
+credential APIs. HTTP methods, headers, bodies, forms, and per-request timeouts
+are translated to the shared Source Runtime host; scripts never receive a
+second network client.
+
+QuickJS is limited to 96 MiB of memory, a 512 KiB stack, 30 seconds per
+invocation, 20,000 pending jobs, and 16 HTTP requests. Request bodies, headers,
+host response bodies, and random-byte allocations are separately bounded.
+Execution is in-process isolation rather than an operating-system process
+sandbox.
 
 The manifest stores the full SHA-256 digest of `source.js`. Activation hashes
 the managed source again and fails closed if it has changed. Local files and
 downloaded responses are limited to 4 MiB.
+
+Packages imported by earlier versions may contain `nianxin`, `changqing`, or
+`static-templates` as their adapter identifier. Registry refresh validates the
+package, rewrites that identifier to `quickjs`, and invalidates the old
+permission fingerprint. The user must review network access again before the
+package's own integrity-checked `source.js` can execute. Fika does not copy
+endpoint templates from another source.
 
 ## Remote import
 
