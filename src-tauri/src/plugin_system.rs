@@ -2,77 +2,32 @@ use crate::netease::{
     NeteaseProviderBridge, NeteaseSourceProvider, NETEASE_PLUGIN_ID, NETEASE_PROVIDER_ID,
 };
 use crate::source_runtime::{
-    self, DiagnosticLevel, LyricResponse, SourceAction, SourceCapability, SourceInfo,
-    SourceProvider, SourceRequest, SourceRequestOutcome, SourceResponse, SourceRuntime,
-    SourceRuntimeApiVersion, SourceRuntimeContext, SourceRuntimeError, SourceSearchResponse,
+    self, DiagnosticLevel, SourceCapability, SourceInfo, SourceProvider, SourceRequest,
+    SourceRequestOutcome, SourceRuntime, SourceRuntimeApiVersion, SourceRuntimeError,
+};
+#[cfg(test)]
+use crate::source_runtime::{
+    LyricResponse, SourceAction, SourceResponse, SourceRuntimeContext, SourceSearchResponse,
     SourceSearchResult,
 };
-use percent_encoding::percent_decode_str;
-use reqwest::blocking::Client;
-use reqwest::header::{ACCEPT, CONTENT_TYPE, USER_AGENT};
-use reqwest::redirect::Policy;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use url::Url;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const PLUGIN_MANIFEST_FILE: &str = "plugin.json";
 pub const PLUGIN_MANIFEST_VERSION: u32 = 1;
 pub const PLUGIN_COMPATIBILITY_TARGET: &str = "fika-music";
 pub const PLUGIN_RUNTIME_API_VERSION: SourceRuntimeApiVersion =
     source_runtime::SOURCE_RUNTIME_API_VERSION;
-const IMPORTED_LX_SOURCE_FILE: &str = "source.js";
-const IMPORTED_LX_REPORT_FILE: &str = "import-report.json";
 const IMPORTED_LX_ENTRYPOINT_PREFIX: &str = "builtin:lx-js:";
-const MAX_IMPORTED_LX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_REMOTE_LX_SOURCE_URL_BYTES: usize = 4_096;
-const MAX_REMOTE_LX_SOURCE_REDIRECTS: usize = 5;
-const REMOTE_LX_SOURCE_TIMEOUT: Duration = Duration::from_secs(20);
-const REMOTE_LX_SOURCE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const REMOTE_LX_SOURCE_USER_AGENT: &str = "FikaMusic/0.1 LX-source-importer";
-
-#[derive(Debug)]
-pub(crate) struct PreparedLxJsImport {
-    manifest: PluginManifest,
-    source: String,
-    report: crate::lx_js_importer::LxJsImportReport,
-    provenance: LxJsImportProvenance,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LxJsImportProvenance {
-    kind: String,
-    source_file_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    requested_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    final_url: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ManagedLxJsImportReport {
-    #[serde(flatten)]
-    analysis: crate::lx_js_importer::LxJsImportReport,
-    provenance: LxJsImportProvenance,
-}
-
-#[derive(Debug)]
-struct DownloadedLxJsSource {
-    source_file_name: String,
-    source: String,
-    requested_url: Url,
-    final_url: Url,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
@@ -168,6 +123,31 @@ impl PluginManifest {
                 errors.push(format!(
                     "provider entrypoint is invalid for {}: {}",
                     provider.id, provider.entrypoint
+                ));
+            }
+            if provider
+                .entrypoint
+                .starts_with(IMPORTED_LX_ENTRYPOINT_PREFIX)
+            {
+                errors.push(
+                    "LX JavaScript sources must be imported through Audio Sources, not Plugin System"
+                        .to_owned(),
+                );
+            }
+            if provider.entrypoint == "builtin:qishui" {
+                errors.push(
+                    "builtin:qishui is not available; import playback sources through Audio Sources"
+                        .to_owned(),
+                );
+            }
+            #[cfg(not(test))]
+            if matches!(
+                provider.entrypoint.as_str(),
+                "builtin:runtime-demo" | "builtin:catalog" | "catalog"
+            ) {
+                errors.push(format!(
+                    "test-only provider entrypoint is not available: {}",
+                    provider.entrypoint
                 ));
             }
 
@@ -792,6 +772,10 @@ impl PluginRegistry {
                 }
             };
 
+            if is_legacy_lx_audio_source(&manifest) {
+                continue;
+            }
+
             if let Err(errors) = manifest.validate() {
                 self.insert_invalid_record(origin, path, errors.join("; "));
                 continue;
@@ -1197,64 +1181,6 @@ impl PluginRegistry {
         }
         replacement.keep();
         Ok(installed)
-    }
-
-    pub fn import_lx_js(
-        &mut self,
-        connection: &Connection,
-        source_path: &Path,
-    ) -> Result<PluginRecord, PluginSystemError> {
-        let (manifest, source, report) = prepare_lx_js_import(source_path)?;
-        let source_file_name = source_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| IMPORTED_LX_SOURCE_FILE.to_owned());
-        self.install_prepared_lx_js(
-            connection,
-            PreparedLxJsImport {
-                manifest,
-                source,
-                report,
-                provenance: LxJsImportProvenance {
-                    kind: "local-file".to_owned(),
-                    source_file_name,
-                    requested_url: None,
-                    final_url: None,
-                },
-            },
-        )
-    }
-
-    pub(crate) fn install_prepared_lx_js(
-        &mut self,
-        connection: &Connection,
-        prepared: PreparedLxJsImport,
-    ) -> Result<PluginRecord, PluginSystemError> {
-        let PreparedLxJsImport {
-            manifest,
-            source,
-            report,
-            provenance,
-        } = prepared;
-        let workspace = tempfile::Builder::new()
-            .prefix("fika-lx-source-import-")
-            .tempdir()?;
-        fs::write(
-            workspace.path().join(PLUGIN_MANIFEST_FILE),
-            serde_json::to_vec_pretty(&manifest)?,
-        )?;
-        fs::write(
-            workspace.path().join(IMPORTED_LX_SOURCE_FILE),
-            source.as_bytes(),
-        )?;
-        fs::write(
-            workspace.path().join(IMPORTED_LX_REPORT_FILE),
-            serde_json::to_vec_pretty(&ManagedLxJsImportReport {
-                analysis: report,
-                provenance,
-            })?,
-        )?;
-        self.install(connection, workspace.path())
     }
 
     pub fn dispatch_request(
@@ -2145,557 +2071,26 @@ fn update_action_flags(record: &mut PluginRecord) {
         && (record.declared_capabilities.is_empty() || record.permissions_reviewed);
 }
 
-fn prepare_lx_js_import(
-    source_path: &Path,
-) -> Result<
-    (
-        PluginManifest,
-        String,
-        crate::lx_js_importer::LxJsImportReport,
-    ),
-    PluginSystemError,
-> {
-    if !source_path.is_file() {
-        return Err(PluginSystemError::Package(format!(
-            "LX JS source is not a file: {}",
-            source_path.display()
-        )));
-    }
-    let extension = source_path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if !matches!(extension.as_str(), "js" | "mjs" | "cjs") {
-        return Err(PluginSystemError::Package(
-            "LX source import accepts only .js, .mjs, or .cjs files".to_owned(),
-        ));
-    }
-
-    let source_size = fs::metadata(source_path)?.len();
-    if source_size > MAX_IMPORTED_LX_SOURCE_BYTES as u64 {
-        return Err(PluginSystemError::Package(format!(
-            "LX JS source exceeds the {} MiB import limit",
-            MAX_IMPORTED_LX_SOURCE_BYTES / (1024 * 1024)
-        )));
-    }
-    let source = fs::read_to_string(source_path)?;
-    prepare_lx_js_import_contents(source_path, source)
-}
-
-fn prepare_lx_js_import_contents(
-    source_path: &Path,
-    source: String,
-) -> Result<
-    (
-        PluginManifest,
-        String,
-        crate::lx_js_importer::LxJsImportReport,
-    ),
-    PluginSystemError,
-> {
-    if source.len() > MAX_IMPORTED_LX_SOURCE_BYTES {
-        return Err(PluginSystemError::Package(format!(
-            "LX JS source exceeds the {} MiB import limit",
-            MAX_IMPORTED_LX_SOURCE_BYTES / (1024 * 1024)
-        )));
-    }
-    let report = crate::lx_js_importer::analyze_lx_js_source(source_path, &source)
-        .map_err(|error| PluginSystemError::Package(error.to_string()))?;
-    if !report.contract.uses_global_lx
-        || !report.contract.registers_request_handler
-        || !report
-            .contract
-            .declared_actions
-            .contains(&SourceAction::MusicUrl)
-    {
-        return Err(PluginSystemError::Package(
-            "file does not expose a supported LX musicUrl request contract".to_owned(),
-        ));
-    }
-    let adapter = crate::lx_js_importer::supported_import_adapter(&report).ok_or_else(|| {
-        PluginSystemError::Package(
-            "LX source requires a Rust port; no supported URL-template adapter was found"
-                .to_owned(),
-        )
-    })?;
-    let templates = crate::lx_js_importer::import_adapter_templates(&report, adapter)
-        .map_err(|error| PluginSystemError::Package(error.to_string()))?;
-    let source_catalog = imported_lx_source_catalog(&report, &templates);
-    if source_catalog.is_empty() {
-        return Err(PluginSystemError::Package(
-            "LX source did not expose a supported music source catalog".to_owned(),
-        ));
-    }
-
-    let source_fingerprint = sha256_hex(source.as_bytes());
-    let has_stable_identity = report.metadata.name.is_some()
-        || report.metadata.author.is_some()
-        || report.metadata.homepage.is_some()
-        || report.metadata.update_url.is_some();
-    let plugin_id = if has_stable_identity {
-        report.manifest.provider_id.clone()
-    } else {
-        format!(
-            "{}-{}",
-            report.manifest.provider_id,
-            &source_fingerprint[..16]
-        )
-    };
-    let provider_id = format!("{plugin_id}-provider");
-    let entrypoint = format!(
-        "{IMPORTED_LX_ENTRYPOINT_PREFIX}{}:{}",
-        adapter.as_str(),
-        source_fingerprint
-    );
-    let adapter_note = format!(
-        "Imported from LX Music JavaScript with the {} Rust URL-template adapter. The JavaScript file is stored for provenance and is not executed.",
-        adapter.as_str()
-    );
-    let description = report
-        .metadata
-        .description
-        .as_deref()
-        .map(|description| format!("{description} {adapter_note}"))
-        .unwrap_or(adapter_note);
-    let name = truncate_imported_text(&report.manifest.display_name, 120);
-    let name = if name.is_empty() {
-        "Imported LX Source".to_owned()
-    } else {
-        name
-    };
-    let manifest = PluginManifest {
-        manifest_version: PLUGIN_MANIFEST_VERSION,
-        id: plugin_id,
-        name,
-        version: normalize_imported_version(report.metadata.version.as_deref()),
-        description: Some(truncate_imported_text(&description, 600)),
-        author: report
-            .metadata
-            .author
-            .as_deref()
-            .map(|author| truncate_imported_text(author, 120)),
-        homepage: report
-            .metadata
-            .homepage
-            .as_deref()
-            .map(|homepage| truncate_imported_text(homepage, 2_048)),
-        provider_entrypoints: vec![PluginProviderEntrypoint {
-            id: provider_id,
-            entrypoint,
-            capabilities: BTreeSet::new(),
-            source_catalog,
-        }],
-        capabilities: BTreeSet::from([SourceCapability::NetworkAny]),
-        compatibility_target: PLUGIN_COMPATIBILITY_TARGET.to_owned(),
-        supported_api_version: PLUGIN_RUNTIME_API_VERSION,
-        required_host_bridges: BTreeSet::new(),
-    };
-    Ok((manifest, source, report))
-}
-
-pub(crate) fn prepare_lx_js_import_from_url(
-    source_url: &str,
-) -> Result<PreparedLxJsImport, PluginSystemError> {
-    let downloaded = download_lx_js_source(source_url)?;
-    let source_path = PathBuf::from(&downloaded.source_file_name);
-    let (manifest, source, report) =
-        prepare_lx_js_import_contents(&source_path, downloaded.source)?;
-    Ok(PreparedLxJsImport {
-        manifest,
-        source,
-        report,
-        provenance: LxJsImportProvenance {
-            kind: "remote-url".to_owned(),
-            source_file_name: downloaded.source_file_name,
-            requested_url: Some(display_remote_lx_source_url(&downloaded.requested_url)),
-            final_url: Some(display_remote_lx_source_url(&downloaded.final_url)),
-        },
-    })
-}
-
-fn download_lx_js_source(source_url: &str) -> Result<DownloadedLxJsSource, PluginSystemError> {
-    let requested_url = parse_remote_lx_source_url(source_url)?;
-    let request_url = normalize_remote_lx_source_url(requested_url.clone());
-    let initial_request_is_https = request_url.scheme() == "https";
-    let client = Client::builder()
-        .timeout(REMOTE_LX_SOURCE_TIMEOUT)
-        .connect_timeout(REMOTE_LX_SOURCE_CONNECT_TIMEOUT)
-        .redirect(Policy::custom(move |attempt| {
-            if attempt.previous().len() > MAX_REMOTE_LX_SOURCE_REDIRECTS {
-                return attempt.error("LX source redirect limit exceeded");
-            }
-            if validate_remote_lx_source_url(attempt.url()).is_err() {
-                return attempt.error("LX source redirected to an unsupported URL");
-            }
-            if initial_request_is_https && attempt.url().scheme() != "https" {
-                return attempt.error("LX source redirect attempted to downgrade HTTPS");
-            }
-            attempt.follow()
-        }))
-        .build()
-        .map_err(|_| {
-            PluginSystemError::Package(
-                "could not initialize the LX source download client".to_owned(),
-            )
-        })?;
-    let diagnostic_url = display_remote_lx_source_url(&request_url);
-    let mut response = client
-        .get(request_url)
-        .header(USER_AGENT, REMOTE_LX_SOURCE_USER_AGENT)
-        .header(
-            ACCEPT,
-            "application/javascript, text/javascript, text/plain;q=0.9, */*;q=0.1",
-        )
-        .send()
-        .map_err(|error| {
-            let reason = if error.is_timeout() {
-                "request timed out"
-            } else if error.is_connect() {
-                "could not connect"
-            } else {
-                "network request failed"
-            };
-            PluginSystemError::Package(format!("LX source download {reason}: {diagnostic_url}"))
-        })?;
-    let final_url = response.url().clone();
-    validate_remote_lx_source_url(&final_url).map_err(PluginSystemError::Package)?;
-    let final_diagnostic_url = display_remote_lx_source_url(&final_url);
-    if !response.status().is_success() {
-        return Err(PluginSystemError::Package(format!(
-            "LX source download returned HTTP {}: {final_diagnostic_url}",
-            response.status().as_u16()
-        )));
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_IMPORTED_LX_SOURCE_BYTES as u64)
-    {
-        return Err(remote_lx_source_too_large_error());
-    }
-    let content_type = response
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_ascii_lowercase);
-    let mut bytes = Vec::new();
-    response
-        .by_ref()
-        .take(MAX_IMPORTED_LX_SOURCE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| {
-            PluginSystemError::Package(format!(
-                "could not read the LX source response: {final_diagnostic_url}"
-            ))
-        })?;
-    if bytes.len() > MAX_IMPORTED_LX_SOURCE_BYTES {
-        return Err(remote_lx_source_too_large_error());
-    }
-    if remote_lx_source_looks_like_html(content_type.as_deref(), &bytes) {
-        return Err(PluginSystemError::Package(
-            "LX source URL returned HTML instead of JavaScript; use a direct file URL".to_owned(),
-        ));
-    }
-    let source = String::from_utf8(bytes).map_err(|_| {
-        PluginSystemError::Package("downloaded LX JavaScript source must be UTF-8".to_owned())
-    })?;
-    Ok(DownloadedLxJsSource {
-        source_file_name: remote_lx_source_file_name(&final_url),
-        source,
-        requested_url,
-        final_url,
-    })
-}
-
-fn parse_remote_lx_source_url(source_url: &str) -> Result<Url, PluginSystemError> {
-    let source_url = source_url.trim();
-    if source_url.is_empty() {
-        return Err(PluginSystemError::Package(
-            "LX JavaScript source URL must not be empty".to_owned(),
-        ));
-    }
-    if source_url.len() > MAX_REMOTE_LX_SOURCE_URL_BYTES {
-        return Err(PluginSystemError::Package(
-            "LX JavaScript source URL is too long".to_owned(),
-        ));
-    }
-    let url = Url::parse(source_url).map_err(|_| {
-        PluginSystemError::Package("LX JavaScript source URL is invalid".to_owned())
-    })?;
-    validate_remote_lx_source_url(&url).map_err(PluginSystemError::Package)?;
-    Ok(url)
-}
-
-fn validate_remote_lx_source_url(url: &Url) -> Result<(), String> {
-    if url.as_str().len() > MAX_REMOTE_LX_SOURCE_URL_BYTES {
-        return Err("LX JavaScript source URL is too long".to_owned());
-    }
-    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err("LX JavaScript source URL must use HTTP or HTTPS".to_owned());
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("LX JavaScript source URL must not contain credentials".to_owned());
-    }
-    Ok(())
-}
-
-fn normalize_remote_lx_source_url(mut url: Url) -> Url {
-    let is_github_blob = url.host_str() == Some("github.com")
-        && url
-            .path_segments()
-            .is_some_and(|mut segments| segments.nth(2) == Some("blob"));
-    if is_github_blob {
-        let query_pairs = url
-            .query_pairs()
-            .filter(|(key, _)| key != "raw")
-            .map(|(key, value)| (key.into_owned(), value.into_owned()))
-            .collect::<Vec<_>>();
-        url.set_query(None);
-        let mut query = url.query_pairs_mut();
-        for (key, value) in query_pairs {
-            query.append_pair(&key, &value);
-        }
-        query.append_pair("raw", "1");
-    }
-    url.set_fragment(None);
-    url
-}
-
-fn display_remote_lx_source_url(url: &Url) -> String {
-    let mut display_url = url.clone();
-    display_url.set_query(None);
-    display_url.set_fragment(None);
-    display_url.to_string()
-}
-
-fn remote_lx_source_file_name(url: &Url) -> String {
-    let candidate = url
-        .path_segments()
-        .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
-        .map(|segment| percent_decode_str(segment).decode_utf8_lossy())
-        .unwrap_or_else(|| "remote-source".into());
-    let cleaned = candidate
-        .chars()
-        .filter(|character| !character.is_control() && !matches!(character, '/' | '\\'))
-        .take(160)
-        .collect::<String>();
-    let cleaned = if cleaned.trim().is_empty() {
-        "remote-source".to_owned()
-    } else {
-        cleaned
-    };
-    let extension = Path::new(&cleaned)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if matches!(extension.as_str(), "js" | "mjs" | "cjs") {
-        cleaned
-    } else {
-        format!("{cleaned}.js")
-    }
-}
-
-fn remote_lx_source_looks_like_html(content_type: Option<&str>, bytes: &[u8]) -> bool {
-    if content_type.is_some_and(|content_type| {
-        content_type.contains("text/html") || content_type.contains("application/xhtml+xml")
-    }) {
-        return true;
-    }
-    let prefix = String::from_utf8_lossy(&bytes[..bytes.len().min(256)])
-        .trim_start_matches(['\u{feff}', ' ', '\t', '\r', '\n'])
-        .to_ascii_lowercase();
-    prefix.starts_with("<!doctype html") || prefix.starts_with("<html")
-}
-
-fn remote_lx_source_too_large_error() -> PluginSystemError {
-    PluginSystemError::Package(format!(
-        "LX JS source exceeds the {} MiB import limit",
-        MAX_IMPORTED_LX_SOURCE_BYTES / (1024 * 1024)
-    ))
-}
-
-fn imported_lx_source_catalog(
-    report: &crate::lx_js_importer::LxJsImportReport,
-    templates: &[crate::lx_js_importer::LxUrlTemplate],
-) -> BTreeMap<String, SourceInfo> {
-    let analyzed = report.manifest.to_source_catalog();
-    templates
-        .iter()
-        .map(|template| template.source_id.as_str())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .map(|source_id| {
-            let (name, qualities) = analyzed
-                .get(source_id)
-                .map(|source| {
-                    let qualities = if source.qualities.is_empty() {
-                        source_runtime::standard_lx_qualities()
-                    } else {
-                        source.qualities.clone()
-                    };
-                    (source.name.clone(), qualities)
-                })
-                .unwrap_or_else(|| {
-                    (
-                        imported_lx_source_name(source_id).to_owned(),
-                        source_runtime::standard_lx_qualities(),
-                    )
-                });
-            (
-                source_id.to_owned(),
-                source_runtime::lx_music_source(
-                    source_id,
-                    name,
-                    vec![SourceAction::MusicUrl],
-                    qualities,
-                ),
-            )
-        })
-        .collect()
-}
-
-fn imported_lx_source_name(source_id: &str) -> &str {
-    match source_id {
-        source_runtime::LX_SOURCE_WY => "NetEase",
-        source_runtime::LX_SOURCE_TX => "QQ Music",
-        source_runtime::LX_SOURCE_KW => "Kuwo",
-        source_runtime::LX_SOURCE_KG => "Kugou",
-        source_runtime::LX_SOURCE_MG => "Migu",
-        source_runtime::LX_SOURCE_LOCAL => "Local Music",
-        _ => source_id,
-    }
-}
-
-fn normalize_imported_version(version: Option<&str>) -> String {
-    let value = version.unwrap_or_default().trim();
-    let value = value.strip_prefix(['v', 'V']).unwrap_or(value);
-    if semver::Version::parse(value).is_ok() {
-        return value.to_owned();
-    }
-    let numeric_parts = value.split('.').collect::<Vec<_>>();
-    match numeric_parts.as_slice() {
-        [major] if major.parse::<u64>().is_ok() => format!("{major}.0.0"),
-        [major, minor] if major.parse::<u64>().is_ok() && minor.parse::<u64>().is_ok() => {
-            format!("{major}.{minor}.0")
-        }
-        _ => "0.0.0".to_owned(),
-    }
-}
-
-fn truncate_imported_text(value: &str, maximum_characters: usize) -> String {
-    value.trim().chars().take(maximum_characters).collect()
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
-
-fn parse_imported_lx_entrypoint(
-    entrypoint: &str,
-) -> Result<Option<(crate::lx_js_importer::LxJsImportAdapter, &str)>, String> {
-    let Some(value) = entrypoint.strip_prefix(IMPORTED_LX_ENTRYPOINT_PREFIX) else {
-        return Ok(None);
-    };
-    let Some((adapter, fingerprint)) = value.rsplit_once(':') else {
-        return Err("imported LX entrypoint is missing its source fingerprint".to_owned());
-    };
-    let adapter = crate::lx_js_importer::LxJsImportAdapter::parse(adapter)
-        .ok_or_else(|| format!("unsupported imported LX adapter: {adapter}"))?;
-    if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("imported LX source fingerprint is invalid".to_owned());
-    }
-    Ok(Some((adapter, fingerprint)))
-}
-
 fn build_provider(
     manifest: &PluginManifest,
     entrypoint: &PluginProviderEntrypoint,
-    package_path: &Path,
+    _package_path: &Path,
     netease_bridge: Option<Arc<dyn NeteaseProviderBridge>>,
 ) -> Result<Arc<dyn SourceProvider>, PluginSystemError> {
     let capabilities = provider_declared_capabilities(manifest, entrypoint);
-    let imported_entrypoint =
-        parse_imported_lx_entrypoint(&entrypoint.entrypoint).map_err(|message| {
-            PluginSystemError::ProviderLoad {
-                plugin_id: manifest.id.clone(),
-                entrypoint: entrypoint.entrypoint.clone(),
-                message,
-            }
-        })?;
-    if let Some((adapter, expected_fingerprint)) = imported_entrypoint {
-        let source_path = package_path.join(IMPORTED_LX_SOURCE_FILE);
-        let source_size = fs::metadata(&source_path)
-            .map_err(|error| PluginSystemError::ProviderLoad {
-                plugin_id: manifest.id.clone(),
-                entrypoint: entrypoint.entrypoint.clone(),
-                message: format!("could not inspect imported LX source: {error}"),
-            })?
-            .len();
-        if source_size > MAX_IMPORTED_LX_SOURCE_BYTES as u64 {
-            return Err(PluginSystemError::ProviderLoad {
-                plugin_id: manifest.id.clone(),
-                entrypoint: entrypoint.entrypoint.clone(),
-                message: "imported LX source exceeds the configured size limit".to_owned(),
-            });
-        }
-        let source =
-            fs::read_to_string(&source_path).map_err(|error| PluginSystemError::ProviderLoad {
-                plugin_id: manifest.id.clone(),
-                entrypoint: entrypoint.entrypoint.clone(),
-                message: format!("could not read imported LX source: {error}"),
-            })?;
-        let source_fingerprint = sha256_hex(source.as_bytes());
-        if source_fingerprint != expected_fingerprint {
-            return Err(PluginSystemError::ProviderLoad {
-                plugin_id: manifest.id.clone(),
-                entrypoint: entrypoint.entrypoint.clone(),
-                message: "imported LX source does not match the reviewed manifest".to_owned(),
-            });
-        }
-        let report = crate::lx_js_importer::analyze_lx_js_source(&source_path, &source).map_err(
-            |error| PluginSystemError::ProviderLoad {
-                plugin_id: manifest.id.clone(),
-                entrypoint: entrypoint.entrypoint.clone(),
-                message: error.to_string(),
-            },
-        )?;
-        let detected_adapter = crate::lx_js_importer::supported_import_adapter(&report);
-        if detected_adapter != Some(adapter) {
-            return Err(PluginSystemError::ProviderLoad {
-                plugin_id: manifest.id.clone(),
-                entrypoint: entrypoint.entrypoint.clone(),
-                message: "imported LX adapter no longer matches the analyzed source".to_owned(),
-            });
-        }
-        let provider = crate::lx_js_importer::ImportedLxTemplateProvider::for_imported_package(
-            entrypoint.id.clone(),
-            &report,
-            entrypoint.source_catalog.clone(),
-            adapter,
-        )
-        .map_err(|error| PluginSystemError::ProviderLoad {
-            plugin_id: manifest.id.clone(),
-            entrypoint: entrypoint.entrypoint.clone(),
-            message: error.to_string(),
-        })?;
-        return Ok(Arc::new(provider));
-    }
-
     match entrypoint.entrypoint.as_str() {
+        #[cfg(test)]
         "builtin:runtime-demo" => Ok(Arc::new(DemoSourceProvider::new(
             entrypoint.id.clone(),
             capabilities,
             entrypoint.source_catalog.clone(),
         ))),
+        #[cfg(test)]
         "catalog" | "builtin:catalog" => Ok(Arc::new(CatalogSourceProvider::new(
             entrypoint.id.clone(),
             capabilities,
             entrypoint.source_catalog.clone(),
         ))),
-        "builtin:qishui" if entrypoint.id == "qsvip" => {
-            Ok(Arc::new(crate::lx_js_importer::QishuiRustProvider::new()))
-        }
         "builtin:netease"
             if manifest.id == NETEASE_PLUGIN_ID && entrypoint.id == NETEASE_PROVIDER_ID =>
         {
@@ -2721,6 +2116,7 @@ fn build_provider(
     }
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 struct DemoSourceProvider {
     id: String,
@@ -2728,6 +2124,7 @@ struct DemoSourceProvider {
     sources: BTreeMap<String, SourceInfo>,
 }
 
+#[cfg(test)]
 impl DemoSourceProvider {
     fn new(
         id: String,
@@ -2755,6 +2152,7 @@ impl DemoSourceProvider {
     }
 }
 
+#[cfg(test)]
 impl SourceProvider for DemoSourceProvider {
     fn id(&self) -> &str {
         &self.id
@@ -2821,6 +2219,7 @@ impl SourceProvider for DemoSourceProvider {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 struct CatalogSourceProvider {
     id: String,
@@ -2828,6 +2227,7 @@ struct CatalogSourceProvider {
     sources: BTreeMap<String, SourceInfo>,
 }
 
+#[cfg(test)]
 impl CatalogSourceProvider {
     fn new(
         id: String,
@@ -2842,6 +2242,7 @@ impl CatalogSourceProvider {
     }
 }
 
+#[cfg(test)]
 impl SourceProvider for CatalogSourceProvider {
     fn id(&self) -> &str {
         &self.id
@@ -2870,6 +2271,7 @@ impl SourceProvider for CatalogSourceProvider {
     }
 }
 
+#[cfg(test)]
 fn standard_actions() -> Vec<SourceAction> {
     vec![
         SourceAction::MusicSearch,
@@ -3218,6 +2620,14 @@ fn valid_identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
+fn is_legacy_lx_audio_source(manifest: &PluginManifest) -> bool {
+    manifest.provider_entrypoints.iter().any(|provider| {
+        provider
+            .entrypoint
+            .starts_with(IMPORTED_LX_ENTRYPOINT_PREFIX)
+    })
+}
+
 fn valid_entrypoint(value: &str) -> bool {
     let value = value.trim();
     !value.is_empty()
@@ -3274,11 +2684,8 @@ fn now_timestamp() -> i64 {
 mod tests {
     use super::*;
     use crate::source_runtime::SourceQuality;
-    use std::io::Write;
-    use std::net::TcpListener;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
-    use std::thread::{self, JoinHandle};
 
     static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -3331,67 +2738,10 @@ mod tests {
         package
     }
 
-    fn write_lx_source(root: &Path, file_name: &str, source: &str) -> PathBuf {
-        let path = root.join(file_name);
-        fs::write(&path, source).expect("LX source fixture should be written");
-        path
-    }
-
-    fn importable_lx_source() -> &'static str {
-        r#"
-            /**
-             * @name Imported Test Source
-             * @description Test source package
-             * @version 1.2
-             * @author Fika Tests
-             */
-            const CUSTOM_URL_TEMPLATES = {
-                wy: "https://example.test/play/{id}?level={level}",
-            };
-            const { EVENT_NAMES, on, send } = globalThis.lx;
-            const qualitys = ["128k", "320k", "flac"];
-            on(EVENT_NAMES.request, ({ action }) => {
-                if (action === "musicUrl") return "https://example.test";
-                throw new Error("unsupported");
-            });
-            send(EVENT_NAMES.inited, { sources: { wy: "NetEase" } });
-        "#
-    }
-
-    fn serve_http_response(
-        path: &str,
-        content_type: &str,
-        body: &[u8],
-        content_length: Option<usize>,
-    ) -> (String, JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("test server should bind");
-        let address = listener
-            .local_addr()
-            .expect("test server address should resolve");
-        let response_body = body.to_vec();
-        let response_content_type = content_type.to_owned();
-        let response_length = content_length.unwrap_or(response_body.len());
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("test request should connect");
-            let mut request = [0_u8; 4_096];
-            let _ = stream.read(&mut request);
-            let headers = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {response_content_type}\r\nContent-Length: {response_length}\r\nConnection: close\r\n\r\n"
-            );
-            stream
-                .write_all(headers.as_bytes())
-                .expect("test response headers should write");
-            stream
-                .write_all(&response_body)
-                .expect("test response body should write");
-        });
-        (format!("http://{address}{path}"), handle)
-    }
-
     #[test]
     fn bundled_runtime_demo_manifest_should_validate() {
         let manifest = serde_json::from_str::<PluginManifest>(include_str!(
-            "../plugins/runtime-demo/plugin.json"
+            "../fixtures/plugins/runtime-demo/plugin.json"
         ))
         .expect("bundled demo manifest should deserialize");
 
@@ -3505,300 +2855,29 @@ mod tests {
     }
 
     #[test]
-    fn import_lx_js_should_create_a_reviewable_managed_plugin() {
-        let root = temp_dir("lx-import");
+    fn refresh_does_not_expose_legacy_lx_audio_sources_as_plugins() {
+        let root = temp_dir("legacy-lx-source");
         let bundled = root.join("bundled");
         let user = root.join("user");
         fs::create_dir_all(&bundled).expect("bundled directory should be created");
         fs::create_dir_all(&user).expect("user directory should be created");
-        let source = write_lx_source(&root, "source.js", importable_lx_source());
+        let legacy = manifest(
+            "legacy.audio-source",
+            &format!(
+                "{IMPORTED_LX_ENTRYPOINT_PREFIX}static-templates:{}",
+                "0".repeat(64)
+            ),
+            &[SourceCapability::NetworkAny],
+        );
+        write_package(&user, &legacy);
         let connection = database();
         let mut registry = PluginRegistry::new(&user, &bundled, Arc::new(SourceRuntime::new()));
-        registry
+
+        let records = registry
             .refresh(&connection)
-            .expect("registry should refresh before import");
+            .expect("registry should refresh");
 
-        let imported = registry
-            .import_lx_js(&connection, &source)
-            .expect("LX source should import");
-
-        assert_eq!(imported.name, "Imported Test Source");
-        assert_eq!(imported.version.as_deref(), Some("1.2.0"));
-        assert_eq!(imported.state, PluginState::NeedsReview);
-        assert_eq!(
-            imported.declared_capabilities,
-            BTreeSet::from([SourceCapability::NetworkAny])
-        );
-        assert!(imported.providers[0]
-            .entrypoint
-            .starts_with(IMPORTED_LX_ENTRYPOINT_PREFIX));
-        assert_eq!(
-            imported.providers[0].sources[0].actions,
-            [SourceAction::MusicUrl]
-        );
-        assert!(Path::new(&imported.path)
-            .join(IMPORTED_LX_SOURCE_FILE)
-            .is_file());
-        assert!(Path::new(&imported.path)
-            .join(IMPORTED_LX_REPORT_FILE)
-            .is_file());
-        let report = fs::read_to_string(Path::new(&imported.path).join(IMPORTED_LX_REPORT_FILE))
-            .expect("managed import report should be readable");
-        let report = serde_json::from_str::<serde_json::Value>(&report)
-            .expect("managed import report should be JSON");
-        assert_eq!(report["provenance"]["kind"], "local-file");
-        assert_eq!(report["provenance"]["sourceFileName"], "source.js");
-        fs::remove_dir_all(root).expect("test directory should be removed");
-    }
-
-    #[test]
-    fn import_lx_js_url_should_download_install_and_record_provenance() {
-        let (source_url, server) = serve_http_response(
-            "/download",
-            "text/javascript; charset=utf-8",
-            importable_lx_source().as_bytes(),
-            None,
-        );
-        let source_url = format!("{source_url}?token=not-persisted");
-        let prepared = prepare_lx_js_import_from_url(&source_url)
-            .expect("remote LX source should prepare for import");
-        server.join().expect("test server should stop");
-        let root = temp_dir("lx-url-import");
-        let bundled = root.join("bundled");
-        let user = root.join("user");
-        fs::create_dir_all(&bundled).expect("bundled directory should be created");
-        fs::create_dir_all(&user).expect("user directory should be created");
-        let connection = database();
-        let mut registry = PluginRegistry::new(&user, &bundled, Arc::new(SourceRuntime::new()));
-        registry
-            .refresh(&connection)
-            .expect("registry should refresh before import");
-
-        let imported = registry
-            .install_prepared_lx_js(&connection, prepared)
-            .expect("remote LX source should install");
-        let report = fs::read_to_string(Path::new(&imported.path).join(IMPORTED_LX_REPORT_FILE))
-            .expect("managed import report should be readable");
-        let report = serde_json::from_str::<serde_json::Value>(&report)
-            .expect("managed import report should be JSON");
-
-        assert_eq!(imported.state, PluginState::NeedsReview);
-        assert_eq!(report["provenance"]["kind"], "remote-url");
-        assert_eq!(report["provenance"]["sourceFileName"], "download.js");
-        assert_eq!(
-            report["provenance"]["requestedUrl"],
-            source_url
-                .split('?')
-                .next()
-                .expect("URL should have a path")
-        );
-        assert!(!report.to_string().contains("not-persisted"));
-        fs::remove_dir_all(root).expect("test directory should be removed");
-    }
-
-    #[test]
-    fn download_lx_js_source_should_reject_oversized_responses_before_reading_the_body() {
-        let (source_url, server) = serve_http_response(
-            "/source.js",
-            "text/javascript",
-            &[],
-            Some(MAX_IMPORTED_LX_SOURCE_BYTES + 1),
-        );
-
-        let error = download_lx_js_source(&source_url)
-            .expect_err("oversized remote source should be rejected");
-        server.join().expect("test server should stop");
-
-        assert!(matches!(
-            error,
-            PluginSystemError::Package(message) if message.contains("4 MiB")
-        ));
-    }
-
-    #[test]
-    fn remote_lx_source_urls_should_require_http_and_request_raw_github_content() {
-        let error = parse_remote_lx_source_url("file:///tmp/source.js")
-            .expect_err("file URLs should be rejected");
-        let github = parse_remote_lx_source_url(
-            "https://github.com/example/sources/blob/main/recommended/source.js?plain=1&raw=0#L10",
-        )
-        .expect("GitHub source URL should parse");
-        let normalized = normalize_remote_lx_source_url(github);
-
-        assert!(matches!(
-            error,
-            PluginSystemError::Package(message) if message.contains("HTTP or HTTPS")
-        ));
-        assert_eq!(normalized.fragment(), None);
-        let query_pairs = normalized.query_pairs().collect::<Vec<_>>();
-        assert!(query_pairs
-            .iter()
-            .any(|(key, value)| key == "plain" && value == "1"));
-        assert_eq!(
-            query_pairs
-                .iter()
-                .filter(|(key, value)| key == "raw" && value == "1")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn download_lx_js_source_should_reject_html_pages() {
-        let (source_url, server) = serve_http_response(
-            "/source.js",
-            "text/html; charset=utf-8",
-            b"<!doctype html><title>Not a source</title>",
-            None,
-        );
-
-        let error =
-            download_lx_js_source(&source_url).expect_err("HTML response should be rejected");
-        server.join().expect("test server should stop");
-
-        assert!(matches!(
-            error,
-            PluginSystemError::Package(message) if message.contains("HTML instead of JavaScript")
-        ));
-    }
-
-    #[test]
-    fn recommended_lx_reference_sources_should_prepare_as_importable_packages() {
-        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/lx-js-sources");
-
-        for file_name in [
-            "quantouya-aggregate-v4.1.js",
-            "nianxin-v1.0.1.js",
-            "changqing-svip-v1.2.0.js",
-        ] {
-            let (manifest, source, report) = prepare_lx_js_import(&fixtures.join(file_name))
-                .unwrap_or_else(|error| panic!("{file_name} should prepare for import: {error}"));
-
-            assert!(!source.is_empty(), "{file_name}");
-            assert_eq!(manifest.name, report.manifest.display_name, "{file_name}");
-            assert!(
-                manifest.provider_entrypoints[0]
-                    .entrypoint
-                    .starts_with(IMPORTED_LX_ENTRYPOINT_PREFIX),
-                "{file_name}"
-            );
-            assert!(
-                !manifest.provider_entrypoints[0].source_catalog.is_empty(),
-                "{file_name}"
-            );
-        }
-    }
-
-    #[test]
-    fn import_lx_js_should_reject_files_without_a_supported_lx_contract() {
-        let root = temp_dir("lx-import-invalid");
-        let bundled = root.join("bundled");
-        let user = root.join("user");
-        fs::create_dir_all(&bundled).expect("bundled directory should be created");
-        fs::create_dir_all(&user).expect("user directory should be created");
-        let source = write_lx_source(&root, "not-a-source.js", "const value = 1;");
-        let connection = database();
-        let mut registry = PluginRegistry::new(&user, &bundled, Arc::new(SourceRuntime::new()));
-        registry
-            .refresh(&connection)
-            .expect("registry should refresh before import");
-
-        let error = registry
-            .import_lx_js(&connection, &source)
-            .expect_err("non-LX JavaScript should be rejected");
-
-        assert!(matches!(
-            error,
-            PluginSystemError::Package(message)
-                if message.contains("supported LX musicUrl request contract")
-        ));
-        assert!(registry.records().is_empty());
-        fs::remove_dir_all(root).expect("test directory should be removed");
-    }
-
-    #[test]
-    fn imported_lx_plugin_should_initialize_its_rust_adapter_after_review() {
-        let root = temp_dir("lx-import-enable");
-        let bundled = root.join("bundled");
-        let user = root.join("user");
-        fs::create_dir_all(&bundled).expect("bundled directory should be created");
-        fs::create_dir_all(&user).expect("user directory should be created");
-        let source = write_lx_source(&root, "source.js", importable_lx_source());
-        let connection = database();
-        let mut registry = PluginRegistry::new(&user, &bundled, Arc::new(SourceRuntime::new()));
-        registry
-            .refresh(&connection)
-            .expect("registry should refresh before import");
-        let imported = registry
-            .import_lx_js(&connection, &source)
-            .expect("LX source should import");
-        registry
-            .set_capabilities(
-                &connection,
-                &imported.id,
-                [SourceCapability::NetworkAny],
-                true,
-            )
-            .expect("network capability should be reviewed");
-
-        let enabled = registry
-            .set_enabled(&connection, &imported.id, true)
-            .expect("reviewed imported source should enable");
-
-        assert_eq!(enabled.state, PluginState::Enabled);
-        assert!(enabled.providers[0].initialized);
-        assert!(enabled.providers[0]
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("JavaScript was not executed")));
-        fs::remove_dir_all(root).expect("test directory should be removed");
-    }
-
-    #[test]
-    fn imported_lx_plugin_should_fail_closed_when_source_changes_after_review() {
-        let root = temp_dir("lx-import-integrity");
-        let bundled = root.join("bundled");
-        let user = root.join("user");
-        fs::create_dir_all(&bundled).expect("bundled directory should be created");
-        fs::create_dir_all(&user).expect("user directory should be created");
-        let source = write_lx_source(&root, "source.js", importable_lx_source());
-        let connection = database();
-        let mut registry = PluginRegistry::new(&user, &bundled, Arc::new(SourceRuntime::new()));
-        registry
-            .refresh(&connection)
-            .expect("registry should refresh before import");
-        let imported = registry
-            .import_lx_js(&connection, &source)
-            .expect("LX source should import");
-        registry
-            .set_capabilities(
-                &connection,
-                &imported.id,
-                [SourceCapability::NetworkAny],
-                true,
-            )
-            .expect("network capability should be reviewed");
-        fs::write(
-            Path::new(&imported.path).join(IMPORTED_LX_SOURCE_FILE),
-            format!("{}\n// changed", importable_lx_source()),
-        )
-        .expect("managed source should be changed for the integrity test");
-
-        let error = registry
-            .set_enabled(&connection, &imported.id, true)
-            .expect_err("changed imported source should not activate");
-
-        assert!(matches!(
-            error,
-            PluginSystemError::ProviderLoad { message, .. }
-                if message.contains("does not match the reviewed manifest")
-        ));
-        assert!(
-            !registry
-                .record(&imported.id)
-                .expect("imported record should remain visible")
-                .enabled
-        );
+        assert!(records.is_empty());
         fs::remove_dir_all(root).expect("test directory should be removed");
     }
 

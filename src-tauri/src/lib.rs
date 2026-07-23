@@ -1,4 +1,6 @@
-use crate::source_runtime::SourceProvider;
+use audio_source_system::{
+    AudioSourceCommandError, AudioSourceRecord, AudioSourceRegistry, AudioSourceSystemError,
+};
 use lofty::config::ParseOptions;
 use lofty::file::{AudioFile, FileType, TaggedFileExt};
 use lofty::mp4::{Mp4Codec, Mp4File};
@@ -16,6 +18,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use walkdir::WalkDir;
 
 mod album_art;
+pub mod audio_source_system;
 mod database;
 mod library;
 pub mod lx_js_importer;
@@ -67,13 +70,20 @@ macro_rules! with_tauri_commands {
             local_track_playback_details,
             resolve_remote_track_lyrics,
             cancel_source_request,
+            list_audio_sources,
+            select_audio_source_file,
+            refresh_audio_sources,
+            import_audio_source,
+            import_audio_source_url,
+            set_audio_source_capabilities,
+            set_audio_source_enabled,
+            remove_audio_source,
+            clear_audio_source_diagnostics,
+            dispatch_audio_source_request,
             list_plugins,
             select_plugin_package,
-            select_lx_js_source,
             refresh_plugins,
             install_plugin_package,
-            import_lx_js_source,
-            import_lx_js_source_url,
             set_plugin_capabilities,
             set_plugin_enabled,
             remove_plugin,
@@ -85,9 +95,6 @@ macro_rules! with_tauri_commands {
             list_netease_accounts,
             disconnect_netease_account,
             list_netease_mutation_audit,
-            resolve_imported_lx_template_music_url,
-            search_qishui_music,
-            resolve_qishui_music_url,
         }
     };
 }
@@ -128,6 +135,8 @@ enum AppError {
     StatePoisoned(&'static str),
     #[error("plugin system error: {0}")]
     Plugin(#[from] PluginSystemError),
+    #[error("audio source system error: {0}")]
+    AudioSource(#[from] AudioSourceSystemError),
     #[error("NetEase service error: {0}")]
     Netease(#[from] netease::NeteaseBridgeError),
     #[error("music folder does not exist or is not a directory: {0}")]
@@ -200,25 +209,6 @@ pub struct MediaSource {
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "bindings.ts")]
-pub struct RemoteMediaSource {
-    url: String,
-    mime_type: String,
-    diagnostics: Vec<source_runtime::SourceDiagnostic>,
-}
-
-#[derive(Debug, Clone, Serialize, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export_to = "bindings.ts")]
-pub struct RemoteSearchResults {
-    is_end: bool,
-    total: Option<u64>,
-    list: Vec<source_runtime::SourceSearchResult>,
-    diagnostics: Vec<source_runtime::SourceDiagnostic>,
-}
-
-#[derive(Debug, Clone, Serialize, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export_to = "bindings.ts")]
 pub struct RemoteCommandError {
     message: String,
     diagnostics: Vec<source_runtime::SourceDiagnostic>,
@@ -230,15 +220,6 @@ fn remote_error(message: impl Into<String>) -> RemoteCommandError {
     RemoteCommandError {
         message: message.into(),
         diagnostics: Vec::new(),
-    }
-}
-
-fn remote_source_error(error: source_runtime::SourceRuntimeError) -> RemoteCommandError {
-    let message = error.to_string();
-    let diagnostics = error.into_diagnostics();
-    RemoteCommandError {
-        message,
-        diagnostics,
     }
 }
 
@@ -272,7 +253,7 @@ struct AppState {
     album_art: Arc<album_art::AlbumArtService>,
     scan_status: Mutex<ScanStatus>,
     source_requests: Mutex<BTreeMap<String, source_runtime::SourceCancellationToken>>,
-    source_runtime: Arc<source_runtime::SourceRuntime>,
+    audio_source_registry: Mutex<AudioSourceRegistry>,
     plugin_registry: Mutex<PluginRegistry>,
     netease_bridge: Arc<netease::NeteaseServiceBridge>,
 }
@@ -329,6 +310,20 @@ impl AppState {
             source_host,
         )?);
         let provider_bridge: Arc<dyn netease::NeteaseProviderBridge> = netease_bridge.clone();
+        let audio_sources_dir = user_plugins_dir
+            .parent()
+            .map(|path| path.join("audio-sources"))
+            .unwrap_or_else(|| PathBuf::from("audio-sources"));
+        {
+            let connection = db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
+            audio_source_system::migrate_legacy_lx_plugins(
+                &connection,
+                &user_plugins_dir,
+                &audio_sources_dir,
+            )?;
+        }
+        let mut audio_source_registry =
+            AudioSourceRegistry::new(audio_sources_dir, Arc::clone(&source_runtime));
         let mut plugin_registry = PluginRegistry::new(
             user_plugins_dir,
             bundled_plugins_dir,
@@ -338,6 +333,7 @@ impl AppState {
         .with_netease_bridge(provider_bridge);
         {
             let connection = db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
+            audio_source_registry.refresh(&connection)?;
             plugin_registry.refresh(&connection)?;
         }
 
@@ -347,7 +343,7 @@ impl AppState {
             album_art,
             scan_status: Mutex::new(ScanStatus::default()),
             source_requests: Mutex::new(BTreeMap::new()),
-            source_runtime,
+            audio_source_registry: Mutex::new(audio_source_registry),
             plugin_registry: Mutex::new(plugin_registry),
             netease_bridge,
         })
@@ -391,6 +387,7 @@ fn unregister_source_request(state: &AppState, request_id: Option<&str>) {
     }
 }
 
+#[cfg(test)]
 async fn run_remote_request<T, F>(
     state: &AppState,
     request_id: Option<&str>,
@@ -457,6 +454,35 @@ fn plugin_command_error(message: impl Into<String>) -> PluginCommandError {
         message: message.into(),
         diagnostics: Vec::new(),
     }
+}
+
+fn audio_source_lock_error(name: &'static str) -> AudioSourceCommandError {
+    AudioSourceCommandError {
+        message: format!("audio source {name} lock was poisoned"),
+        diagnostics: Vec::new(),
+    }
+}
+
+fn audio_source_command_error(message: impl Into<String>) -> AudioSourceCommandError {
+    AudioSourceCommandError {
+        message: message.into(),
+        diagnostics: Vec::new(),
+    }
+}
+
+fn parse_audio_source_capabilities(
+    capabilities: &[String],
+) -> Result<Vec<source_runtime::SourceCapability>, AudioSourceCommandError> {
+    capabilities
+        .iter()
+        .map(|capability| {
+            serde_json::from_value(serde_json::Value::String(capability.clone())).map_err(|_| {
+                audio_source_command_error(format!(
+                    "unsupported audio source capability: {capability}"
+                ))
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
@@ -545,6 +571,231 @@ fn list_netease_mutation_audit(
 }
 
 #[tauri::command]
+fn list_audio_sources(
+    state: State<'_, AppState>,
+) -> Result<Vec<AudioSourceRecord>, AudioSourceCommandError> {
+    let registry = state
+        .audio_source_registry
+        .lock()
+        .map_err(|_| audio_source_lock_error("registry"))?;
+    Ok(registry.records())
+}
+
+#[tauri::command]
+async fn select_audio_source_file() -> Result<Option<String>, AudioSourceCommandError> {
+    let file = rfd::AsyncFileDialog::new()
+        .set_title("Choose an audio source")
+        .add_filter("JavaScript source", &["js", "mjs", "cjs"])
+        .pick_file()
+        .await;
+    Ok(file.map(|handle| handle.path().to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+fn refresh_audio_sources(
+    state: State<'_, AppState>,
+) -> Result<Vec<AudioSourceRecord>, AudioSourceCommandError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| audio_source_lock_error("database"))?;
+    let mut registry = state
+        .audio_source_registry
+        .lock()
+        .map_err(|_| audio_source_lock_error("registry"))?;
+    registry.refresh(&db).map_err(Into::into)
+}
+
+#[tauri::command]
+fn import_audio_source(
+    state: State<'_, AppState>,
+    source_path: String,
+) -> Result<AudioSourceRecord, AudioSourceCommandError> {
+    let source_path = source_path.trim();
+    if source_path.is_empty() {
+        return Err(audio_source_command_error(
+            "audio source path must not be empty",
+        ));
+    }
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| audio_source_lock_error("database"))?;
+    let mut registry = state
+        .audio_source_registry
+        .lock()
+        .map_err(|_| audio_source_lock_error("registry"))?;
+    registry
+        .import_file(&db, Path::new(source_path))
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn import_audio_source_url(
+    app: AppHandle,
+    source_url: String,
+) -> Result<AudioSourceRecord, AudioSourceCommandError> {
+    let source_url = source_url.trim().to_owned();
+    if source_url.is_empty() {
+        return Err(audio_source_command_error(
+            "audio source URL must not be empty",
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let prepared = audio_source_system::prepare_remote_audio_source_import(&source_url)
+            .map_err(AudioSourceCommandError::from)?;
+        let state = app.state::<AppState>();
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| audio_source_lock_error("database"))?;
+        let mut registry = state
+            .audio_source_registry
+            .lock()
+            .map_err(|_| audio_source_lock_error("registry"))?;
+        registry.install_prepared(&db, prepared).map_err(Into::into)
+    })
+    .await
+    .map_err(|error| {
+        audio_source_command_error(format!("audio source URL import task failed: {error}"))
+    })?
+}
+
+#[tauri::command]
+fn set_audio_source_capabilities(
+    state: State<'_, AppState>,
+    audio_source_id: String,
+    capabilities: Vec<String>,
+    reviewed: bool,
+) -> Result<AudioSourceRecord, AudioSourceCommandError> {
+    let capabilities = parse_audio_source_capabilities(&capabilities)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| audio_source_lock_error("database"))?;
+    let mut registry = state
+        .audio_source_registry
+        .lock()
+        .map_err(|_| audio_source_lock_error("registry"))?;
+    registry
+        .set_capabilities(&db, audio_source_id.trim(), capabilities, reviewed)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn set_audio_source_enabled(
+    state: State<'_, AppState>,
+    audio_source_id: String,
+    enabled: bool,
+) -> Result<AudioSourceRecord, AudioSourceCommandError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| audio_source_lock_error("database"))?;
+    let mut registry = state
+        .audio_source_registry
+        .lock()
+        .map_err(|_| audio_source_lock_error("registry"))?;
+    registry
+        .set_enabled(&db, audio_source_id.trim(), enabled)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn remove_audio_source(
+    state: State<'_, AppState>,
+    audio_source_id: String,
+) -> Result<Vec<AudioSourceRecord>, AudioSourceCommandError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| audio_source_lock_error("database"))?;
+    let mut registry = state
+        .audio_source_registry
+        .lock()
+        .map_err(|_| audio_source_lock_error("registry"))?;
+    registry
+        .remove(&db, audio_source_id.trim())
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn clear_audio_source_diagnostics(
+    state: State<'_, AppState>,
+    audio_source_id: String,
+) -> Result<AudioSourceRecord, AudioSourceCommandError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| audio_source_lock_error("database"))?;
+    let mut registry = state
+        .audio_source_registry
+        .lock()
+        .map_err(|_| audio_source_lock_error("registry"))?;
+    registry
+        .clear_diagnostics(&db, audio_source_id.trim())
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn dispatch_audio_source_request(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    audio_source_id: String,
+    request: source_runtime::SourceRequest,
+    request_id: Option<String>,
+) -> Result<source_runtime::SourceRequestOutcome, AudioSourceCommandError> {
+    let audio_source_id = audio_source_id.trim().to_owned();
+    if audio_source_id.is_empty() {
+        return Err(audio_source_command_error(
+            "audio source id must not be empty",
+        ));
+    }
+    let cancellation =
+        register_source_request(state.inner(), request_id.as_deref()).map_err(|error| {
+            AudioSourceCommandError {
+                message: error.message,
+                diagnostics: Vec::new(),
+            }
+        })?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        dispatch_audio_source_request_inner(&state, &audio_source_id, request, cancellation)
+    })
+    .await;
+    unregister_source_request(state.inner(), request_id.as_deref());
+
+    match result {
+        Ok(result) => result,
+        Err(error) => Err(audio_source_command_error(format!(
+            "audio source request task failed: {error}"
+        ))),
+    }
+}
+
+fn dispatch_audio_source_request_inner(
+    state: &AppState,
+    audio_source_id: &str,
+    request: source_runtime::SourceRequest,
+    cancellation: source_runtime::SourceCancellationToken,
+) -> Result<source_runtime::SourceRequestOutcome, AudioSourceCommandError> {
+    let dispatch = {
+        let registry = state
+            .audio_source_registry
+            .lock()
+            .map_err(|_| audio_source_lock_error("registry"))?;
+        registry.prepare_dispatch(audio_source_id, &request)?
+    };
+    let result = dispatch.execute(request, cancellation);
+    if let Ok(db) = state.db.lock() {
+        if let Ok(mut registry) = state.audio_source_registry.lock() {
+            registry.complete_dispatch_best_effort(&db, &dispatch, &result);
+        }
+    }
+    result.map_err(Into::into)
+}
+
+#[tauri::command]
 fn list_plugins(state: State<'_, AppState>) -> Result<Vec<PluginRecord>, PluginCommandError> {
     let registry = state
         .plugin_registry
@@ -560,16 +811,6 @@ async fn select_plugin_package() -> Result<Option<String>, PluginCommandError> {
         .pick_folder()
         .await;
     Ok(folder.map(|handle| handle.path().to_string_lossy().into_owned()))
-}
-
-#[tauri::command]
-async fn select_lx_js_source() -> Result<Option<String>, PluginCommandError> {
-    let file = rfd::AsyncFileDialog::new()
-        .set_title("Choose an LX Music source")
-        .add_filter("JavaScript source", &["js", "mjs", "cjs"])
-        .pick_file()
-        .await;
-    Ok(file.map(|handle| handle.path().to_string_lossy().into_owned()))
 }
 
 #[tauri::command]
@@ -602,55 +843,6 @@ fn install_plugin_package(
     registry
         .install(&db, Path::new(package_path))
         .map_err(Into::into)
-}
-
-#[tauri::command]
-fn import_lx_js_source(
-    state: State<'_, AppState>,
-    source_path: String,
-) -> Result<PluginRecord, PluginCommandError> {
-    let source_path = source_path.trim();
-    if source_path.is_empty() {
-        return Err(plugin_command_error(
-            "LX JavaScript source path must not be empty",
-        ));
-    }
-    let db = state.db.lock().map_err(|_| plugin_lock_error("database"))?;
-    let mut registry = state
-        .plugin_registry
-        .lock()
-        .map_err(|_| plugin_lock_error("registry"))?;
-    registry
-        .import_lx_js(&db, Path::new(source_path))
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-async fn import_lx_js_source_url(
-    app: AppHandle,
-    source_url: String,
-) -> Result<PluginRecord, PluginCommandError> {
-    let source_url = source_url.trim().to_owned();
-    if source_url.is_empty() {
-        return Err(plugin_command_error(
-            "LX JavaScript source URL must not be empty",
-        ));
-    }
-    tauri::async_runtime::spawn_blocking(move || {
-        let prepared = plugin_system::prepare_lx_js_import_from_url(&source_url)
-            .map_err(PluginCommandError::from)?;
-        let state = app.state::<AppState>();
-        let db = state.db.lock().map_err(|_| plugin_lock_error("database"))?;
-        let mut registry = state
-            .plugin_registry
-            .lock()
-            .map_err(|_| plugin_lock_error("registry"))?;
-        registry
-            .install_prepared_lx_js(&db, prepared)
-            .map_err(Into::into)
-    })
-    .await
-    .map_err(|error| plugin_command_error(format!("LX URL import task failed: {error}")))?
 }
 
 #[tauri::command]
@@ -1200,214 +1392,6 @@ async fn resolve_remote_track_lyrics(
         .await
         .map_err(|error| format!("remote lyrics task failed: {error}"))?
         .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-async fn resolve_imported_lx_template_music_url(
-    state: State<'_, AppState>,
-    family: String,
-    source: String,
-    track_id: String,
-    quality: Option<String>,
-    request_id: Option<String>,
-) -> RemoteCommandResult<RemoteMediaSource> {
-    let runtime = Arc::clone(&state.source_runtime);
-    run_remote_request(
-        state.inner(),
-        request_id.as_deref(),
-        move |cancellation| {
-            resolve_imported_lx_template_music_url_inner(
-                family,
-                source,
-                track_id,
-                quality,
-                runtime,
-                cancellation,
-            )
-        },
-        "remote source resolver task failed",
-    )
-    .await
-}
-
-fn resolve_imported_lx_template_music_url_inner(
-    family: String,
-    source: String,
-    track_id: String,
-    quality: Option<String>,
-    runtime: Arc<source_runtime::SourceRuntime>,
-    cancellation: source_runtime::SourceCancellationToken,
-) -> RemoteCommandResult<RemoteMediaSource> {
-    let report = lx_js_importer::analyze_lx_js_source(
-        "quantouya-aggregate-v4.1.js",
-        include_str!("../fixtures/lx-js-sources/quantouya-aggregate-v4.1.js"),
-    )
-    .map_err(|error| remote_error(error.to_string()))?;
-    let provider = lx_js_importer::ImportedLxTemplateProvider::from_report(&report, &family)
-        .map_err(|error| remote_error(error.to_string()))?;
-    runtime
-        .ensure_provider_granted_capabilities(
-            provider.id(),
-            [source_runtime::SourceCapability::NetworkAny],
-        )
-        .map_err(remote_source_error)?;
-    let quality = quality.as_deref().unwrap_or("128k");
-    let quality = source_runtime::SourceQuality::from_lx_str(quality)
-        .ok_or_else(|| remote_error(format!("unsupported source quality: {quality}")))?;
-    let request = source_runtime::SourceRequest::MusicUrl {
-        source,
-        music_info: serde_json::json!({ "id": track_id }),
-        quality,
-    };
-    let init_report = runtime
-        .initialize_provider_with_cancellation(&provider, cancellation.clone())
-        .map_err(remote_source_error)?;
-    let outcome = runtime
-        .dispatch_request_with_cancellation(&provider, request, cancellation)
-        .map_err(remote_source_error)?;
-
-    let source_runtime::SourceResponse::MusicUrl(url) = outcome.response else {
-        return Err(remote_error("source provider did not return a musicUrl"));
-    };
-    let mime_type = mime_guess::from_path(url.split('?').next().unwrap_or(&url))
-        .first_or_octet_stream()
-        .essence_str()
-        .to_owned();
-
-    Ok(RemoteMediaSource {
-        url,
-        mime_type,
-        diagnostics: init_report
-            .diagnostics
-            .into_iter()
-            .chain(outcome.diagnostics)
-            .collect(),
-    })
-}
-
-#[tauri::command]
-async fn search_qishui_music(
-    state: State<'_, AppState>,
-    keyword: String,
-    page: Option<u64>,
-    page_size: Option<u64>,
-    request_id: Option<String>,
-) -> RemoteCommandResult<RemoteSearchResults> {
-    let runtime = Arc::clone(&state.source_runtime);
-    run_remote_request(
-        state.inner(),
-        request_id.as_deref(),
-        move |cancellation| {
-            search_qishui_music_inner(keyword, page, page_size, runtime, cancellation)
-        },
-        "qsvip search task failed",
-    )
-    .await
-}
-
-fn search_qishui_music_inner(
-    keyword: String,
-    page: Option<u64>,
-    page_size: Option<u64>,
-    runtime: Arc<source_runtime::SourceRuntime>,
-    cancellation: source_runtime::SourceCancellationToken,
-) -> RemoteCommandResult<RemoteSearchResults> {
-    let provider = lx_js_importer::QishuiRustProvider::new();
-    runtime
-        .ensure_provider_granted_capabilities(
-            provider.id(),
-            [source_runtime::SourceCapability::NetworkAny],
-        )
-        .map_err(remote_source_error)?;
-    let request = source_runtime::SourceRequest::MusicSearch {
-        source: "qsvip".to_owned(),
-        keyword,
-        page: page.unwrap_or(1),
-        page_size: page_size.unwrap_or(30),
-    };
-    let init_report = runtime
-        .initialize_provider_with_cancellation(&provider, cancellation.clone())
-        .map_err(remote_source_error)?;
-    let outcome = runtime
-        .dispatch_request_with_cancellation(&provider, request, cancellation)
-        .map_err(remote_source_error)?;
-    let source_runtime::SourceResponse::MusicSearch(response) = outcome.response else {
-        return Err(remote_error("qsvip provider did not return search results"));
-    };
-    Ok(RemoteSearchResults {
-        is_end: response.is_end,
-        total: response.total,
-        list: response.list,
-        diagnostics: init_report
-            .diagnostics
-            .into_iter()
-            .chain(outcome.diagnostics)
-            .collect(),
-    })
-}
-
-#[tauri::command]
-async fn resolve_qishui_music_url(
-    state: State<'_, AppState>,
-    music_info: serde_json::Value,
-    quality: Option<String>,
-    request_id: Option<String>,
-) -> RemoteCommandResult<RemoteMediaSource> {
-    let runtime = Arc::clone(&state.source_runtime);
-    run_remote_request(
-        state.inner(),
-        request_id.as_deref(),
-        move |cancellation| {
-            resolve_qishui_music_url_inner(music_info, quality, runtime, cancellation)
-        },
-        "qsvip resolver task failed",
-    )
-    .await
-}
-
-fn resolve_qishui_music_url_inner(
-    music_info: serde_json::Value,
-    quality: Option<String>,
-    runtime: Arc<source_runtime::SourceRuntime>,
-    cancellation: source_runtime::SourceCancellationToken,
-) -> RemoteCommandResult<RemoteMediaSource> {
-    let provider = lx_js_importer::QishuiRustProvider::new();
-    runtime
-        .ensure_provider_granted_capabilities(
-            provider.id(),
-            [source_runtime::SourceCapability::NetworkAny],
-        )
-        .map_err(remote_source_error)?;
-    let quality = quality.as_deref().unwrap_or("128k");
-    let quality = source_runtime::SourceQuality::from_lx_str(quality)
-        .ok_or_else(|| remote_error(format!("unsupported source quality: {quality}")))?;
-    let request = source_runtime::SourceRequest::MusicUrl {
-        source: "qsvip".to_owned(),
-        music_info,
-        quality,
-    };
-    let init_report = runtime
-        .initialize_provider_with_cancellation(&provider, cancellation.clone())
-        .map_err(remote_source_error)?;
-    let outcome = runtime
-        .dispatch_request_with_cancellation(&provider, request, cancellation)
-        .map_err(remote_source_error)?;
-    let source_runtime::SourceResponse::MusicUrl(url) = outcome.response else {
-        return Err(remote_error("qsvip provider did not return a musicUrl"));
-    };
-    let mime_type = mime_guess::from_path(url.split('?').next().unwrap_or(&url))
-        .first_or_octet_stream()
-        .essence_str()
-        .to_owned();
-    Ok(RemoteMediaSource {
-        url,
-        mime_type,
-        diagnostics: init_report
-            .diagnostics
-            .into_iter()
-            .chain(outcome.diagnostics)
-            .collect(),
-    })
 }
 
 fn run_library_scan(app: AppHandle, folder: PathBuf) {
@@ -2121,7 +2105,7 @@ mod tests {
         let bundled_package = root.join("bundled-plugins/runtime-demo");
         fs::create_dir_all(&bundled_package).expect("bundled Plugin directory should be created");
         fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins/runtime-demo/plugin.json"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/plugins/runtime-demo/plugin.json"),
             bundled_package.join("plugin.json"),
         )
         .expect("bundled Plugin manifest should be copied");
@@ -2172,7 +2156,7 @@ mod tests {
         let bundled_package = root.join("bundled-plugins/runtime-demo");
         fs::create_dir_all(&bundled_package).expect("bundled Plugin directory should be created");
         fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins/runtime-demo/plugin.json"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/plugins/runtime-demo/plugin.json"),
             bundled_package.join("plugin.json"),
         )
         .expect("bundled Plugin manifest should be copied");
@@ -2228,7 +2212,7 @@ mod tests {
         let bundled_package = root.join("bundled-plugins/runtime-demo");
         fs::create_dir_all(&bundled_package).expect("bundled Plugin directory should be created");
         fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins/runtime-demo/plugin.json"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/plugins/runtime-demo/plugin.json"),
             bundled_package.join("plugin.json"),
         )
         .expect("bundled Plugin manifest should be copied");

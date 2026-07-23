@@ -3,7 +3,7 @@
   "id": "fika.runtime-demo",
   "name": "Fika Runtime Demo",
   "version": "0.1.0",
-  "description": "A bundled Source Provider used to verify Plugin lifecycle and runtime permissions.",
+  "description": "A test Source Provider used to verify Plugin lifecycle and runtime permissions.",
   "author": "Fika Music",
   "providerEntrypoints": [
     {

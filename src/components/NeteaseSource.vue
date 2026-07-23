@@ -25,7 +25,7 @@ import {
 import {
   audioSourceLabel,
   resolveAudioSourceTrack,
-  type AudioSourceFamily,
+  type AudioSourceId,
   type AudioSourceOption,
 } from "../lib/audio-source-api";
 import {
@@ -47,14 +47,15 @@ import {
 
 const props = defineProps<{
   streamQuality: SourceQuality;
-  playbackSource: AudioSourceFamily;
+  playbackSource: AudioSourceId;
   audioSources: AudioSourceOption[];
 }>();
 
 const emit = defineEmits<{
   playbackReady: [playback: NeteasePlayback];
-  "update:playbackSource": [source: AudioSourceFamily];
+  "update:playbackSource": [source: AudioSourceId];
   openPlugins: [];
+  openAudioSources: [];
 }>();
 
 type NeteaseTab = "recommendations" | "playlists" | "audit";
@@ -434,7 +435,7 @@ async function disconnectAccount() {
 }
 
 async function playTrack(track: RemoteTrack) {
-  if (isPlayingTrackId.value) {
+  if (isPlayingTrackId.value || !props.playbackSource) {
     return;
   }
   isPlayingTrackId.value = track.id;
@@ -444,7 +445,7 @@ async function playTrack(track: RemoteTrack) {
   activePlaybackRequestId = requestId;
   try {
     const source = await resolveAudioSourceTrack({
-      family: playbackSource,
+      audioSourceId: playbackSource,
       source: track.source,
       trackId: track.id,
       quality: props.streamQuality,
@@ -673,11 +674,12 @@ function normalizeError(error: unknown): string {
         <select
           :value="playbackSource"
           class="select select-sm w-32 max-w-full"
-          :disabled="Boolean(isPlayingTrackId)"
+          :disabled="Boolean(isPlayingTrackId) || !audioSources.length"
           aria-label="NetEase playback source"
           title="Playback source"
           @change="selectPlaybackSource"
         >
+          <option v-if="!audioSources.length" value="">No audio source</option>
           <option
             v-for="source in audioSources"
             :key="source.value"
@@ -744,6 +746,18 @@ function normalizeError(error: unknown): string {
       <span class="min-w-0 flex-1">{{ sourceNotice }}</span>
       <button class="btn btn-square btn-ghost btn-sm" type="button" aria-label="Dismiss NetEase notice" @click="sourceNotice = null">
         <X :size="16" aria-hidden="true" />
+      </button>
+    </div>
+
+    <div
+      v-if="isPluginReady && !audioSources.length"
+      role="status"
+      class="alert alert-warning alert-soft m-4"
+    >
+      <AlertCircle :size="18" aria-hidden="true" />
+      <span class="min-w-0 flex-1">No enabled audio source is available.</span>
+      <button class="btn btn-sm" type="button" @click="emit('openAudioSources')">
+        Open Audio Sources
       </button>
     </div>
 
@@ -833,7 +847,7 @@ function normalizeError(error: unknown): string {
                   <button
                     class="btn btn-square btn-ghost btn-sm"
                     type="button"
-                    :disabled="Boolean(isPlayingTrackId)"
+                    :disabled="Boolean(isPlayingTrackId) || !playbackSource"
                     :aria-label="`Play ${track.title}`"
                     title="Play"
                     @click="playTrack(track)"
@@ -898,7 +912,7 @@ function normalizeError(error: unknown): string {
             <tbody>
               <tr v-for="track in selectedPlaylist.tracks" :key="track.id">
                 <td>
-                  <button class="btn btn-square btn-ghost btn-sm" type="button" :disabled="Boolean(isPlayingTrackId)" :aria-label="`Play ${track.title}`" title="Play" @click="playTrack(track)">
+                  <button class="btn btn-square btn-ghost btn-sm" type="button" :disabled="Boolean(isPlayingTrackId) || !playbackSource" :aria-label="`Play ${track.title}`" title="Play" @click="playTrack(track)">
                     <RefreshCw v-if="isPlayingTrackId === track.id" class="animate-spin" :size="15" aria-hidden="true" />
                     <Play v-else :size="15" aria-hidden="true" />
                   </button>

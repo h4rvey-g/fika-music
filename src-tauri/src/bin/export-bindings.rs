@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use fika_music_lib::audio_source_system::{AudioSourceCommandError, AudioSourceRecord};
 use fika_music_lib::lyrics::{LocalTrackPlaybackDetails, TrackLyricsQuery};
 use fika_music_lib::netease::{
     NeteaseAccount, NeteaseMutationAudit, NeteaseQrLoginPoll, NeteaseQrLoginStart,
@@ -15,7 +16,7 @@ use fika_music_lib::{
     LibrarySortDirection, LibrarySortField, LibraryTaskState, LibraryTextField, LibraryViewItem,
     LibraryViewItemKind, LibraryViewRange, LocalTrack, MediaSource, MetadataLookupItemResult,
     MetadataLookupTaskStatus, NeteaseCommandError, PluginCommandError, RemoteCommandError,
-    RemoteMediaSource, RemoteSearchResults, ScanProgressEvent, ScanStatus, TAURI_COMMAND_NAMES,
+    ScanProgressEvent, ScanStatus, TAURI_COMMAND_NAMES,
 };
 use ts_rs::{Config, TS};
 
@@ -83,14 +84,14 @@ fn generate(output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     export_all::<MediaSource>(&config)?;
     export_all::<LocalTrackPlaybackDetails>(&config)?;
     export_all::<TrackLyricsQuery>(&config)?;
-    export_all::<RemoteMediaSource>(&config)?;
-    export_all::<RemoteSearchResults>(&config)?;
     export_all::<RemoteCommandError>(&config)?;
     export_all::<ScanStatus>(&config)?;
     export_all::<ScanProgressEvent>(&config)?;
     export_all::<PluginCommandError>(&config)?;
+    export_all::<AudioSourceCommandError>(&config)?;
     export_all::<NeteaseCommandError>(&config)?;
     export_all::<PluginRecord>(&config)?;
+    export_all::<AudioSourceRecord>(&config)?;
     export_all::<SourceRequest>(&config)?;
     export_all::<SourceRequestOutcome>(&config)?;
     export_all::<NeteaseAccount>(&config)?;

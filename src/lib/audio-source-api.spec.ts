@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildAudioSourceOptions,
+  importAudioSource,
+  listAudioSources,
   resolveAudioSourceTrack,
+  type AudioSourceRecord,
 } from "./audio-source-api";
-import type { PluginRecord } from "./plugin-api";
 
 const { invokeMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
@@ -13,89 +15,111 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
 }));
 
+function audioSourceRecord(
+  overrides: Partial<AudioSourceRecord> = {},
+): AudioSourceRecord {
+  return {
+    id: "imported-source",
+    name: "Imported Source",
+    version: "1.0.0",
+    description: null,
+    author: null,
+    homepage: null,
+    path: "/audio-sources/imported-source",
+    adapter: "static-templates",
+    state: "enabled",
+    enabled: true,
+    permissionsReviewed: true,
+    declaredCapabilities: ["network:any"],
+    grantedCapabilities: ["network:any"],
+    sources: [
+      {
+        id: "wy",
+        name: "NetEase",
+        type: "music",
+        actions: ["musicUrl"],
+        qualities: ["128k", "320k"],
+      },
+    ],
+    diagnostics: [],
+    canRemove: true,
+    canEnable: true,
+    ...overrides,
+  };
+}
+
 describe("audio source API", () => {
   beforeEach(() => {
     invokeMock.mockReset();
   });
 
-  it("resolves a platform track through the selected imported audio source", async () => {
-    invokeMock.mockResolvedValue({
-      url: "https://cdn.example.test/track.mp3",
-      mimeType: "audio/mpeg",
-      diagnostics: [],
-    });
+  it("uses dedicated list and import commands", async () => {
+    invokeMock
+      .mockResolvedValueOnce([audioSourceRecord()])
+      .mockResolvedValueOnce(audioSourceRecord());
 
-    await resolveAudioSourceTrack({
-      family: "changqing",
-      source: "wy",
-      trackId: "347230",
-      quality: "320k",
-      requestId: "request-1",
-    });
+    await listAudioSources();
+    await importAudioSource("/downloads/source.js");
 
-    expect(invokeMock).toHaveBeenCalledWith("resolve_imported_lx_template_music_url", {
-      family: "changqing",
-      source: "wy",
-      trackId: "347230",
-      quality: "320k",
-      requestId: "request-1",
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "list_audio_sources");
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "import_audio_source", {
+      sourcePath: "/downloads/source.js",
     });
   });
 
-  it("builds options from enabled imported LX plugins", () => {
-    const importedPlugin = {
-      id: "imported-lx-source",
-      name: "Imported LX Source",
-      state: "enabled",
-      enabled: true,
-      providers: [
-        {
-          initialized: true,
-          entrypoint:
-            "builtin:lx-js:static-templates:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-          sources: [{ actions: ["musicUrl"] }],
-        },
-      ],
-    } as PluginRecord;
-
-    expect(buildAudioSourceOptions([importedPlugin])).toContainEqual({
-      value: "plugin:imported-lx-source",
-      label: "Imported LX Source",
-    });
+  it("builds playback options only from enabled audio source records", () => {
+    expect(
+      buildAudioSourceOptions([
+        audioSourceRecord(),
+        audioSourceRecord({ id: "disabled", name: "Disabled", enabled: false }),
+      ]),
+    ).toEqual([{ value: "imported-source", label: "Imported Source" }]);
   });
 
-  it("dispatches playback through an enabled imported LX plugin", async () => {
+  it("dispatches musicUrl through the selected audio source", async () => {
     invokeMock.mockResolvedValue({
       response: {
         action: "musicUrl",
         data: "https://cdn.example.test/track.mp3",
       },
       diagnostics: [
-        { sourceId: "imported-lx-source", level: "info", message: "resolved" },
+        { sourceId: "imported-source", level: "info", message: "resolved" },
       ],
     });
 
     await expect(
       resolveAudioSourceTrack({
-        family: "plugin:imported-lx-source",
+        audioSourceId: "imported-source",
         source: "wy",
         trackId: "347230",
         quality: "320k",
-        requestId: "request-2",
+        requestId: "request-1",
       }),
     ).resolves.toMatchObject({
       url: "https://cdn.example.test/track.mp3",
       mimeType: "audio/mpeg",
     });
-    expect(invokeMock).toHaveBeenCalledWith("dispatch_plugin_request", {
-      pluginId: "imported-lx-source",
+    expect(invokeMock).toHaveBeenCalledWith("dispatch_audio_source_request", {
+      audioSourceId: "imported-source",
       request: {
         action: "musicUrl",
         source: "wy",
         musicInfo: { id: "347230" },
         quality: "320k",
       },
-      requestId: "request-2",
+      requestId: "request-1",
     });
+  });
+
+  it("does not resolve playback without a configured source", async () => {
+    await expect(
+      resolveAudioSourceTrack({
+        audioSourceId: "",
+        source: "wy",
+        trackId: "347230",
+        quality: "320k",
+      }),
+    ).rejects.toThrow("No audio source is configured");
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });

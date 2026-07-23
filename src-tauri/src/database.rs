@@ -2,7 +2,7 @@ use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
 
 #[cfg(test)]
-const CURRENT_SCHEMA_VERSION: i64 = 5;
+const CURRENT_SCHEMA_VERSION: i64 = 6;
 
 const INITIAL_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS local_tracks (
@@ -150,6 +150,33 @@ fn migrations() -> Migrations<'static> {
             )?;
             Ok(())
         }),
+        M::up(
+            "
+            CREATE TABLE IF NOT EXISTS audio_source_states (
+                audio_source_id TEXT PRIMARY KEY,
+                package_path TEXT NOT NULL,
+                manifest_fingerprint TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                permissions_reviewed INTEGER NOT NULL DEFAULT 0,
+                granted_capabilities TEXT NOT NULL DEFAULT '[]',
+                installed_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS audio_source_diagnostics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                audio_source_id TEXT NOT NULL,
+                code TEXT NOT NULL,
+                level TEXT NOT NULL,
+                source_id TEXT,
+                message TEXT NOT NULL,
+                timestamp INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_audio_source_diagnostics_source
+                ON audio_source_diagnostics(audio_source_id, id);
+            ",
+        ),
     ])
 }
 
@@ -235,6 +262,8 @@ mod tests {
         assert!(has_library_column(&connection, "metadata_version"));
         assert!(has_table(&connection, "app_settings"));
         assert!(has_table(&connection, "album_art_lookups"));
+        assert!(has_table(&connection, "audio_source_states"));
+        assert!(has_table(&connection, "audio_source_diagnostics"));
         assert!(has_column(
             &connection,
             "album_art_lookups",

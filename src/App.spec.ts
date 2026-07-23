@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent } from "vue";
 import App from "./App.vue";
 import type { PluginRecord } from "./lib/plugin-api";
+import type { AudioSourceRecord } from "./lib/audio-source-api";
 import { THEME_OPTIONS, UI_PREFERENCES_STORAGE_KEY } from "./lib/ui-preferences";
 
 const tauriMocks = vi.hoisted(() => ({
@@ -11,6 +12,7 @@ const tauriMocks = vi.hoisted(() => ({
 }));
 
 let listedPlugins: PluginRecord[] = [];
+let listedAudioSources: AudioSourceRecord[] = [];
 
 function pluginRecord(overrides: Partial<PluginRecord> = {}): PluginRecord {
   return {
@@ -45,6 +47,39 @@ function pluginRecord(overrides: Partial<PluginRecord> = {}): PluginRecord {
   };
 }
 
+function audioSourceRecord(
+  overrides: Partial<AudioSourceRecord> = {},
+): AudioSourceRecord {
+  return {
+    id: "imported-source",
+    name: "Imported Source",
+    version: "1.0.0",
+    description: null,
+    author: null,
+    homepage: null,
+    path: "/audio-sources/imported-source",
+    adapter: "static-templates",
+    state: "enabled",
+    enabled: true,
+    permissionsReviewed: true,
+    declaredCapabilities: ["network:any"],
+    grantedCapabilities: ["network:any"],
+    sources: [
+      {
+        id: "wy",
+        name: "NetEase",
+        type: "music",
+        actions: ["musicUrl"],
+        qualities: ["128k", "320k"],
+      },
+    ],
+    diagnostics: [],
+    canRemove: true,
+    canEnable: true,
+    ...overrides,
+  };
+}
+
 vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => path,
   invoke: tauriMocks.invoke,
@@ -59,6 +94,14 @@ vi.mock("./components/PluginManager.vue", () => ({
     name: "PluginManager",
     emits: ["pluginsChanged"],
     template: '<div data-testid="plugin-manager">Plugin manager</div>',
+  },
+}));
+
+vi.mock("./components/AudioSourceManager.vue", () => ({
+  default: {
+    name: "AudioSourceManager",
+    emits: ["sourcesChanged"],
+    template: '<div data-testid="audio-source-manager">Audio source manager</div>',
   },
 }));
 
@@ -112,7 +155,7 @@ vi.mock("./components/NeteaseSource.vue", () => ({
       playbackSource: { type: String, required: true },
       audioSources: { type: Array, required: true },
     },
-    emits: ["playbackReady", "update:playbackSource", "openPlugins"],
+    emits: ["playbackReady", "update:playbackSource", "openPlugins", "openAudioSources"],
     template: '<div data-testid="netease-source">NetEase source</div>',
   }),
 }));
@@ -121,6 +164,7 @@ describe("application shell", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     listedPlugins = [];
+    listedAudioSources = [];
     localStorage.clear();
     document.documentElement.removeAttribute("data-theme");
     vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
@@ -143,6 +187,9 @@ describe("application shell", () => {
       }
       if (command === "list_plugins") {
         return Promise.resolve(listedPlugins);
+      }
+      if (command === "list_audio_sources") {
+        return Promise.resolve(listedAudioSources);
       }
       return Promise.resolve(null);
     });
@@ -181,6 +228,13 @@ describe("application shell", () => {
     expect(wrapper.get('footer[aria-label="Playback bar"]').element).toBe(playbackBar.element);
     expect(settingsButton?.attributes("aria-current")).toBe("page");
     expect(drawerToggle.element.checked).toBe(false);
+
+    const sourcesButton = navigation
+      .findAll("button")
+      .find((button) => button.text() === "Audio Sources");
+    await sourcesButton?.trigger("click");
+    expect(wrapper.find('[data-testid="audio-source-manager"]').exists()).toBe(true);
+    expect(wrapper.findComponent({ name: "NowPlayingPanel" }).exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -249,19 +303,23 @@ describe("application shell", () => {
         enabled: true,
       }),
     ];
+    listedAudioSources = [
+      audioSourceRecord({ id: "source-one", name: "Source One" }),
+      audioSourceRecord({ id: "source-two", name: "Source Two" }),
+    ];
     const wrapper = mount(App);
     await flushPromises();
 
     await wrapper.get('button[data-plugin-id="fika.netease"]').trigger("click");
     const neteaseSource = wrapper.getComponent({ name: "NeteaseSource" });
-    expect(neteaseSource.props("playbackSource")).toBe("nianxin");
+    expect(neteaseSource.props("playbackSource")).toBe("source-one");
 
-    neteaseSource.vm.$emit("update:playbackSource", "changqing");
+    neteaseSource.vm.$emit("update:playbackSource", "source-two");
     await wrapper.vm.$nextTick();
-    expect(neteaseSource.props("playbackSource")).toBe("changqing");
+    expect(neteaseSource.props("playbackSource")).toBe("source-two");
     expect(
-      JSON.parse(localStorage.getItem(UI_PREFERENCES_STORAGE_KEY) ?? "{}").audioSourceFamily,
-    ).toBe("changqing");
+      JSON.parse(localStorage.getItem(UI_PREFERENCES_STORAGE_KEY) ?? "{}").audioSourceId,
+    ).toBe("source-two");
 
     neteaseSource.vm.$emit("playbackReady", {
       track: {
@@ -276,7 +334,7 @@ describe("application shell", () => {
       },
       url: "https://cdn.example.test/Test%20Track.mp3",
       mimeType: "audio/mpeg",
-      providerName: "长青音源",
+      providerName: "Source Two",
       diagnostics: [],
     });
     await flushPromises();
@@ -285,11 +343,11 @@ describe("application shell", () => {
       "https://cdn.example.test/Test%20Track.mp3",
     );
     expect(wrapper.get('footer[aria-label="Playback bar"]').text()).toContain("Test Track");
-    expect(wrapper.get('footer[aria-label="Playback bar"]').text()).toContain("长青音源");
+    expect(wrapper.get('footer[aria-label="Playback bar"]').text()).toContain("Source Two");
     wrapper.unmount();
   });
 
-  it("offers enabled imported LX Plugins as playback sources", async () => {
+  it("offers enabled standalone audio sources without adding Plugin entries", async () => {
     listedPlugins = [
       pluginRecord({
         id: "fika.netease",
@@ -297,31 +355,9 @@ describe("application shell", () => {
         state: "enabled",
         enabled: true,
       }),
-      pluginRecord({
-        id: "imported-lx-source",
-        name: "Imported LX Source",
-        state: "enabled",
-        enabled: true,
-        providers: [
-          {
-            id: "imported-lx-source-provider",
-            entrypoint:
-              "builtin:lx-js:static-templates:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            initialized: true,
-            sources: [
-              {
-                id: "wy",
-                name: "NetEase",
-                type: "music",
-                actions: ["musicUrl"],
-                qualities: ["128k", "320k", "flac"],
-              },
-            ],
-            runtimeReport: null,
-            diagnostics: [],
-          },
-        ],
-      }),
+    ];
+    listedAudioSources = [
+      audioSourceRecord({ id: "imported-lx-source", name: "Imported LX Source" }),
     ];
     const wrapper = mount(App);
     await flushPromises();
@@ -329,9 +365,10 @@ describe("application shell", () => {
     await wrapper.get('button[data-plugin-id="fika.netease"]').trigger("click");
 
     expect(wrapper.getComponent({ name: "NeteaseSource" }).props("audioSources")).toContainEqual({
-      value: "plugin:imported-lx-source",
+      value: "imported-lx-source",
       label: "Imported LX Source",
     });
+    expect(wrapper.find('button[data-plugin-id="imported-lx-source"]').exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -454,6 +491,9 @@ describe("application shell", () => {
       }
       if (command === "list_plugins") {
         return Promise.resolve(listedPlugins);
+      }
+      if (command === "list_audio_sources") {
+        return Promise.resolve(listedAudioSources);
       }
       return Promise.resolve(null);
     });

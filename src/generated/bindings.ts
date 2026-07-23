@@ -10,6 +10,14 @@ export type AlbumCoverResult = { groupId: string, status: AlbumCoverStatus, data
 
 export type AlbumCoverStatus = "embedded" | "downloaded" | "placeholder" | "authorizationRequired" | "needsReview" | "pending" | "failed";
 
+export type AudioSourceCommandError = { message: string, diagnostics: Array<AudioSourceDiagnostic>, };
+
+export type AudioSourceDiagnostic = { code: string, level: DiagnosticLevel, sourceId: string | null, message: string, timestamp: number, };
+
+export type AudioSourceRecord = { id: string, name: string, version: string | null, description: string | null, author: string | null, homepage: string | null, path: string, adapter: string | null, state: AudioSourceState, enabled: boolean, permissionsReviewed: boolean, declaredCapabilities: Array<SourceCapability>, grantedCapabilities: Array<SourceCapability>, sources: Array<SourceInfo>, diagnostics: Array<AudioSourceDiagnostic>, canRemove: boolean, canEnable: boolean, };
+
+export type AudioSourceState = "disabled" | "needs-review" | "enabled" | "incompatible" | "error" | "invalid";
+
 export type DiagnosticLevel = "info" | "warn" | "error" | "security";
 
 export type LibraryAlbumGroup = { id: string, title: string | null, albumArtist: string | null, year: number | null, matchedTracks: number, totalTracks: number, totalDurationSeconds: number, startIndex: number, endIndex: number, isUngrouped: boolean, };
@@ -90,10 +98,6 @@ export type PluginState = "disabled" | "needs-review" | "enabled" | "incompatibl
 
 export type RemoteCommandError = { message: string, diagnostics: Array<SourceDiagnostic>, };
 
-export type RemoteMediaSource = { url: string, mimeType: string, diagnostics: Array<SourceDiagnostic>, };
-
-export type RemoteSearchResults = { isEnd: boolean, total: number | null, list: Array<SourceSearchResult>, diagnostics: Array<SourceDiagnostic>, };
-
 export type ResolvedLyrics = { source: LyricsSource, provider: string | null, isSynced: boolean, lines: Array<LyricLine>, savedPath: string | null, matchScore: number | null, };
 
 export type ScanProgressEvent = { status: ScanStatus, message: string | null, };
@@ -165,13 +169,20 @@ export const TAURI_COMMANDS = {
   localTrackPlaybackDetails: "local_track_playback_details",
   resolveRemoteTrackLyrics: "resolve_remote_track_lyrics",
   cancelSourceRequest: "cancel_source_request",
+  listAudioSources: "list_audio_sources",
+  selectAudioSourceFile: "select_audio_source_file",
+  refreshAudioSources: "refresh_audio_sources",
+  importAudioSource: "import_audio_source",
+  importAudioSourceUrl: "import_audio_source_url",
+  setAudioSourceCapabilities: "set_audio_source_capabilities",
+  setAudioSourceEnabled: "set_audio_source_enabled",
+  removeAudioSource: "remove_audio_source",
+  clearAudioSourceDiagnostics: "clear_audio_source_diagnostics",
+  dispatchAudioSourceRequest: "dispatch_audio_source_request",
   listPlugins: "list_plugins",
   selectPluginPackage: "select_plugin_package",
-  selectLxJsSource: "select_lx_js_source",
   refreshPlugins: "refresh_plugins",
   installPluginPackage: "install_plugin_package",
-  importLxJsSource: "import_lx_js_source",
-  importLxJsSourceUrl: "import_lx_js_source_url",
   setPluginCapabilities: "set_plugin_capabilities",
   setPluginEnabled: "set_plugin_enabled",
   removePlugin: "remove_plugin",
@@ -183,9 +194,6 @@ export const TAURI_COMMANDS = {
   listNeteaseAccounts: "list_netease_accounts",
   disconnectNeteaseAccount: "disconnect_netease_account",
   listNeteaseMutationAudit: "list_netease_mutation_audit",
-  resolveImportedLxTemplateMusicUrl: "resolve_imported_lx_template_music_url",
-  searchQishuiMusic: "search_qishui_music",
-  resolveQishuiMusicUrl: "resolve_qishui_music_url",
 } as const;
 
 export type TauriCommand = (typeof TAURI_COMMANDS)[keyof typeof TAURI_COMMANDS];

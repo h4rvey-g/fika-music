@@ -1,4 +1,4 @@
-import { isAudioSourceFamily, type AudioSourceFamily } from "./audio-source-api";
+import { isAudioSourceId, type AudioSourceId } from "./audio-source-api";
 
 export const THEME_OPTIONS = [
   { value: "system", label: "System" },
@@ -48,7 +48,7 @@ export type UiPreferences = {
   theme: ThemePreference;
   density: LayoutDensity;
   streamQuality: StreamQuality;
-  audioSourceFamily: AudioSourceFamily;
+  audioSourceId: AudioSourceId;
   volume: number;
   playbackMode: PlaybackMode;
 };
@@ -62,7 +62,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   theme: "system",
   density: "comfortable",
   streamQuality: "128k",
-  audioSourceFamily: "nianxin",
+  audioSourceId: "",
   volume: 0.8,
   playbackMode: "sequential",
 };
@@ -96,7 +96,11 @@ export function saveUiPreferences(
 }
 
 export function parseUiPreferences(value: unknown): UiPreferences {
-  const candidate = value && typeof value === "object" ? (value as Partial<UiPreferences>) : {};
+  const candidate =
+    value && typeof value === "object"
+      ? (value as Partial<UiPreferences> & { audioSourceFamily?: unknown })
+      : {};
+  const storedAudioSourceId = candidate.audioSourceId ?? candidate.audioSourceFamily;
 
   return {
     theme: isThemePreference(candidate.theme) ? candidate.theme : DEFAULT_UI_PREFERENCES.theme,
@@ -104,9 +108,9 @@ export function parseUiPreferences(value: unknown): UiPreferences {
     streamQuality: isStreamQuality(candidate.streamQuality)
       ? candidate.streamQuality
       : DEFAULT_UI_PREFERENCES.streamQuality,
-    audioSourceFamily: isAudioSourceFamily(candidate.audioSourceFamily)
-      ? candidate.audioSourceFamily
-      : DEFAULT_UI_PREFERENCES.audioSourceFamily,
+    audioSourceId: isAudioSourceId(storedAudioSourceId)
+      ? storedAudioSourceId
+      : DEFAULT_UI_PREFERENCES.audioSourceId,
     volume:
       typeof candidate.volume === "number" && Number.isFinite(candidate.volume)
         ? Math.min(1, Math.max(0, candidate.volume))

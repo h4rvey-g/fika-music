@@ -27,15 +27,16 @@ import {
   X,
 } from "@lucide/vue";
 import LibraryBrowser from "./components/LibraryBrowser.vue";
+import AudioSourceManager from "./components/AudioSourceManager.vue";
 import PluginManager from "./components/PluginManager.vue";
 import PluginWorkspace from "./components/PluginWorkspace.vue";
 import NeteaseSource from "./components/NeteaseSource.vue";
 import NowPlayingPanel from "./components/NowPlayingPanel.vue";
 import { NETEASE_PLUGIN_ID, type NeteasePlayback } from "./lib/netease-api";
 import {
-  audioSourceLabel,
   buildAudioSourceOptions,
-  resolveAudioSourceTrack,
+  listAudioSources,
+  type AudioSourceRecord,
 } from "./lib/audio-source-api";
 import { listPlugins, type PluginRecord } from "./lib/plugin-api";
 import { PlayCountTracker } from "./lib/play-count-tracker";
@@ -46,9 +47,6 @@ import type {
   LocalTrack,
   LocalTrackPlaybackDetails,
   MediaSource,
-  RemoteCommandError,
-  RemoteMediaSource,
-  RemoteSearchResults,
   ResolvedLyrics,
   ScanProgressEvent,
   ScanStatus,
@@ -99,7 +97,7 @@ const mainSections = [
   {
     id: "sources",
     label: "Audio Sources",
-    description: "Search remote providers and resolve known platform track IDs",
+    description: "Import sources and manage their permissions",
     icon: AudioLines,
   },
   {
@@ -127,6 +125,7 @@ const selectedFolder = ref<string | null>(null);
 const activeSection = ref<ActiveSection>("local");
 const activePluginId = ref<string | null>(null);
 const pluginRecords = ref<PluginRecord[]>([]);
+const audioSourceRecords = ref<AudioSourceRecord[]>([]);
 const sidebarOpen = ref(false);
 const activeTrack = ref<LocalTrack | null>(null);
 const activeRemoteTitle = ref<string | null>(null);
@@ -148,7 +147,6 @@ const lyricsError = ref<string | null>(null);
 const isChoosingFolder = ref(false);
 const isStartingScan = ref(false);
 const isPreparingPlayback = ref(false);
-const isResolvingRemote = ref(false);
 const appError = ref<string | null>(null);
 const scanMessage = ref<string | null>(null);
 const audioElement = ref<HTMLAudioElement | null>(null);
@@ -160,24 +158,15 @@ const localQueueTotal = ref(0);
 const localQueueIndex = ref(-1);
 const queuedLocalTrack = ref<LocalTrack | null>(null);
 const localQueueActive = ref(false);
-const remoteFamily = ref(savedUiPreferences.audioSourceFamily);
-const remoteSource = ref("wy");
+const playbackAudioSourceId = ref(savedUiPreferences.audioSourceId);
 const remoteQuality = ref(savedUiPreferences.streamQuality);
-const remoteTrackId = ref("");
-const remoteDiagnostics = ref<string[]>([]);
-const remoteSearchKeyword = ref("");
-const remoteSearchResults = ref<SourceSearchResult[]>([]);
-const remoteSearchTotal = ref<number | null>(null);
-const isSearchingRemote = ref(false);
-const activeRemoteRequestId = ref<string | null>(null);
-const isCancellingRemoteRequest = ref(false);
 
 let unlistenScanProgress: UnlistenFn | null = null;
 let playbackDetailsGeneration = 0;
 const playCountTracker = new PlayCountTracker();
 
 const enabledPlugins = computed(() => pluginRecords.value.filter((plugin) => plugin.enabled));
-const availableAudioSources = computed(() => buildAudioSourceOptions(pluginRecords.value));
+const availableAudioSources = computed(() => buildAudioSourceOptions(audioSourceRecords.value));
 const activePlugin = computed(
   () => enabledPlugins.value.find((plugin) => plugin.id === activePluginId.value) ?? null,
 );
@@ -205,7 +194,6 @@ const nowPlayingSubtitle = computed(() => {
     ? activeRemoteProvider.value || "Remote Source Provider"
     : "Select a local or remote track";
 });
-const hasActiveRemoteRequest = computed(() => activeRemoteRequestId.value !== null);
 const volumePercent = computed(() => Math.round(volume.value * 100));
 const canGoPrevious = computed(() => {
   if (
@@ -256,33 +244,41 @@ watch(audioUrl, () => {
   playbackPosition.value = 0;
   playbackDuration.value = 0;
 });
-watch([themePreference, layoutDensity, remoteQuality, remoteFamily, volume, playbackMode], () => {
-  saveUiPreferences({
-    theme: themePreference.value,
-    density: layoutDensity.value,
-    streamQuality: remoteQuality.value,
-    audioSourceFamily: remoteFamily.value,
-    volume: volume.value,
-    playbackMode: playbackMode.value,
-  });
-});
+watch(
+  [
+    themePreference,
+    layoutDensity,
+    remoteQuality,
+    playbackAudioSourceId,
+    volume,
+    playbackMode,
+  ],
+  () => {
+    saveUiPreferences({
+      theme: themePreference.value,
+      density: layoutDensity.value,
+      streamQuality: remoteQuality.value,
+      audioSourceId: playbackAudioSourceId.value,
+      volume: volume.value,
+      playbackMode: playbackMode.value,
+    });
+  },
+);
 
 onMounted(async () => {
-  await Promise.all([loadScanStatus(), bindScanProgress(), loadPluginNavigation()]);
+  await Promise.all([
+    loadScanStatus(),
+    bindScanProgress(),
+    loadPluginNavigation(),
+    loadAudioSourceNavigation(),
+  ]);
 });
 
 onBeforeUnmount(() => {
   unlistenScanProgress?.();
   playbackDetailsGeneration += 1;
   sampleListeningTime();
-  void cancelActiveRemoteRequest();
 });
-
-function beginRemoteRequest() {
-  const requestId = crypto.randomUUID();
-  activeRemoteRequestId.value = requestId;
-  return requestId;
-}
 
 function selectSection(section: AppSection) {
   activeSection.value = section;
@@ -304,18 +300,30 @@ async function loadPluginNavigation() {
   }
 }
 
+async function loadAudioSourceNavigation() {
+  try {
+    updateAudioSourceRecords(await listAudioSources());
+  } catch (error) {
+    appError.value = normalizeError(error);
+  }
+}
+
 function updatePluginRecords(records: PluginRecord[]) {
   pluginRecords.value = records;
-  const sourceOptions = buildAudioSourceOptions(records);
-  if (!sourceOptions.some((source) => source.value === remoteFamily.value)) {
-    remoteFamily.value = DEFAULT_UI_PREFERENCES.audioSourceFamily;
-  }
   if (
     activeSection.value === "plugin" &&
     !records.some((plugin) => plugin.id === activePluginId.value && plugin.enabled)
   ) {
     activeSection.value = "plugins";
     activePluginId.value = null;
+  }
+}
+
+function updateAudioSourceRecords(records: AudioSourceRecord[]) {
+  audioSourceRecords.value = records;
+  const sourceOptions = buildAudioSourceOptions(records);
+  if (!sourceOptions.some((source) => source.value === playbackAudioSourceId.value)) {
+    playbackAudioSourceId.value = sourceOptions[0]?.value ?? "";
   }
 }
 
@@ -336,25 +344,9 @@ function resetUiPreferences() {
   themePreference.value = DEFAULT_UI_PREFERENCES.theme;
   layoutDensity.value = DEFAULT_UI_PREFERENCES.density;
   remoteQuality.value = DEFAULT_UI_PREFERENCES.streamQuality;
-  remoteFamily.value = DEFAULT_UI_PREFERENCES.audioSourceFamily;
+  playbackAudioSourceId.value = DEFAULT_UI_PREFERENCES.audioSourceId;
   volume.value = DEFAULT_UI_PREFERENCES.volume;
   playbackMode.value = DEFAULT_UI_PREFERENCES.playbackMode;
-}
-
-async function cancelActiveRemoteRequest() {
-  const requestId = activeRemoteRequestId.value;
-  if (!requestId || isCancellingRemoteRequest.value) {
-    return;
-  }
-
-  isCancellingRemoteRequest.value = true;
-  try {
-    await invoke(TAURI_COMMANDS.cancelSourceRequest, { requestId });
-  } catch (error) {
-    appError.value = normalizeError(error);
-  } finally {
-    isCancellingRemoteRequest.value = false;
-  }
 }
 
 async function bindScanProgress() {
@@ -568,148 +560,11 @@ function showLibraryError(message: string) {
   appError.value = message;
 }
 
-async function playRemoteTrack() {
-  if (hasActiveRemoteRequest.value) {
-    return;
-  }
-  if (!remoteTrackId.value.trim()) {
-    appError.value = "Enter a remote track id first.";
-    return;
-  }
-
-  isResolvingRemote.value = true;
-  isPreparingPlayback.value = true;
-  appError.value = null;
-  remoteDiagnostics.value = [];
-  const requestId = beginRemoteRequest();
-
-  try {
-    sampleListeningTime();
-    clearLocalPlaybackQueue();
-    const source = await resolveAudioSourceTrack({
-      family: remoteFamily.value,
-      source: remoteSource.value,
-      trackId: remoteTrackId.value.trim(),
-      quality: remoteQuality.value,
-      requestId,
-    });
-
-    activeTrack.value = null;
-    activeRemoteTitle.value = `${remoteFamily.value}:${remoteSource.value}:${remoteTrackId.value.trim()}`;
-    activeRemoteProvider.value = audioSourceLabel(
-      remoteFamily.value,
-      availableAudioSources.value,
-    );
-    activeSource.value = { url: source.url, mimeType: source.mimeType };
-    audioUrl.value = source.url;
-    remoteDiagnostics.value = source.diagnostics.map((diagnostic) => diagnostic.message);
-    resetPlaybackDetails(null);
-
-    await nextTick();
-    if (audioElement.value) {
-      audioElement.value.volume = volume.value;
-      await audioElement.value.play();
-      isPlaying.value = true;
-    }
-  } catch (error) {
-    appError.value = normalizeRemoteError(error);
-    isPlaying.value = false;
-  } finally {
-    isPreparingPlayback.value = false;
-    isResolvingRemote.value = false;
-    if (activeRemoteRequestId.value === requestId) {
-      activeRemoteRequestId.value = null;
-    }
-  }
-}
-
-async function searchRemoteMusic() {
-  if (hasActiveRemoteRequest.value) {
-    return;
-  }
-  if (!remoteSearchKeyword.value.trim()) {
-    appError.value = "Enter a search keyword first.";
-    return;
-  }
-
-  isSearchingRemote.value = true;
-  appError.value = null;
-  remoteDiagnostics.value = [];
-  const requestId = beginRemoteRequest();
-
-  try {
-    const response = await invoke<RemoteSearchResults>(TAURI_COMMANDS.searchQishuiMusic, {
-      keyword: remoteSearchKeyword.value.trim(),
-      page: 1,
-      pageSize: 20,
-      requestId,
-    });
-
-    remoteSearchResults.value = response.list;
-    remoteSearchTotal.value = response.total;
-    remoteDiagnostics.value = response.diagnostics.map((diagnostic) => diagnostic.message);
-  } catch (error) {
-    appError.value = normalizeRemoteError(error);
-  } finally {
-    isSearchingRemote.value = false;
-    if (activeRemoteRequestId.value === requestId) {
-      activeRemoteRequestId.value = null;
-    }
-  }
-}
-
-async function playRemoteSearchResult(result: SourceSearchResult) {
-  if (hasActiveRemoteRequest.value) {
-    return;
-  }
-  isResolvingRemote.value = true;
-  isPreparingPlayback.value = true;
-  appError.value = null;
-  remoteDiagnostics.value = [];
-  const requestId = beginRemoteRequest();
-
-  try {
-    sampleListeningTime();
-    clearLocalPlaybackQueue();
-    const source = await invoke<RemoteMediaSource>(TAURI_COMMANDS.resolveQishuiMusicUrl, {
-      musicInfo: result.rawInfo,
-      quality: remoteQuality.value,
-      requestId,
-    });
-
-    activeTrack.value = null;
-    activeRemoteTitle.value = `${result.title} - ${result.artist}`;
-    activeRemoteProvider.value = "Qishui Source Provider";
-    activeSource.value = { url: source.url, mimeType: source.mimeType };
-    audioUrl.value = source.url;
-    remoteDiagnostics.value = source.diagnostics.map((diagnostic) => diagnostic.message);
-    void loadRemoteTrackLyrics(lyricsQueryForRemoteTrack(result), result.coverUrl);
-
-    await nextTick();
-    if (audioElement.value) {
-      audioElement.value.volume = volume.value;
-      await audioElement.value.play();
-      isPlaying.value = true;
-    }
-  } catch (error) {
-    appError.value = normalizeRemoteError(error);
-    isPlaying.value = false;
-  } finally {
-    isPreparingPlayback.value = false;
-    isResolvingRemote.value = false;
-    if (activeRemoteRequestId.value === requestId) {
-      activeRemoteRequestId.value = null;
-    }
-  }
-}
-
 async function playNeteasePlayback(playback: NeteasePlayback) {
   sampleListeningTime();
   clearLocalPlaybackQueue();
   isPreparingPlayback.value = true;
   appError.value = null;
-  remoteDiagnostics.value = playback.diagnostics.map((diagnostic) => diagnostic.message);
-
   try {
     activeTrack.value = null;
     activeRemoteTitle.value = `${playback.track.title} - ${playback.track.artist}`;
@@ -1000,16 +855,6 @@ function formatPlaybackTime(seconds: number) {
   return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
 }
 
-function formatDuration(seconds: number | null) {
-  if (!seconds) {
-    return "--:--";
-  }
-
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = Math.floor(seconds % 60);
-  return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
-}
-
 function trackSubtitle(track: LocalTrack) {
   return [track.artist, track.album].filter(Boolean).join(" - ") || track.fileName;
 }
@@ -1026,35 +871,6 @@ function normalizeError(error: unknown) {
   return "Unexpected application error.";
 }
 
-function normalizeRemoteError(error: unknown) {
-  const remoteError = parseRemoteCommandError(error);
-  if (remoteError) {
-    remoteDiagnostics.value = (remoteError.diagnostics ?? [])
-      .map((diagnostic) => diagnostic.message)
-      .filter(Boolean);
-    return remoteError.message;
-  }
-
-  return normalizeError(error);
-}
-
-function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
-  let candidate: unknown = error;
-  if (typeof candidate === "string") {
-    try {
-      candidate = JSON.parse(candidate);
-    } catch {
-      return null;
-    }
-  }
-
-  if (!candidate || typeof candidate !== "object") {
-    return null;
-  }
-
-  const value = candidate as Partial<RemoteCommandError>;
-  return typeof value.message === "string" ? (value as RemoteCommandError) : null;
-}
 </script>
 
 <template>
@@ -1123,12 +939,9 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
         :class="activeSection === 'local' ? 'overflow-hidden' : 'overflow-y-auto'"
       >
         <section
-          v-if="activeSection === 'local' || activeSection === 'sources'"
-          class="mx-auto flex w-full flex-col"
-          :class="[
-            activeSection === 'local' ? 'h-full min-h-0' : 'max-w-7xl',
-            layoutDensity === 'compact' ? 'gap-3 px-3 py-3 lg:px-4' : 'gap-4 px-4 py-4 lg:px-6',
-          ]"
+          v-if="activeSection === 'local'"
+          class="mx-auto flex h-full min-h-0 w-full flex-col"
+          :class="layoutDensity === 'compact' ? 'gap-3 px-3 py-3 lg:px-4' : 'gap-4 px-4 py-4 lg:px-6'"
         >
           <div v-if="appError" role="alert" class="alert alert-error">
             <AlertCircle :size="18" aria-hidden="true" />
@@ -1144,15 +957,8 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
             </button>
           </div>
 
-          <div
-            :class="
-              activeSection === 'local'
-                ? 'grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_20rem] gap-4'
-                : 'block'
-            "
-          >
+          <div class="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_20rem] gap-4">
             <LibraryBrowser
-              v-if="activeSection === 'local'"
               ref="libraryBrowser"
               :active-track-id="activeTrack?.id ?? null"
               :is-playing="isPlaying"
@@ -1166,16 +972,9 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
               @index="startScan"
             />
 
-          <aside
-            :class="
-              activeSection === 'sources'
-                ? 'mx-auto grid w-full max-w-7xl gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]'
-                : 'flex min-h-0 flex-col'
-            "
-          >
+          <aside class="flex min-h-0 flex-col">
           <NowPlayingPanel
-            :class="activeSection === 'sources' ? 'xl:col-start-2 xl:row-start-1' : ''"
-            :fill-height="activeSection === 'local'"
+            fill-height
             :title="nowPlayingTitle"
             :subtitle="nowPlayingSubtitle"
             :cover-url="nowPlayingCoverUrl"
@@ -1187,146 +986,29 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
             @retry-lyrics="retryLyrics"
           />
 
-          <div
-            v-if="activeSection === 'sources'"
-            class="flex min-w-0 flex-col gap-4 xl:col-start-1 xl:row-start-1"
-          >
-          <section
-            v-if="activeSection === 'sources'"
-            class="rounded border border-base-300 bg-base-100 p-4"
-          >
-            <h2 class="text-base font-semibold">Source Tools</h2>
-            <p class="mt-1 text-sm text-base-content/65">
-              Search through the Rust qsvip port, or resolve a known platform ID through bundled LX templates.
-            </p>
-
-            <div class="mt-4 flex gap-2">
-              <input
-                v-model="remoteSearchKeyword"
-                class="input input-sm min-w-0 flex-1"
-                type="text"
-                placeholder="Search remote music"
-                @keyup.enter="searchRemoteMusic"
-              />
-              <button
-                class="btn btn-sm"
-                type="button"
-                :disabled="hasActiveRemoteRequest || !remoteSearchKeyword.trim()"
-                @click="searchRemoteMusic"
-              >
-                <RefreshCw v-if="isSearchingRemote" class="animate-spin" :size="16" aria-hidden="true" />
-                <span v-else>Search</span>
-              </button>
-            </div>
-
-            <div v-if="remoteSearchResults.length" class="mt-3 rounded border border-base-300 bg-base-200/50">
-              <div class="border-b border-base-300 px-3 py-2 text-xs text-base-content/65">
-                qsvip results<span v-if="remoteSearchTotal !== null"> · {{ remoteSearchTotal }}</span>
-              </div>
-              <ul class="list max-h-72 overflow-y-auto">
-                <li v-for="result in remoteSearchResults" :key="result.id" class="list-row px-3 py-2">
-                  <button
-                    class="btn btn-square btn-ghost btn-sm"
-                    type="button"
-                    :disabled="isPreparingPlayback || hasActiveRemoteRequest"
-                    :aria-label="`Play ${result.title}`"
-                    @click="playRemoteSearchResult(result)"
-                  >
-                    <Play :size="15" aria-hidden="true" />
-                  </button>
-                  <div class="min-w-0">
-                    <div class="truncate text-sm font-medium">{{ result.title }}</div>
-                    <div class="truncate text-xs text-base-content/65">
-                      {{ result.artist }}<span v-if="result.album"> · {{ result.album }}</span>
-                    </div>
-                  </div>
-                  <div class="text-right text-xs tabular-nums text-base-content/60">
-                    {{ formatDuration(result.durationSeconds) }}
-                  </div>
-                </li>
-              </ul>
-            </div>
-
-            <div class="mt-4 grid grid-cols-2 gap-2">
-              <label class="flex flex-col gap-1 text-xs">
-                <span>Audio source</span>
-                <select v-model="remoteFamily" class="select select-sm w-full">
-                  <option
-                    v-for="source in availableAudioSources"
-                    :key="source.value"
-                    :value="source.value"
-                  >
-                    {{ source.label }}
-                  </option>
-                </select>
-              </label>
-              <label class="flex flex-col gap-1 text-xs">
-                <span>Source</span>
-                <select v-model="remoteSource" class="select select-sm w-full">
-                  <option value="wy">网易云</option>
-                  <option value="tx">QQ</option>
-                  <option value="kw">酷我</option>
-                  <option value="kg">酷狗</option>
-                  <option value="mg">咪咕</option>
-                </select>
-              </label>
-              <label class="flex flex-col gap-1 text-xs">
-                <span>Quality</span>
-                <select v-model="remoteQuality" class="select select-sm w-full">
-                  <option value="128k">128k</option>
-                  <option value="320k">320k</option>
-                  <option value="flac">flac</option>
-                  <option value="flac24bit">flac24bit</option>
-                </select>
-              </label>
-              <label class="flex flex-col gap-1 text-xs">
-                <span>Track ID</span>
-                <input
-                  v-model="remoteTrackId"
-                  class="input input-sm w-full"
-                  type="text"
-                  placeholder="e.g. 347230"
-                  @keyup.enter="playRemoteTrack"
-                />
-              </label>
-            </div>
-
-            <button
-              class="btn btn-primary btn-sm mt-3 w-full"
-              type="button"
-              :disabled="hasActiveRemoteRequest || !remoteTrackId.trim()"
-              @click="playRemoteTrack"
-            >
-              <RefreshCw v-if="isResolvingRemote" class="animate-spin" :size="16" aria-hidden="true" />
-              <Play v-else :size="16" aria-hidden="true" />
-              Resolve & play
-            </button>
-
-            <button
-              v-if="hasActiveRemoteRequest"
-              class="btn btn-ghost btn-sm mt-2 w-full"
-              type="button"
-              :disabled="isCancellingRemoteRequest"
-              title="Cancel remote request"
-              @click="cancelActiveRemoteRequest"
-            >
-              <RefreshCw v-if="isCancellingRemoteRequest" class="animate-spin" :size="16" aria-hidden="true" />
-              <X v-else :size="16" aria-hidden="true" />
-              Cancel request
-            </button>
-
-            <div v-if="remoteDiagnostics.length" role="alert" class="alert alert-info alert-soft mt-3">
-              <AlertCircle :size="18" aria-hidden="true" />
-              <div class="text-xs">
-                <div v-for="message in remoteDiagnostics" :key="message">{{ message }}</div>
-              </div>
-            </div>
-          </section>
-          </div>
-
         </aside>
       </div>
     </section>
+
+        <section
+          v-if="activeSection === 'sources'"
+          class="mx-auto w-full max-w-7xl"
+          :class="layoutDensity === 'compact' ? 'px-3 py-3 lg:px-4' : 'px-4 py-5 lg:px-6'"
+        >
+          <div v-if="appError" role="alert" class="alert alert-error mb-4">
+            <AlertCircle :size="18" aria-hidden="true" />
+            <span class="min-w-0 flex-1">{{ appError }}</span>
+            <button
+              class="btn btn-square btn-ghost btn-sm"
+              type="button"
+              aria-label="Dismiss error"
+              @click="appError = null"
+            >
+              <X :size="16" aria-hidden="true" />
+            </button>
+          </div>
+          <AudioSourceManager @sources-changed="updateAudioSourceRecords" />
+        </section>
 
         <section
           v-if="activeSection === 'plugin' && activePlugin"
@@ -1337,10 +1019,11 @@ function parseRemoteCommandError(error: unknown): RemoteCommandError | null {
             v-if="activePlugin.id === NETEASE_PLUGIN_ID"
             class="min-w-0 xl:col-start-1 xl:row-start-1"
             :stream-quality="remoteQuality"
-            v-model:playback-source="remoteFamily"
+            v-model:playback-source="playbackAudioSourceId"
             :audio-sources="availableAudioSources"
             @playback-ready="playNeteasePlayback"
             @open-plugins="selectSection('plugins')"
+            @open-audio-sources="selectSection('sources')"
           />
           <PluginWorkspace
             v-else

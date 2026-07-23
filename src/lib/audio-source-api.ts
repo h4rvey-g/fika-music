@@ -1,102 +1,154 @@
 import { invoke } from "@tauri-apps/api/core";
 import { TAURI_COMMANDS } from "../generated/bindings";
-import type { RemoteMediaSource } from "../generated/bindings";
-import {
-  dispatchPluginRequest,
-  type PluginRecord,
-  type SourceQuality,
-} from "./plugin-api";
+import type {
+  AudioSourceRecord,
+  SourceCapability,
+  SourceDiagnostic,
+  SourceQuality,
+  SourceRequest,
+  SourceRequestOutcome,
+} from "../generated/bindings";
+
+export type {
+  AudioSourceDiagnostic,
+  AudioSourceRecord,
+  AudioSourceState,
+} from "../generated/bindings";
 
 export type AudioSourceOption = {
   value: string;
   label: string;
 };
 
-export const AUDIO_SOURCE_OPTIONS: readonly AudioSourceOption[] = [
-  { value: "nianxin", label: "念心音源" },
-  { value: "changqing", label: "长青音源" },
-] as const;
-
-export type AudioSourceFamily = string;
+export type AudioSourceId = string;
 
 export type AudioSourceTrackRequest = {
-  family: AudioSourceFamily;
+  audioSourceId: AudioSourceId;
   source: string;
   trackId: string;
   quality: SourceQuality;
   requestId?: string;
 };
 
-export function isAudioSourceFamily(value: unknown): value is AudioSourceFamily {
+export type ResolvedAudioSourceTrack = {
+  url: string;
+  mimeType: string;
+  diagnostics: SourceDiagnostic[];
+};
+
+export function listAudioSources() {
+  return invoke<AudioSourceRecord[]>(TAURI_COMMANDS.listAudioSources);
+}
+
+export function selectAudioSourceFile() {
+  return invoke<string | null>(TAURI_COMMANDS.selectAudioSourceFile);
+}
+
+export function refreshAudioSources() {
+  return invoke<AudioSourceRecord[]>(TAURI_COMMANDS.refreshAudioSources);
+}
+
+export function importAudioSource(sourcePath: string) {
+  return invoke<AudioSourceRecord>(TAURI_COMMANDS.importAudioSource, { sourcePath });
+}
+
+export function importAudioSourceUrl(sourceUrl: string) {
+  return invoke<AudioSourceRecord>(TAURI_COMMANDS.importAudioSourceUrl, { sourceUrl });
+}
+
+export function setAudioSourceCapabilities(
+  audioSourceId: string,
+  capabilities: SourceCapability[],
+  reviewed: boolean,
+) {
+  return invoke<AudioSourceRecord>(TAURI_COMMANDS.setAudioSourceCapabilities, {
+    audioSourceId,
+    capabilities,
+    reviewed,
+  });
+}
+
+export function setAudioSourceEnabled(audioSourceId: string, enabled: boolean) {
+  return invoke<AudioSourceRecord>(TAURI_COMMANDS.setAudioSourceEnabled, {
+    audioSourceId,
+    enabled,
+  });
+}
+
+export function removeAudioSource(audioSourceId: string) {
+  return invoke<AudioSourceRecord[]>(TAURI_COMMANDS.removeAudioSource, { audioSourceId });
+}
+
+export function clearAudioSourceDiagnostics(audioSourceId: string) {
+  return invoke<AudioSourceRecord>(TAURI_COMMANDS.clearAudioSourceDiagnostics, {
+    audioSourceId,
+  });
+}
+
+export function dispatchAudioSourceRequest(
+  audioSourceId: string,
+  request: SourceRequest,
+  requestId?: string,
+) {
+  return invoke<SourceRequestOutcome>(TAURI_COMMANDS.dispatchAudioSourceRequest, {
+    audioSourceId,
+    request,
+    requestId,
+  });
+}
+
+export function isAudioSourceId(value: unknown): value is AudioSourceId {
   return (
-    typeof value === "string" &&
-    (AUDIO_SOURCE_OPTIONS.some((option) => option.value === value) ||
-      importedPluginId(value) !== null)
+    value === "" ||
+    (typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value))
   );
 }
 
-export function buildAudioSourceOptions(plugins: PluginRecord[]): AudioSourceOption[] {
-  const imported = plugins
-    .filter((plugin) => plugin.enabled && plugin.state === "enabled")
-    .filter((plugin) =>
-      plugin.providers.some(
-        (provider) =>
-          provider.initialized &&
-          provider.entrypoint.startsWith("builtin:lx-js:") &&
-          provider.sources.some((source) => source.actions.includes("musicUrl")),
-      ),
+export function buildAudioSourceOptions(
+  audioSources: AudioSourceRecord[],
+): AudioSourceOption[] {
+  return audioSources
+    .filter((audioSource) => audioSource.enabled && audioSource.state === "enabled")
+    .filter((audioSource) =>
+      audioSource.sources.some((source) => source.actions.includes("musicUrl")),
     )
-    .map((plugin) => ({
-      value: `plugin:${plugin.id}`,
-      label: plugin.name,
+    .map((audioSource) => ({
+      value: audioSource.id,
+      label: audioSource.name,
     }));
-  return [...AUDIO_SOURCE_OPTIONS, ...imported];
 }
 
 export function audioSourceLabel(
-  family: AudioSourceFamily,
-  options: readonly AudioSourceOption[] = AUDIO_SOURCE_OPTIONS,
+  audioSourceId: AudioSourceId,
+  options: readonly AudioSourceOption[],
 ) {
-  return options.find((option) => option.value === family)?.label ?? family;
+  return options.find((option) => option.value === audioSourceId)?.label ?? "Audio source";
 }
 
 export async function resolveAudioSourceTrack(
   request: AudioSourceTrackRequest,
-): Promise<RemoteMediaSource> {
-  const pluginId = importedPluginId(request.family);
-  if (pluginId) {
-    const outcome = await dispatchPluginRequest(
-      pluginId,
-      {
-        action: "musicUrl",
-        source: request.source,
-        musicInfo: { id: request.trackId },
-        quality: request.quality,
-      },
-      request.requestId,
-    );
-    if (outcome.response.action !== "musicUrl") {
-      throw new Error("Imported audio source returned an unexpected response.");
-    }
-    return {
-      url: outcome.response.data,
-      mimeType: remoteMimeType(outcome.response.data, request.quality),
-      diagnostics: outcome.diagnostics,
-    };
+): Promise<ResolvedAudioSourceTrack> {
+  if (!request.audioSourceId) {
+    throw new Error("No audio source is configured.");
   }
-
-  return invoke<RemoteMediaSource>(TAURI_COMMANDS.resolveImportedLxTemplateMusicUrl, {
-    family: request.family,
-    source: request.source,
-    trackId: request.trackId,
-    quality: request.quality,
-    requestId: request.requestId,
-  });
-}
-
-function importedPluginId(value: string): string | null {
-  const pluginId = value.startsWith("plugin:") ? value.slice("plugin:".length) : "";
-  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(pluginId) ? pluginId : null;
+  const outcome = await dispatchAudioSourceRequest(
+    request.audioSourceId,
+    {
+      action: "musicUrl",
+      source: request.source,
+      musicInfo: { id: request.trackId },
+      quality: request.quality,
+    },
+    request.requestId,
+  );
+  if (outcome.response.action !== "musicUrl") {
+    throw new Error("Audio source returned an unexpected response.");
+  }
+  return {
+    url: outcome.response.data,
+    mimeType: remoteMimeType(outcome.response.data, request.quality),
+    diagnostics: outcome.diagnostics,
+  };
 }
 
 function remoteMimeType(url: string, quality: SourceQuality) {

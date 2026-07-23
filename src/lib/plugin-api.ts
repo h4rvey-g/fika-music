@@ -35,24 +35,12 @@ export function selectPluginPackage() {
   return invoke<string | null>(TAURI_COMMANDS.selectPluginPackage);
 }
 
-export function selectLxJsSource() {
-  return invoke<string | null>(TAURI_COMMANDS.selectLxJsSource);
-}
-
 export function refreshPluginRegistry() {
   return invoke<PluginRecord[]>(TAURI_COMMANDS.refreshPlugins);
 }
 
 export function installPluginPackage(packagePath: string) {
   return invoke<PluginRecord>(TAURI_COMMANDS.installPluginPackage, { packagePath });
-}
-
-export function importLxJsSource(sourcePath: string) {
-  return invoke<PluginRecord>(TAURI_COMMANDS.importLxJsSource, { sourcePath });
-}
-
-export function importLxJsSourceUrl(sourceUrl: string) {
-  return invoke<PluginRecord>(TAURI_COMMANDS.importLxJsSourceUrl, { sourceUrl });
 }
 
 export function setPluginCapabilities(

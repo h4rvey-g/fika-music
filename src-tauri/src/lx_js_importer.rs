@@ -1,9 +1,11 @@
 use crate::source_runtime::{
     lx_music_source, SourceAction, SourceCapability, SourceHttpRequest, SourceInfo, SourceProvider,
     SourceQuality, SourceRequest, SourceResponse, SourceRuntimeContext, SourceRuntimeError,
-    SourceSearchResponse, SourceSearchResult, LX_SOURCE_KG, LX_SOURCE_KIND_MUSIC, LX_SOURCE_KW,
-    LX_SOURCE_LOCAL, LX_SOURCE_MG, LX_SOURCE_TX, LX_SOURCE_WY,
+    LX_SOURCE_KG, LX_SOURCE_KIND_MUSIC, LX_SOURCE_KW, LX_SOURCE_LOCAL, LX_SOURCE_MG, LX_SOURCE_TX,
+    LX_SOURCE_WY,
 };
+#[cfg(test)]
+use crate::source_runtime::{SourceSearchResponse, SourceSearchResult};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Argument, ArrayExpression, Expression, Function, ObjectExpression, TemplateLiteral,
@@ -196,12 +198,18 @@ impl SourceProvider for ImportedLxManifestProvider {
     }
 }
 
+#[cfg(test)]
 const QISHUI_SOURCE_ID: &str = "qsvip";
+#[cfg(test)]
 const QISHUI_SOURCE_NAME: &str = "汽水VIP";
+#[cfg(test)]
 const QISHUI_API_HTTPS: &str = "https://api.vsaa.cn/api/music.qishui.vip";
+#[cfg(test)]
 const QISHUI_API_HTTP: &str = "http://api.vsaa.cn/api/music.qishui.vip";
+#[cfg(test)]
 const QISHUI_PROXY_API: &str = "https://proxy.qishui.vsaa.cn/qishui/proxy";
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct QishuiRustProvider {
     api_https_url: String,
@@ -209,12 +217,14 @@ pub struct QishuiRustProvider {
     proxy_url: String,
 }
 
+#[cfg(test)]
 impl Default for QishuiRustProvider {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl QishuiRustProvider {
     pub fn new() -> Self {
         Self::with_endpoints(QISHUI_API_HTTPS, QISHUI_API_HTTP, QISHUI_PROXY_API)
@@ -388,6 +398,7 @@ impl QishuiRustProvider {
     }
 }
 
+#[cfg(test)]
 impl SourceProvider for QishuiRustProvider {
     fn id(&self) -> &str {
         QISHUI_SOURCE_ID
@@ -551,6 +562,7 @@ pub struct ImportedLxTemplateProvider {
     adapter_name: String,
     source_catalog: BTreeMap<String, SourceInfo>,
     templates_by_source: BTreeMap<String, Vec<LxUrlTemplate>>,
+    aggregate_primary_endpoint: Option<String>,
 }
 
 impl ImportedLxTemplateProvider {
@@ -568,6 +580,7 @@ impl ImportedLxTemplateProvider {
             family,
             report.manifest.to_source_catalog(),
             templates,
+            None,
         ))
     }
 
@@ -578,12 +591,16 @@ impl ImportedLxTemplateProvider {
         adapter: LxJsImportAdapter,
     ) -> Result<Self, LxJsImportError> {
         let templates = import_adapter_templates(report, adapter)?;
+        let aggregate_primary_endpoint = (adapter == LxJsImportAdapter::StaticTemplates)
+            .then(|| find_aggregate_primary_endpoint(report))
+            .flatten();
         Ok(Self::with_templates(
             provider_id,
             report.manifest.display_name.clone(),
             adapter.as_str(),
             source_catalog,
             templates,
+            aggregate_primary_endpoint,
         ))
     }
 
@@ -593,6 +610,7 @@ impl ImportedLxTemplateProvider {
         adapter_name: impl Into<String>,
         source_catalog: BTreeMap<String, SourceInfo>,
         templates: Vec<LxUrlTemplate>,
+        aggregate_primary_endpoint: Option<String>,
     ) -> Self {
         let mut templates_by_source = BTreeMap::<String, Vec<LxUrlTemplate>>::new();
         for template in templates {
@@ -607,6 +625,7 @@ impl ImportedLxTemplateProvider {
             adapter_name: adapter_name.into(),
             source_catalog,
             templates_by_source,
+            aggregate_primary_endpoint,
         }
     }
 
@@ -670,6 +689,21 @@ impl SourceProvider for ImportedLxTemplateProvider {
 
         let level = quality_to_template_level(quality);
         let mut failures = Vec::new();
+        if let Some(endpoint_url) = self.aggregate_primary_endpoint.as_deref() {
+            match render_aggregate_primary_url(endpoint_url, &source, &track_id, quality) {
+                Ok(Some(url)) => match resolve_aggregate_endpoint(context, &url) {
+                    Ok(resolved_url) => {
+                        context
+                            .info("resolved playable musicUrl via imported aggregate primary API");
+                        return Ok(SourceResponse::MusicUrl(resolved_url));
+                    }
+                    Err(error @ SourceRuntimeError::Cancelled { .. }) => return Err(error),
+                    Err(error) => failures.push(format!("aggregate-primary: {error}")),
+                },
+                Ok(None) => {}
+                Err(error) => failures.push(format!("aggregate-primary: {error}")),
+            }
+        }
         for template in templates {
             let url = match render_template_url(&template.url, &track_id, level) {
                 Ok(url) => url,
@@ -692,7 +726,7 @@ impl SourceProvider for ImportedLxTemplateProvider {
         }
 
         Err(context.provider_error(format!(
-            "all {} URL template candidates failed: {}",
+            "all {} music URL candidates failed: {}",
             self.adapter_name,
             failures.join("; ")
         )))
@@ -708,14 +742,37 @@ fn resolve_template_endpoint(
     context: &mut SourceRuntimeContext,
     endpoint_url: &str,
 ) -> Result<String, SourceRuntimeError> {
-    let response = context.http_request(
-        SourceHttpRequest::get(endpoint_url),
+    resolve_music_url_endpoint(
+        context,
+        endpoint_url,
         "request imported template endpoint",
-    )?;
+        "template endpoint",
+    )
+}
+
+fn resolve_aggregate_endpoint(
+    context: &mut SourceRuntimeContext,
+    endpoint_url: &str,
+) -> Result<String, SourceRuntimeError> {
+    resolve_music_url_endpoint(
+        context,
+        endpoint_url,
+        "request imported aggregate endpoint",
+        "aggregate endpoint",
+    )
+}
+
+fn resolve_music_url_endpoint(
+    context: &mut SourceRuntimeContext,
+    endpoint_url: &str,
+    request_operation: &'static str,
+    endpoint_name: &'static str,
+) -> Result<String, SourceRuntimeError> {
+    let response = context.http_request(SourceHttpRequest::get(endpoint_url), request_operation)?;
 
     if !response.is_success() {
         return Err(context.provider_error(format!(
-            "template endpoint {endpoint_url} returned HTTP {}",
+            "{endpoint_name} {endpoint_url} returned HTTP {}",
             response.status
         )));
     }
@@ -743,7 +800,7 @@ fn resolve_template_endpoint(
         }
     }
 
-    Err(context.provider_error("template endpoint did not return a playable URL"))
+    Err(context.provider_error(format!("{endpoint_name} did not return a playable URL")))
 }
 
 fn find_url_in_json(value: &serde_json::Value) -> Option<String> {
@@ -767,6 +824,7 @@ fn is_http_url(value: &str) -> bool {
         .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
 }
 
+#[cfg(test)]
 fn append_query_params(url: &str, params: &[(&str, String)]) -> Result<String, url::ParseError> {
     let mut url = parse_http_url(url)?;
     if !params.is_empty() {
@@ -776,6 +834,7 @@ fn append_query_params(url: &str, params: &[(&str, String)]) -> Result<String, u
     Ok(url.into())
 }
 
+#[cfg(test)]
 fn qishui_first_data(value: &serde_json::Value) -> Option<&serde_json::Value> {
     let data = value.get("data")?;
     match data {
@@ -788,6 +847,7 @@ fn qishui_first_data(value: &serde_json::Value) -> Option<&serde_json::Value> {
     }
 }
 
+#[cfg(test)]
 fn qishui_song_id(value: &serde_json::Value) -> Option<String> {
     for key in [
         "id",
@@ -809,6 +869,7 @@ fn qishui_song_id(value: &serde_json::Value) -> Option<String> {
     None
 }
 
+#[cfg(test)]
 fn normalize_qishui_quality(quality: SourceQuality) -> &'static str {
     match quality {
         SourceQuality::K128 => "low",
@@ -818,6 +879,7 @@ fn normalize_qishui_quality(quality: SourceQuality) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn normalize_qishui_song_info(raw: &serde_json::Value) -> SourceSearchResult {
     let id = json_string(raw.get("id").or_else(|| raw.get("vid"))).unwrap_or_default();
     let title = json_string(raw.get("name")).unwrap_or_else(|| "未知歌曲".to_owned());
@@ -853,6 +915,7 @@ fn normalize_qishui_song_info(raw: &serde_json::Value) -> SourceSearchResult {
     }
 }
 
+#[cfg(test)]
 fn json_string(value: Option<&serde_json::Value>) -> Option<String> {
     match value? {
         serde_json::Value::String(value) => Some(value.clone()),
@@ -861,6 +924,7 @@ fn json_string(value: Option<&serde_json::Value>) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn json_u64(value: &serde_json::Value) -> Option<u64> {
     value
         .as_u64()
@@ -1600,6 +1664,54 @@ fn quality_to_template_level(quality: SourceQuality) -> &'static str {
     }
 }
 
+fn find_aggregate_primary_endpoint(report: &LxJsImportReport) -> Option<String> {
+    report.endpoint.urls.iter().find_map(|candidate| {
+        let url = parse_http_url(candidate).ok()?;
+        let has_xbridge_marker = url
+            .query_pairs()
+            .any(|(key, value)| key == "use_xbridge3" && value == "true");
+        (url.path().ends_with("/api.php") && has_xbridge_marker).then(|| candidate.clone())
+    })
+}
+
+fn render_aggregate_primary_url(
+    endpoint: &str,
+    source: &str,
+    track_id: &str,
+    quality: SourceQuality,
+) -> Result<Option<String>, url::ParseError> {
+    let Some(source_name) = aggregate_source_name(source) else {
+        return Ok(None);
+    };
+    let mut url = parse_http_url(endpoint)?;
+    url.query_pairs_mut()
+        .append_pair("types", "url")
+        .append_pair("source", source_name)
+        .append_pair("id", track_id)
+        .append_pair("br", aggregate_quality_bitrate(quality));
+    Ok(Some(url.into()))
+}
+
+fn aggregate_source_name(source: &str) -> Option<&'static str> {
+    match source {
+        LX_SOURCE_WY => Some("netease"),
+        LX_SOURCE_TX => Some("tencent"),
+        LX_SOURCE_KW => Some("kuwo"),
+        LX_SOURCE_KG => Some("kugou"),
+        LX_SOURCE_MG => Some("migu"),
+        _ => None,
+    }
+}
+
+fn aggregate_quality_bitrate(quality: SourceQuality) -> &'static str {
+    match quality {
+        SourceQuality::K128 => "128",
+        SourceQuality::K320 => "320",
+        SourceQuality::Flac => "740",
+        SourceQuality::Flac24Bit => "999",
+    }
+}
+
 fn render_template_url(
     template: &str,
     track_id: &str,
@@ -2141,7 +2253,9 @@ fn push_unique_quality(qualities: &mut Vec<SourceQuality>, quality: SourceQualit
 mod tests {
     use super::*;
     use crate::source_runtime::{
-        mock_music_url_request, DefaultSourceHost, SourceCapability, SourceKind, SourceRuntime,
+        mock_music_url_request, DefaultSourceHost, SourceCancellationToken, SourceCapability,
+        SourceHost, SourceHostError, SourceHttpRequest, SourceHttpResponse, SourceKind,
+        SourceRuntime,
     };
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -2155,6 +2269,46 @@ mod tests {
         ("nianxin-v1.0.1.js", "念心音源"),
         ("changqing-svip-v1.2.0.js", "长青SVIP音源"),
     ];
+
+    #[derive(Debug)]
+    struct AggregateFallbackHost;
+
+    impl SourceHost for AggregateFallbackHost {
+        fn http_request(
+            &self,
+            _source_id: &str,
+            request: &SourceHttpRequest,
+            _cancellation: &SourceCancellationToken,
+        ) -> Result<SourceHttpResponse, SourceHostError> {
+            let request_url = url::Url::parse(&request.url).map_err(|error| {
+                SourceHostError::InvalidResponse {
+                    message: error.to_string(),
+                }
+            })?;
+            let query = request_url.query_pairs().collect::<BTreeMap<_, _>>();
+            let is_expected_aggregate_request = request_url.host_str()
+                == Some("aggregate.example.test")
+                && query.get("types").is_some_and(|value| value == "url")
+                && query.get("source").is_some_and(|value| value == "netease")
+                && query.get("id").is_some_and(|value| value == "3402250883")
+                && query.get("br").is_some_and(|value| value == "740");
+            let (status, content_type, body) = if is_expected_aggregate_request {
+                (
+                    200,
+                    Some("application/json".to_owned()),
+                    br#"{"url":"https://cdn.example.test/track.flac"}"#.to_vec(),
+                )
+            } else {
+                (404, Some("text/plain".to_owned()), Vec::new())
+            };
+            Ok(SourceHttpResponse {
+                status,
+                final_url: request.url.clone(),
+                content_type,
+                body,
+            })
+        }
+    }
 
     fn fixture_path(file_name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2529,6 +2683,57 @@ mod tests {
         assert_eq!(
             outcome.response,
             SourceResponse::MusicUrl("https://cdn.example.test/flac.mp3".to_owned())
+        );
+    }
+
+    #[test]
+    fn imported_static_template_provider_should_prefer_aggregate_primary_api() {
+        let mut report = analyze_lx_js_file(fixture_path("quantouya-aggregate-v4.1.js"))
+            .expect("fixture should analyze");
+        let primary_endpoint = report
+            .endpoint
+            .urls
+            .iter_mut()
+            .find(|url| url.contains("music-api.gdstudio.xyz"))
+            .expect("aggregate fixture should expose its primary endpoint");
+        *primary_endpoint = "https://aggregate.example.test/api.php?use_xbridge3=true".to_owned();
+        for template in &mut report.endpoint.templates {
+            if template.source_id == LX_SOURCE_WY {
+                template.url = format!(
+                    "https://templates.example.test/{}/{{id}}?level={{level}}",
+                    template.family
+                );
+            }
+        }
+        let provider = ImportedLxTemplateProvider::for_imported_package(
+            "aggregate-provider",
+            &report,
+            report.manifest.to_source_catalog(),
+            LxJsImportAdapter::StaticTemplates,
+        )
+        .expect("aggregate template provider should be created");
+        let runtime = SourceRuntime::with_host(
+            Arc::new(AggregateFallbackHost),
+            [SourceCapability::NetworkAny],
+        );
+        runtime
+            .initialize_provider(&provider)
+            .expect("aggregate provider should initialize");
+
+        let outcome = runtime
+            .dispatch_request(
+                &provider,
+                SourceRequest::MusicUrl {
+                    source: LX_SOURCE_WY.to_owned(),
+                    quality: SourceQuality::Flac,
+                    music_info: serde_json::json!({ "id": "3402250883" }),
+                },
+            )
+            .expect("aggregate primary API should resolve before stale templates");
+
+        assert_eq!(
+            outcome.response,
+            SourceResponse::MusicUrl("https://cdn.example.test/track.flac".to_owned())
         );
     }
 

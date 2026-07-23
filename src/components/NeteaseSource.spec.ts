@@ -29,13 +29,8 @@ const neteaseApiMocks = vi.hoisted(() => ({
 
 vi.mock("../lib/plugin-api", () => pluginApiMocks);
 vi.mock("../lib/audio-source-api", () => ({
-  AUDIO_SOURCE_OPTIONS: [
-    { value: "nianxin", label: "念心音源" },
-    { value: "changqing", label: "长青音源" },
-  ],
-  audioSourceLabel: (family: string) =>
-    family === "changqing" ? "长青音源" : "念心音源",
-  isAudioSourceFamily: (value: unknown) => value === "nianxin" || value === "changqing",
+  audioSourceLabel: (audioSourceId: string, options: Array<{ value: string; label: string }>) =>
+    options.find((option) => option.value === audioSourceId)?.label ?? "Audio source",
   ...audioSourceApiMocks,
 }));
 vi.mock("../lib/netease-api", () => ({
@@ -91,7 +86,12 @@ function pluginRecord(overrides: Partial<PluginRecord> = {}): PluginRecord {
   };
 }
 
-function mountNeteaseSource() {
+function mountNeteaseSource(
+  props: Partial<{
+    playbackSource: string;
+    audioSources: Array<{ value: string; label: string }>;
+  }> = {},
+) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false, gcTime: Infinity },
@@ -101,11 +101,12 @@ function mountNeteaseSource() {
   return mount(NeteaseSource, {
     props: {
       streamQuality: "320k",
-      playbackSource: "nianxin",
+      playbackSource: "source-one",
       audioSources: [
-        { value: "nianxin", label: "念心音源" },
-        { value: "changqing", label: "长青音源" },
+        { value: "source-one", label: "Source One" },
+        { value: "source-two", label: "Source Two" },
       ],
+      ...props,
     },
     global: {
       plugins: [[VueQueryPlugin, { queryClient }]],
@@ -122,7 +123,7 @@ describe("NeteaseSource", () => {
       url: "https://cdn.example.test/Test%20Track.mp3",
       mimeType: "audio/mpeg",
       diagnostics: [
-        { sourceId: "nianxin", level: "info", message: "resolved through audio source" },
+        { sourceId: "source-one", level: "info", message: "resolved through audio source" },
       ],
     });
     neteaseApiMocks.listNeteaseAccounts.mockResolvedValue([
@@ -186,7 +187,7 @@ describe("NeteaseSource", () => {
     await flushPromises();
 
     expect(audioSourceApiMocks.resolveAudioSourceTrack).toHaveBeenCalledWith({
-      family: "nianxin",
+      audioSourceId: "source-one",
       source: "wy",
       trackId: "347230",
       quality: "320k",
@@ -196,7 +197,7 @@ describe("NeteaseSource", () => {
       track,
       url: "https://cdn.example.test/Test%20Track.mp3",
       mimeType: "audio/mpeg",
-      providerName: "念心音源",
+      providerName: "Source One",
     });
     expect(wrapper.text()).toContain("resolved through audio source");
     wrapper.unmount();
@@ -208,9 +209,25 @@ describe("NeteaseSource", () => {
 
     await wrapper
       .get<HTMLSelectElement>('select[aria-label="NetEase playback source"]')
-      .setValue("changqing");
+      .setValue("source-two");
 
-    expect(wrapper.emitted("update:playbackSource")?.[0]).toEqual(["changqing"]);
+    expect(wrapper.emitted("update:playbackSource")?.[0]).toEqual(["source-two"]);
+    wrapper.unmount();
+  });
+
+  it("disables playback and opens configuration when no audio source is enabled", async () => {
+    const wrapper = mountNeteaseSource({ playbackSource: "", audioSources: [] });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("No enabled audio source is available");
+    expect(
+      wrapper.get('button[aria-label="Play Test Track"]').attributes("disabled"),
+    ).toBeDefined();
+    const openSources = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("Open Audio Sources"));
+    await openSources?.trigger("click");
+    expect(wrapper.emitted("openAudioSources")).toBeTruthy();
     wrapper.unmount();
   });
 

@@ -1,35 +1,40 @@
 # Plugin Manifest
 
-Slice 3 Plugin packages are directories containing a `plugin.json` file. The
+Plugin packages are directories containing a `plugin.json` file. The
 manifest is metadata and permission policy; it is not permission to execute
-arbitrary native code.
+arbitrary native code. Imported playback-only Audio Sources are not Plugins;
+their separate format is documented in [`AUDIO_SOURCES.md`](./AUDIO_SOURCES.md).
 
 ## Schema
 
 ```json
 {
   "manifestVersion": 1,
-  "id": "example.source",
-  "name": "Example Source",
-  "version": "1.0.0",
-  "description": "Optional description",
-  "author": "Example",
-  "homepage": "https://example.invalid/source",
+  "id": "fika.netease",
+  "name": "NetEase Cloud Music",
+  "version": "0.1.0",
+  "description": "Bundled recommendations and Playlist integration",
+  "author": "Fika Music",
   "providerEntrypoints": [
     {
-      "id": "example-provider",
-      "entrypoint": "builtin:runtime-demo",
-      "capabilities": ["network:any"],
+      "id": "fika-netease",
+      "entrypoint": "builtin:netease",
+      "capabilities": [
+        "account:ref",
+        "playlist:read",
+        "playlist:write",
+        "bridge:netease-api-enhanced"
+      ],
       "sourceCatalog": {}
     }
   ],
-  "capabilities": ["network:any"],
+  "capabilities": [],
   "compatibilityTarget": "fika-music",
   "supportedApiVersion": {
     "major": 1,
     "minor": 1
   },
-  "requiredHostBridges": []
+  "requiredHostBridges": ["netease-api-enhanced"]
 }
 ```
 
@@ -49,46 +54,33 @@ declaration and each Source Provider receives only its own intersection.
 Capabilities are never granted implicitly by installing a package, and an
 entrypoint-only capability is not exposed to sibling Providers.
 
-The MVP accepts symbolic built-in entrypoints (`builtin:runtime-demo`,
-`builtin:catalog`, `builtin:qishui`, and `builtin:netease`) plus importer-owned
-`builtin:lx-js:<adapter>:<source-fingerprint>` entrypoints. The NetEase
-entrypoint is available only when the host provides the
+The production runtime accepts the reserved `builtin:netease` entrypoint for
+the bundled NetEase package. The NetEase entrypoint is available only when the host provides the
 `netease-api-enhanced` Service Bridge. User packages cannot load a dynamic
 library or launch a sidecar. This keeps package discovery, permission review,
 and lifecycle management in place without turning installation into an
 untrusted native-code execution boundary.
 
+`builtin:runtime-demo` and `builtin:catalog` exist only in Rust test builds.
+`builtin:qishui` is not a production entrypoint. Legacy
+`builtin:lx-js:<adapter>:<source-fingerprint>` manifests are recognized only
+for startup migration and are rejected as new Plugin packages.
+
 `builtin:netease` is reserved for package `fika.netease` and Provider
 `fika-netease`; another package cannot use that host bridge entrypoint.
 
-## LX JavaScript source imports
+## Audio Source boundary
 
-The Plugin view can import an LX Music source from a local `.js`, `.mjs`, or
-`.cjs` file, or from an HTTP(S) URL. GitHub `blob` file URLs are requested as
-raw content. Remote downloads use a 20-second timeout, follow at most five
-HTTP(S) redirects, reject HTTPS-to-HTTP downgrades and HTML pages, and enforce
-the same 4 MiB limit while streaming the response. The backend parses the
-source with Oxc, verifies the LX `musicUrl` contract, and creates a managed
-Plugin package containing:
+LX JavaScript source import is owned by the Audio Source Registry and the
+Audio Sources view. It never creates a `PluginRecord`, `plugin.json`, Plugin
+sidebar entry, or Plugin permission state. The Source Runtime remains shared
+internally, but the two registries have separate package formats, directories,
+SQLite tables, commands, diagnostics, and lifecycle records.
 
-- the generated `plugin.json`,
-- the original `source.js` for provenance, and
-- an `import-report.json` containing metadata, contract, endpoint,
-  obfuscation analysis, and local-file or redacted remote-URL provenance.
-
-Fika does not execute the imported JavaScript. Playback is available only when
-the source maps to a reviewed Rust adapter (currently Nianxin or Changqing), or
-when track URL templates can be extracted statically. The generated Provider
-publishes only the `musicUrl` routes backed by those templates. Requests still
-run through the host HTTP boundary and require an explicit `network:any`
-review before the Plugin can be enabled.
-
-The generated entrypoint contains the source's full hexadecimal SHA-256
-digest. Activation hashes the managed source again and fails closed if it no
-longer matches the reviewed manifest. Local files and downloaded responses are
-limited to 4 MiB. Scripts without a supported LX contract or safe Rust adapter
-are rejected with an import error rather than installed as nonfunctional
-Plugins.
+At startup, legacy user Plugin packages with an importer-owned
+`builtin:lx-js:*` entrypoint are converted to managed Audio Source packages.
+Their enabled state, permission review, grants, and diagnostics are moved before
+the old Plugin rows and directory are removed.
 
 ## Locations and lifecycle
 

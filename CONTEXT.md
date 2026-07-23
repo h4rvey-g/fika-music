@@ -28,13 +28,21 @@ _Avoid_: List, queue
 A Rust-native online music source module loaded by Fika's **Source Runtime**.
 _Avoid_: Original LX JavaScript script, plugin, scraper
 
+**Audio Source**:
+A user-imported, playback-only source that resolves playable audio for a **Remote Track**.
+_Avoid_: Plugin, built-in source, content integration
+
+**Audio Source Registry**:
+The app layer that imports, permission-reviews, enables/disables, removes, and diagnoses **Audio Sources**.
+_Avoid_: Plugin System, Source Runtime
+
 **LX Compatibility**:
 Fika's core ability to model LX Music-style source actions and data contracts through Rust-native **Source Providers**.
 _Avoid_: Running original LX JavaScript, plugin feature, plugin compatibility
 
 **Plugin**:
-A packaged, installable or bundled unit that contains a manifest and one or more Source Providers/assets.
-_Avoid_: Source Runtime, LX Compatibility
+A packaged, installable or bundled content integration that may contain Source Providers and assets.
+_Avoid_: Audio Source, Source Runtime, LX Compatibility
 
 **Plugin System**:
 The app layer that installs, validates, enables/disables, permission-reviews, updates, and diagnoses Plugins.
@@ -70,12 +78,16 @@ _Avoid_: Access flag, scope
 - A **Playlist** contains zero or more ordered **Tracks**.
 - A **Track** may be a **Local Track** or a **Remote Track**.
 - A **Source Provider** exposes online music source behavior through granted **Capabilities**.
+- An **Audio Source** supplies playback resolution only; it does not own search, lyrics, artwork, or playback UI.
+- An **Audio Source** is user-imported; Fika does not provide a built-in **Audio Source**.
+- The **Audio Source Registry** manages **Audio Sources** independently of the **Plugin System**.
 - A **Source Provider** does not access local files directly; local file IO belongs to the app core.
 - A **Source Provider** may call a **Service Bridge** only through app-provided APIs.
 - A **Source Provider** may receive an **Account Ref**, but not raw account secrets.
 - **LX Compatibility** is a core app capability provided by the **Source Runtime**, not a plugin feature.
 - A **Plugin** may package one or more **Source Providers** plus metadata, assets, and declared **Capabilities**.
 - The **Plugin System** manages **Plugins**, but it does not implement **LX Compatibility** itself.
+- A **Plugin** may use an enabled **Audio Source** for playback without owning that Audio Source.
 - A **Connector** integrates one online music service without being user-installed.
 - A **Service Bridge** is managed by the app, not bundled or launched by a **Source Provider**.
 
@@ -87,3 +99,4 @@ _Avoid_: Access flag, scope
 ## Flagged Ambiguities
 
 - "LX compatibility" is resolved as Rust-native **Source Provider** implementations that follow LX Music-style actions and data contracts, not execution of original LX JavaScript.
+- "Audio source" means the imported playback resolver, not a Plugin or a general content integration.

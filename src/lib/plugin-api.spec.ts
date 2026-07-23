@@ -2,9 +2,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SourceRequest, SourceRequestOutcome } from "./plugin-api";
 import {
   dispatchPluginRequest,
-  importLxJsSource,
-  importLxJsSourceUrl,
-  selectLxJsSource,
   setPluginCapabilities,
 } from "./plugin-api";
 
@@ -57,30 +54,6 @@ describe("Plugin API", () => {
       pluginId: "fika.runtime-demo",
       capabilities: ["network:any"],
       reviewed: true,
-    });
-  });
-
-  it("selects and imports an LX JavaScript source", async () => {
-    invokeMock
-      .mockResolvedValueOnce("/downloads/source.js")
-      .mockResolvedValueOnce({ id: "imported-lx-source" });
-
-    await expect(selectLxJsSource()).resolves.toBe("/downloads/source.js");
-    await importLxJsSource("/downloads/source.js");
-
-    expect(invokeMock).toHaveBeenNthCalledWith(1, "select_lx_js_source");
-    expect(invokeMock).toHaveBeenNthCalledWith(2, "import_lx_js_source", {
-      sourcePath: "/downloads/source.js",
-    });
-  });
-
-  it("imports an LX JavaScript source from a URL", async () => {
-    invokeMock.mockResolvedValue({ id: "imported-lx-source" });
-
-    await importLxJsSourceUrl("https://example.com/source.js");
-
-    expect(invokeMock).toHaveBeenCalledWith("import_lx_js_source_url", {
-      sourceUrl: "https://example.com/source.js",
     });
   });
 });

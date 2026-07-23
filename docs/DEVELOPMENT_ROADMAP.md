@@ -54,7 +54,7 @@ The project currently starts from the Tauri Vue TypeScript template:
 |                                                               |
 | - Library views                                               |
 | - Playback queue UI                                           |
-| - Source Provider management UI                                |
+| - Audio Source and Plugin management UI                        |
 | - NetEase recommendation and playlist management UI           |
 | - Settings, permissions, theming, diagnostics                 |
 +-----------------------------+---------------------------------+
@@ -91,7 +91,7 @@ The project currently starts from the Tauri Vue TypeScript template:
 |                                                               |
 | - Local filesystem music folders                              |
 | - NetEase Cloud Music account/API                             |
-| - User-installed Source Providers                             |
+| - User-imported Audio Sources                                 |
 +---------------------------------------------------------------+
 ```
 
@@ -101,8 +101,10 @@ The canonical glossary now lives in [`../CONTEXT.md`](../CONTEXT.md). The most i
 
 - **Source Provider**: a Rust-native online music source module loaded by Fika's Source Runtime.
 - **LX Compatibility**: Fika's core ability to model LX Music-style source actions and data contracts through Rust-native Source Providers.
-- **Plugin**: a packaged, installable or bundled unit that contains a manifest and one or more Source Providers/assets.
+- **Plugin**: a packaged, installable or bundled content integration that may contain Source Providers/assets.
 - **Plugin System**: the app layer that installs, validates, enables/disables, permission-reviews, updates, and diagnoses Plugins.
+- **Audio Source**: a user-imported, playback-only source managed independently from Plugins.
+- **Audio Source Registry**: the app layer that imports, permission-reviews, enables/disables, removes, and diagnoses Audio Sources.
 
 Earlier provisional terms such as **Track**, **Library**, **Playlist**, **Connector**, and **Capability** have also been recorded there and should be refined as the product model gets sharper.
 
@@ -120,6 +122,7 @@ Earlier provisional terms such as **Track**, **Library**, **Playlist**, **Connec
 - ADR 0010: [Opaque account refs for source scripts](./adr/0010-opaque-account-refs-for-source-scripts.md).
 - ADR 0011: [Core LX-compatible Source Runtime MVP structure](./adr/0011-core-lx-compatible-source-runtime-mvp.md).
 - ADR 0012: [Plugin System built on the Source Runtime](./adr/0012-plugin-system-built-on-source-runtime.md).
+- ADR 0013: [Separate imported Audio Sources from Plugins](./adr/0013-separate-audio-source-lifecycle.md).
 
 ## Earlier provisional domain terms
 
@@ -167,6 +170,7 @@ Future changes should update `CONTEXT.md` first, then this roadmap only when del
    - Service Bridge decision: v0.1 Source Providers can only use host-provided Service Bridges; they cannot bundle, install, or launch arbitrary Node/native sidecars.
    - Source runtime decision: do not execute original LX JavaScript; rewrite LX-compatible behavior as Rust Source Providers.
    - Plugin System decision: installable/bundled Plugin package lifecycle is built above the Source Runtime; LX Compatibility remains core runtime behavior.
+   - Audio Source decision: imported LX playback sources use an independent registry, lifecycle model, package directory, and UI. They are not Plugins, and none are built in.
 
 3. **NetEase delivery model — decided**
    - Decision: NetEase ships as a bundled Plugin containing an LX Music-style compatible Rust Source Provider.
@@ -373,6 +377,33 @@ Implementation notes for the completed Slice 3 Plugin System:
 - Package replacement uses a non-overlapping staged copy, manifest revalidation, SQLite transaction, and filesystem rollback so a failed refresh cannot silently discard the previous package. Removal uses a same-filesystem quarantine and restores the package, persisted lifecycle state, and active Provider state when post-commit quarantine cleanup fails.
 - Rust coverage includes startup/refresh reactivation, failed-refresh and failed-removal compensation, Provider capability isolation, failed Provider initialization cleanup, replacement and containment safety, best-effort diagnostic completion, unlocked request execution, and an AppState-to-SourceRuntime dispatch path; frontend coverage verifies Plugin command payloads and permission review interaction. CI runs dependency audit, frontend tests/build, Rust formatting, Clippy, and the full Rust suite.
 
+Plugin System does not own LX JavaScript import. Imported playback-only sources
+use the separate Audio Source Registry below and cannot appear as Plugins.
+
+### Phase 4A — Audio Source Registry *(Completed)*
+
+Goal: import and manage playback-only LX-compatible Audio Sources without
+modeling them as Plugins.
+
+Deliverables:
+
+- Dedicated `AudioSourceRecord` and `audio-source.json` models.
+- Managed app-data Audio Source directory and SQLite lifecycle tables.
+- Local-file and HTTP(S) URL import with static analysis and integrity checks.
+- Independent permission review, enable/disable, removal, diagnostics, and
+  `musicUrl` dispatch commands.
+- Configuration-only Audio Sources view with no search, Track ID lookup,
+  player, lyrics, or artwork.
+- Startup migration of legacy importer-created Plugin packages, including
+  enabled state, grants, review state, and diagnostics.
+- Empty-by-default behavior; Fika ships no built-in Audio Source.
+
+Exit criteria:
+
+- An imported source can resolve playback through the Source Runtime without
+  creating a Plugin record or sidebar entry.
+- Plugin discovery and APIs return only true Plugin packages.
+
 ### Phase 5 — NetEase Cloud Music Plugin *(Completed)*
 
 Goal: ship the first real Plugin on top of the core LX-compatible Source Runtime and Plugin System.
@@ -472,7 +503,7 @@ Deliverables:
 - Keyboard shortcut editor.
 - Command palette.
 - Configurable sidebar sections.
-- Source Provider management through standard app UI only.
+- Audio Source and Plugin management through standard app UI only.
 - Deferred Source Provider-provided commands or views until the Source Runtime security model supports them.
 - Accessibility pass.
 - Localization infrastructure.
