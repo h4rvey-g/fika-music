@@ -19,8 +19,9 @@ The current v0.1 implementation includes:
 
 NetEase behavior is implemented by a Node-free Rust Service Bridge pinned to
 the selected `NeteaseCloudMusicApiEnhanced/api-enhanced` v4.32.1 contract.
-Sessions are stored in the operating-system credential store. Source Providers
-and the frontend receive only opaque Account Refs.
+NetEase and KuGou sessions are stored in the application-private SQLite
+database so runtime requests do not trigger operating-system credential
+prompts. Source Providers and the frontend receive only opaque Account Refs.
 
 ## Development
 
@@ -50,5 +51,5 @@ cargo clippy --all-targets --all-features --locked --manifest-path src-tauri/Car
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 ```
 
-The bundled NetEase Plugin starts with capabilities ungranted. Review its
-permissions in the Plugin view before connecting an account.
+Bundled Plugins start disabled. Enabling one automatically grants the
+capabilities declared by its current manifest.

@@ -9,9 +9,9 @@ import {
   ListMusic,
   LogOut,
   Play,
+  Power,
   QrCode,
   RefreshCw,
-  ShieldAlert,
   UserRound,
   X,
 } from "@lucide/vue";
@@ -712,10 +712,10 @@ function normalizeError(error: unknown): string {
 
     <div v-if="!isPluginReady" class="flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between">
       <div class="flex items-start gap-3">
-        <ShieldAlert class="mt-0.5 shrink-0 text-warning" :size="18" aria-hidden="true" />
+        <Power class="mt-0.5 shrink-0 text-warning" :size="18" aria-hidden="true" />
         <div>
-          <div class="text-sm font-medium">Plugin permission review required</div>
-          <div class="mt-1 text-xs text-base-content/60">KuGou requests remain blocked until the bundled Plugin is enabled.</div>
+          <div class="text-sm font-medium">Plugin is disabled</div>
+          <div class="mt-1 text-xs text-base-content/60">Enable the bundled Plugin to use KuGou.</div>
         </div>
       </div>
       <button class="btn btn-sm" type="button" @click="emit('openPlugins')">Open Plugins</button>

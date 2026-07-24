@@ -1,3 +1,4 @@
+use crate::database::AppCredentialStore;
 use crate::source_runtime::{
     self, JsonScalar, RemoteTrack, SourceAction, SourceAlbumSearchResponse,
     SourceAlbumSearchResult, SourceArtistSearchResponse, SourceArtistSearchResult,
@@ -27,7 +28,6 @@ pub const KUGOU_PROVIDER_ID: &str = "fika-kugou";
 pub const KUGOU_HOST_BRIDGE_ID: &str = "kugou-music-api";
 pub const KUGOU_API_BASIS_VERSION: &str = "1.5.1 (283f1e9)";
 
-const CREDENTIAL_SERVICE: &str = "com.hvg.fika-music.kugou";
 const ACCOUNT_REF_PREFIX: &str = "kugou-account:";
 const GATEWAY_BASE_URL: &str = "https://gateway.kugou.com";
 const LOGIN_BASE_URL: &str = "https://login-user.kugou.com";
@@ -299,37 +299,21 @@ trait CredentialStore: Send + Sync {
     fn delete(&self, account_ref: &str) -> Result<(), KugouBridgeError>;
 }
 
-#[derive(Debug, Default)]
-struct OsCredentialStore;
-
-impl OsCredentialStore {
-    fn entry(account_ref: &str) -> Result<keyring::Entry, KugouBridgeError> {
-        keyring::Entry::new(CREDENTIAL_SERVICE, account_ref)
-            .map_err(|error| KugouBridgeError::Persistence(error.to_string()))
-    }
-}
-
-impl CredentialStore for OsCredentialStore {
+impl CredentialStore for AppCredentialStore {
     fn save(&self, account_ref: &str, secret: &str) -> Result<(), KugouBridgeError> {
-        Self::entry(account_ref)?
-            .set_password(secret)
+        self.save_secret(account_ref, secret)
             .map_err(|error| KugouBridgeError::Persistence(error.to_string()))
     }
 
     fn load(&self, account_ref: &str) -> Result<String, KugouBridgeError> {
-        Self::entry(account_ref)?
-            .get_password()
-            .map_err(|error| match error {
-                keyring::Error::NoEntry => KugouBridgeError::CredentialExpired,
-                _ => KugouBridgeError::Persistence(error.to_string()),
-            })
+        self.load_secret(account_ref)
+            .map_err(|error| KugouBridgeError::Persistence(error.to_string()))?
+            .ok_or(KugouBridgeError::CredentialExpired)
     }
 
     fn delete(&self, account_ref: &str) -> Result<(), KugouBridgeError> {
-        match Self::entry(account_ref)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(KugouBridgeError::Persistence(error.to_string())),
-        }
+        self.delete_secret(account_ref)
+            .map_err(|error| KugouBridgeError::Persistence(error.to_string()))
     }
 }
 
@@ -841,12 +825,8 @@ impl KugouServiceBridge {
         db: SharedConnection,
         source_host: Arc<source_runtime::DefaultSourceHost>,
     ) -> Result<Self, KugouBridgeError> {
-        Self::with_dependencies(
-            db,
-            source_host,
-            Arc::new(OsCredentialStore),
-            Arc::new(KugouHttpApi::new()?),
-        )
+        let credentials = Arc::new(AppCredentialStore::new(Arc::clone(&db), KUGOU_PROVIDER_ID));
+        Self::with_dependencies(db, source_host, credentials, Arc::new(KugouHttpApi::new()?))
     }
 
     fn with_dependencies(

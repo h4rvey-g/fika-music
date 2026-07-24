@@ -1,3 +1,4 @@
+use crate::database::AppCredentialStore;
 use crate::source_runtime::{
     self, JsonScalar, RemoteTrack, SourceAction, SourceAlbumSearchResponse,
     SourceAlbumSearchResult, SourceArtistSearchResponse, SourceArtistSearchResult,
@@ -30,7 +31,6 @@ pub const NETEASE_PROVIDER_ID: &str = "fika-netease";
 pub const NETEASE_HOST_BRIDGE_ID: &str = "netease-api-enhanced";
 pub const NETEASE_API_BASIS_VERSION: &str = "4.32.1";
 
-const CREDENTIAL_SERVICE: &str = "com.hvg.fika-music.netease";
 const ACCOUNT_REF_PREFIX: &str = "netease-account:";
 const QR_SESSION_TTL_SECONDS: i64 = 300;
 const MAX_PENDING_QR_SESSIONS: usize = 8;
@@ -269,37 +269,21 @@ trait CredentialStore: Send + Sync {
     fn delete(&self, account_ref: &str) -> Result<(), NeteaseBridgeError>;
 }
 
-#[derive(Debug, Default)]
-struct OsCredentialStore;
-
-impl OsCredentialStore {
-    fn entry(account_ref: &str) -> Result<keyring::Entry, NeteaseBridgeError> {
-        keyring::Entry::new(CREDENTIAL_SERVICE, account_ref)
-            .map_err(|error| NeteaseBridgeError::Persistence(error.to_string()))
-    }
-}
-
-impl CredentialStore for OsCredentialStore {
+impl CredentialStore for AppCredentialStore {
     fn save(&self, account_ref: &str, secret: &str) -> Result<(), NeteaseBridgeError> {
-        Self::entry(account_ref)?
-            .set_password(secret)
+        self.save_secret(account_ref, secret)
             .map_err(|error| NeteaseBridgeError::Persistence(error.to_string()))
     }
 
     fn load(&self, account_ref: &str) -> Result<String, NeteaseBridgeError> {
-        Self::entry(account_ref)?
-            .get_password()
-            .map_err(|error| match error {
-                keyring::Error::NoEntry => NeteaseBridgeError::CredentialExpired,
-                _ => NeteaseBridgeError::Persistence(error.to_string()),
-            })
+        self.load_secret(account_ref)
+            .map_err(|error| NeteaseBridgeError::Persistence(error.to_string()))?
+            .ok_or(NeteaseBridgeError::CredentialExpired)
     }
 
     fn delete(&self, account_ref: &str) -> Result<(), NeteaseBridgeError> {
-        match Self::entry(account_ref)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(NeteaseBridgeError::Persistence(error.to_string())),
-        }
+        self.delete_secret(account_ref)
+            .map_err(|error| NeteaseBridgeError::Persistence(error.to_string()))
     }
 }
 
@@ -342,7 +326,11 @@ impl NeteaseServiceBridge {
         db: SharedConnection,
         source_host: Arc<source_runtime::DefaultSourceHost>,
     ) -> Result<Self, NeteaseBridgeError> {
-        Self::with_credentials(db, source_host, Arc::new(OsCredentialStore))
+        let credentials = Arc::new(AppCredentialStore::new(
+            Arc::clone(&db),
+            NETEASE_PROVIDER_ID,
+        ));
+        Self::with_credentials(db, source_host, credentials)
     }
 
     fn with_credentials(

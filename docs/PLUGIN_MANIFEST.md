@@ -49,16 +49,16 @@ Unknown host bridges leave a package visible but incompatible.
 
 Provider capabilities can be declared at package level or entrypoint level;
 the effective declaration for a Provider is the union of package-level and that
-entrypoint's declarations. A user grant is persisted separately from the
-declaration and each Source Provider receives only its own intersection.
-Capabilities are never granted implicitly by installing a package, and an
-entrypoint-only capability is not exposed to sibling Providers.
+entrypoint's declarations. Enabling a Plugin grants its complete declared set,
+and each Source Provider receives only its own intersection. Installation does
+not execute a Provider, and an entrypoint-only capability is not exposed to
+sibling Providers.
 
 The production runtime accepts reserved entrypoints for bundled integrations:
 `builtin:netease` requires the `netease-api-enhanced` Service Bridge, while
 `builtin:kugou` requires the `kugou-music-api` Service Bridge. User packages
 cannot load a dynamic library or launch a sidecar. This keeps package
-discovery, permission review, and lifecycle management in place without
+discovery, capability enforcement, and lifecycle management in place without
 turning installation into an untrusted native-code execution boundary.
 
 `builtin:runtime-demo` and `builtin:catalog` exist only in Rust test builds.
@@ -88,21 +88,20 @@ the old Plugin rows and directory are removed.
 
 - Bundled packages live under the app resource `plugins` directory.
 - User packages are copied into the platform app-data `plugins` directory.
-- A newly installed package with declared capabilities starts in `NeedsReview`.
-- Enabling requires explicit permission review. Revoking a capability updates
-  the provider grant immediately and is enforced on the next runtime request.
+- A newly installed package starts disabled and can be enabled immediately.
+- Enabling automatically grants every capability declared by the current
+  manifest. The Plugin manager presents these declarations as read-only data.
 - Bundled packages can be disabled but cannot be removed.
 - Removing a user package deactivates its Providers before the package and
   persisted state are deleted.
 
-The registry persists enabled state, review state, capability grants, and the
-latest bounded diagnostic history in SQLite. Permission state is bound to a
-SHA-256 digest of the normalized manifest, so changing a package manifest
-requires a new review; reinstalling identical manifest content preserves the
-existing review state. The migration from the earlier non-cryptographic
-fingerprint intentionally requires one new review for existing local approvals.
+The registry persists enabled state, capability grants, and the latest bounded
+diagnostic history in SQLite. Grant state is bound to a SHA-256 digest of the
+normalized manifest, so changing a package manifest disables the package and
+clears prior grants; the next Enable action grants the new declaration.
+Reinstalling identical manifest content preserves the existing lifecycle state.
 Enabled Providers are initialized again during application startup and registry
-refresh. Refresh, removal, lifecycle, permission, and diagnostic writes use
+refresh. Refresh, removal, lifecycle, capability, and diagnostic writes use
 SQLite transactions or savepoints. Refresh and removal also restore the prior
 Provider handles, runtime grants, in-memory records, and package directory when
 a database or filesystem step fails.

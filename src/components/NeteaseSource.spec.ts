@@ -317,15 +317,15 @@ describe("NeteaseSource", () => {
     wrapper.unmount();
   });
 
-  it("routes disabled Plugin state to permission review", async () => {
+  it("routes disabled Plugin state to direct enablement", async () => {
     pluginApiMocks.listPlugins.mockResolvedValue([
-      pluginRecord({ state: "needs-review", enabled: false }),
+      pluginRecord({ state: "disabled", enabled: false }),
     ]);
     const wrapper = mountNeteaseSource();
 
     await flushPromises();
 
-    expect(wrapper.text()).toContain("Plugin permission review required");
+    expect(wrapper.text()).toContain("Plugin is disabled");
     const openPlugins = wrapper
       .findAll("button")
       .find((button) => button.text().includes("Open Plugins"));

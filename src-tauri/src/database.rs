@@ -1,8 +1,81 @@
-use rusqlite::Connection;
+use rusqlite::{params, Connection, OptionalExtension};
 use rusqlite_migration::{Migrations, M};
+use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
-const CURRENT_SCHEMA_VERSION: i64 = 9;
+const CURRENT_SCHEMA_VERSION: i64 = 10;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CredentialStoreError {
+    #[error("credential database lock was poisoned")]
+    LockPoisoned,
+    #[error(transparent)]
+    Database(#[from] rusqlite::Error),
+}
+
+pub(crate) struct AppCredentialStore {
+    connection: Arc<Mutex<Connection>>,
+    provider_id: &'static str,
+}
+
+impl AppCredentialStore {
+    pub(crate) fn new(connection: Arc<Mutex<Connection>>, provider_id: &'static str) -> Self {
+        Self {
+            connection,
+            provider_id,
+        }
+    }
+
+    pub(crate) fn save_secret(
+        &self,
+        account_ref: &str,
+        secret: &str,
+    ) -> Result<(), CredentialStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| CredentialStoreError::LockPoisoned)?;
+        connection.execute(
+            "INSERT INTO account_credentials (provider_id, account_ref, secret)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(provider_id, account_ref) DO UPDATE SET
+                 secret = excluded.secret",
+            params![self.provider_id, account_ref, secret],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn load_secret(
+        &self,
+        account_ref: &str,
+    ) -> Result<Option<String>, CredentialStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| CredentialStoreError::LockPoisoned)?;
+        connection
+            .query_row(
+                "SELECT secret FROM account_credentials
+                 WHERE provider_id = ?1 AND account_ref = ?2",
+                params![self.provider_id, account_ref],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn delete_secret(&self, account_ref: &str) -> Result<(), CredentialStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| CredentialStoreError::LockPoisoned)?;
+        connection.execute(
+            "DELETE FROM account_credentials WHERE provider_id = ?1 AND account_ref = ?2",
+            params![self.provider_id, account_ref],
+        )?;
+        Ok(())
+    }
+}
 
 const INITIAL_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS local_tracks (
@@ -240,6 +313,19 @@ fn migrations() -> Migrations<'static> {
             "ALTER TABLE online_download_tasks
              ADD COLUMN selected_audio_source_id TEXT;",
         ),
+        M::up(
+            "
+            CREATE TABLE IF NOT EXISTS account_credentials (
+                provider_id TEXT NOT NULL,
+                account_ref TEXT NOT NULL,
+                secret TEXT NOT NULL,
+                PRIMARY KEY(provider_id, account_ref)
+            );
+
+            UPDATE netease_accounts SET status = 'expired' WHERE status = 'active';
+            UPDATE kugou_accounts SET status = 'expired' WHERE status = 'active';
+            ",
+        ),
     ])
 }
 
@@ -264,7 +350,9 @@ fn add_column_if_missing(
 }
 
 pub fn initialize(connection: &mut Connection) -> Result<(), rusqlite_migration::Error> {
-    connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
+    connection.execute_batch(
+        "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;",
+    )?;
     migrations().to_latest(connection)
 }
 
@@ -331,6 +419,7 @@ mod tests {
         assert!(has_table(&connection, "online_search_history"));
         assert!(has_table(&connection, "online_download_tasks"));
         assert!(has_table(&connection, "online_download_items"));
+        assert!(has_table(&connection, "account_credentials"));
         assert!(has_column(
             &connection,
             "album_art_lookups",
@@ -432,6 +521,104 @@ mod tests {
                 CURRENT_SCHEMA_VERSION,
                 ("partial".to_owned(), "one failed".to_owned(), 0, 0),
             ),
+        );
+    }
+
+    #[test]
+    fn initialize_should_upgrade_version_nine_with_account_credentials() {
+        let mut connection = Connection::open_in_memory().expect("database should open");
+        migrations()
+            .to_version(&mut connection, 9)
+            .expect("version nine should initialize");
+        connection
+            .execute(
+                "INSERT INTO netease_accounts (
+                    account_ref, provider_id, user_id, display_name, status,
+                    connected_at, last_verified_at
+                 ) VALUES ('netease-account:1', 'fika-netease', '1', 'NetEase', 'active', 1, 1)",
+                [],
+            )
+            .expect("legacy NetEase account should insert");
+        connection
+            .execute(
+                "INSERT INTO kugou_accounts (
+                    account_ref, provider_id, user_id, display_name, status,
+                    connected_at, last_verified_at
+                 ) VALUES ('kugou-account:1', 'fika-kugou', '1', 'KuGou', 'active', 1, 1)",
+                [],
+            )
+            .expect("legacy KuGou account should insert");
+
+        initialize(&mut connection).expect("latest migration should run");
+        let active_accounts = connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM netease_accounts WHERE status = 'active') +
+                    (SELECT COUNT(*) FROM kugou_accounts WHERE status = 'active')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("migrated account statuses should load");
+
+        assert_eq!(
+            (
+                user_version(&connection),
+                has_table(&connection, "account_credentials"),
+                active_accounts,
+            ),
+            (CURRENT_SCHEMA_VERSION, true, 0)
+        );
+    }
+
+    #[test]
+    fn app_credential_store_should_persist_and_isolate_provider_secrets() {
+        let mut connection = Connection::open_in_memory().expect("database should open");
+        initialize(&mut connection).expect("migrations should run");
+        let connection = Arc::new(Mutex::new(connection));
+        let netease = AppCredentialStore::new(Arc::clone(&connection), "fika-netease");
+        let kugou = AppCredentialStore::new(connection, "fika-kugou");
+
+        netease
+            .save_secret("account-1", "netease-secret")
+            .expect("NetEase secret should persist");
+        kugou
+            .save_secret("account-1", "kugou-secret")
+            .expect("KuGou secret should persist");
+
+        assert_eq!(
+            (
+                netease.load_secret("account-1").unwrap(),
+                kugou.load_secret("account-1").unwrap(),
+            ),
+            (
+                Some("netease-secret".to_owned()),
+                Some("kugou-secret".to_owned()),
+            )
+        );
+    }
+
+    #[test]
+    fn app_credential_store_should_delete_only_the_requested_secret() {
+        let mut connection = Connection::open_in_memory().expect("database should open");
+        initialize(&mut connection).expect("migrations should run");
+        let store = AppCredentialStore::new(Arc::new(Mutex::new(connection)), "fika-netease");
+        store
+            .save_secret("account-1", "secret-1")
+            .expect("first secret should persist");
+        store
+            .save_secret("account-2", "secret-2")
+            .expect("second secret should persist");
+
+        store
+            .delete_secret("account-1")
+            .expect("first secret should delete");
+
+        assert_eq!(
+            (
+                store.load_secret("account-1").unwrap(),
+                store.load_secret("account-2").unwrap(),
+            ),
+            (None, Some("secret-2".to_owned()))
         );
     }
 }

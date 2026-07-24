@@ -10,7 +10,6 @@ const apiMocks = vi.hoisted(() => ({
   refreshPluginRegistry: vi.fn(),
   removePluginPackage: vi.fn(),
   selectPluginPackage: vi.fn(),
-  setPluginCapabilities: vi.fn(),
   setPluginEnabled: vi.fn(),
 }));
 
@@ -25,7 +24,7 @@ function pluginRecord(overrides: Partial<PluginRecord> = {}): PluginRecord {
     author: "Fika Music",
     path: "/plugins/runtime-demo",
     origin: "bundled",
-    state: "needs-review",
+    state: "disabled",
     enabled: false,
     permissionsReviewed: false,
     declaredCapabilities: ["network:any"],
@@ -43,7 +42,7 @@ function pluginRecord(overrides: Partial<PluginRecord> = {}): PluginRecord {
     ],
     diagnostics: [],
     canRemove: false,
-    canEnable: false,
+    canEnable: true,
     manifest: null,
     ...overrides,
   };
@@ -62,17 +61,13 @@ describe("PluginManager", () => {
 
     expect(apiMocks.listPlugins).toHaveBeenCalledOnce();
     expect(wrapper.text()).toContain("Runtime Demo");
-    expect(wrapper.text()).toContain("Review required");
+    expect(wrapper.text()).toContain("Disabled");
     expect(wrapper.emitted("pluginsChanged")?.[0]).toEqual([[pluginRecord()]]);
     wrapper.unmount();
   });
 
   it("reports enabled Plugin records to the application shell", async () => {
-    const disabled = pluginRecord({
-      state: "disabled",
-      permissionsReviewed: true,
-      canEnable: true,
-    });
+    const disabled = pluginRecord();
     const enabled = pluginRecord({
       state: "enabled",
       enabled: true,
@@ -95,33 +90,16 @@ describe("PluginManager", () => {
     wrapper.unmount();
   });
 
-  it("submits an explicit capability review", async () => {
-    apiMocks.setPluginCapabilities.mockResolvedValue(
-      pluginRecord({
-        state: "disabled",
-        permissionsReviewed: true,
-        canEnable: true,
-      }),
-    );
+  it("shows declared capabilities without review controls", async () => {
     const wrapper = mount(PluginManager);
     await flushPromises();
     await wrapper
       .get('button[aria-label="Inspect Runtime Demo"]')
       .trigger("click");
-    const confirmReview = wrapper
-      .findAll("button")
-      .find((button) => button.text().includes("Confirm review"));
 
-    expect(confirmReview).toBeDefined();
-    await confirmReview?.trigger("click");
-    await flushPromises();
-
-    expect(apiMocks.setPluginCapabilities).toHaveBeenCalledWith(
-      "fika.runtime-demo",
-      [],
-      true,
-    );
-    expect(wrapper.text()).toContain("Plugin permissions saved.");
+    expect(wrapper.text()).toContain("Network requests");
+    expect(wrapper.find('input[type="checkbox"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("Confirm review");
     wrapper.unmount();
   });
 });

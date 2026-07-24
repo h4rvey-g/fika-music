@@ -125,7 +125,7 @@ const mainSections = [
   {
     id: "plugins",
     label: "Plugins",
-    description: "Review installed packages and their permissions",
+    description: "Manage installed packages and diagnostics",
     icon: Plug,
   },
 ] as const;
@@ -212,7 +212,7 @@ const currentSection = computed(() => {
     return {
       label: activePlugin.value.name,
       description:
-        activePlugin.value.description || "Review this plugin's registered source providers",
+        activePlugin.value.description || "Inspect this plugin's registered source providers",
     };
   }
 

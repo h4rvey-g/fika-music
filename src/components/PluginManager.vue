@@ -8,7 +8,6 @@ import {
   Plug,
   Power,
   RefreshCw,
-  ShieldCheck,
   Trash2,
   X,
 } from "@lucide/vue";
@@ -19,10 +18,9 @@ import {
   refreshPluginRegistry,
   removePluginPackage,
   selectPluginPackage,
-  setPluginCapabilities,
   setPluginEnabled,
 } from "../lib/plugin-api";
-import type { PluginDiagnostic, PluginRecord, SourceCapability } from "../lib/plugin-api";
+import type { PluginDiagnostic, PluginRecord } from "../lib/plugin-api";
 
 const emit = defineEmits<{
   pluginsChanged: [plugins: PluginRecord[]];
@@ -83,10 +81,7 @@ async function installPlugin() {
     const installed = await installPluginPackage(packagePath);
     replacePlugin(installed);
     expandedPluginId.value = installed.id;
-    pluginNotice.value =
-      installed.state === "needs-review"
-        ? `${installed.name} installed and is awaiting permission review.`
-        : `${installed.name} installed.`;
+    pluginNotice.value = `${installed.name} installed.`;
   } catch (error) {
     pluginError.value = normalizeError(error);
   } finally {
@@ -102,47 +97,6 @@ async function toggleEnabled(plugin: PluginRecord) {
   try {
     const updated = await setPluginEnabled(plugin.id, !plugin.enabled);
     replacePlugin(updated);
-  } catch (error) {
-    pluginError.value = normalizeError(error);
-    await loadPlugins();
-  } finally {
-    busyPluginId.value = null;
-  }
-}
-
-async function updateCapability(
-  plugin: PluginRecord,
-  capability: SourceCapability,
-  granted: boolean,
-) {
-  const nextCapabilities = new Set(plugin.grantedCapabilities);
-  if (granted) {
-    nextCapabilities.add(capability);
-  } else {
-    nextCapabilities.delete(capability);
-  }
-  await saveCapabilities(plugin, [...nextCapabilities], plugin.permissionsReviewed);
-}
-
-async function reviewCapabilities(plugin: PluginRecord) {
-  await saveCapabilities(plugin, plugin.grantedCapabilities, true);
-}
-
-async function saveCapabilities(
-  plugin: PluginRecord,
-  capabilities: SourceCapability[],
-  reviewed: boolean,
-) {
-  busyPluginId.value = plugin.id;
-  pluginError.value = null;
-  pluginNotice.value = null;
-
-  try {
-    const updated = await setPluginCapabilities(plugin.id, capabilities, reviewed);
-    replacePlugin(updated);
-    pluginNotice.value = reviewed
-      ? "Plugin permissions saved."
-      : "Plugin permissions changed; review is still required.";
   } catch (error) {
     pluginError.value = normalizeError(error);
     await loadPlugins();
@@ -227,7 +181,6 @@ function capabilityLabel(capability: string) {
 function stateLabel(state: PluginRecord["state"]) {
   const labels: Record<string, string> = {
     disabled: "Disabled",
-    "needs-review": "Review required",
     enabled: "Enabled",
     incompatible: "Incompatible",
     error: "Load error",
@@ -239,9 +192,6 @@ function stateLabel(state: PluginRecord["state"]) {
 function stateClass(state: PluginRecord["state"]) {
   if (state === "enabled") {
     return "badge-success";
-  }
-  if (state === "needs-review") {
-    return "badge-warning";
   }
   if (state === "incompatible" || state === "error" || state === "invalid") {
     return "badge-error";
@@ -383,43 +333,15 @@ function normalizeError(error: unknown) {
             </div>
 
             <div v-if="plugin.declaredCapabilities.length" class="space-y-2">
-              <div class="flex items-center justify-between gap-3">
-                <h4 class="text-sm font-semibold">Capabilities</h4>
-                <span v-if="plugin.permissionsReviewed" class="flex items-center gap-1 text-xs text-success">
-                  <ShieldCheck :size="14" aria-hidden="true" />
-                  Reviewed
-                </span>
-                <span v-else class="text-xs text-warning">Review required</span>
-              </div>
-              <div class="grid gap-2 sm:grid-cols-2">
-                <label
+              <h4 class="text-sm font-semibold">Capabilities</h4>
+              <div class="flex flex-wrap gap-2">
+                <span
                   v-for="capability in plugin.declaredCapabilities"
                   :key="capability"
-                  class="flex min-h-10 items-center justify-between gap-3 rounded border border-base-300 px-3 py-2 text-sm"
+                  class="badge badge-outline"
                 >
-                  <span>{{ capabilityLabel(capability) }}</span>
-                  <input
-                    class="toggle toggle-sm"
-                    type="checkbox"
-                    :checked="plugin.grantedCapabilities.includes(capability)"
-                    :disabled="busyPluginId === plugin.id"
-                    :aria-label="`Grant ${capabilityLabel(capability)}`"
-                    @change="updateCapability(plugin, capability, ($event.target as HTMLInputElement).checked)"
-                  />
-                </label>
-              </div>
-              <div v-if="!plugin.permissionsReviewed" class="alert alert-warning alert-soft">
-                <AlertCircle :size="17" aria-hidden="true" />
-                <span class="text-sm">Review the selected capabilities before enabling this Plugin.</span>
-                <button
-                  class="btn btn-sm"
-                  type="button"
-                  :disabled="busyPluginId === plugin.id"
-                  @click="reviewCapabilities(plugin)"
-                >
-                  <ShieldCheck :size="15" aria-hidden="true" />
-                  Confirm review
-                </button>
+                  {{ capabilityLabel(capability) }}
+                </span>
               </div>
             </div>
 

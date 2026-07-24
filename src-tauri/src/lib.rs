@@ -326,9 +326,11 @@ impl AppState {
     ) -> AppResult<Self> {
         if let Some(parent) = db_path.parent() {
             fs::create_dir_all(parent)?;
+            restrict_path_to_current_user(parent, 0o700)?;
         }
 
         let mut connection = Connection::open(db_path)?;
+        restrict_path_to_current_user(db_path, 0o600)?;
         database::initialize(&mut connection)?;
         let db = Arc::new(Mutex::new(connection));
         {
@@ -405,6 +407,20 @@ impl AppState {
             kugou_bridge,
         })
     }
+}
+
+#[cfg(unix)]
+fn restrict_path_to_current_user(path: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(mode);
+    fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn restrict_path_to_current_user(_path: &Path, _mode: u32) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn register_source_request(

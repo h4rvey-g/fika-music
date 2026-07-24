@@ -150,7 +150,7 @@ export type PluginProviderState = { id: string, entrypoint: string, initialized:
 
 export type PluginRecord = { id: string, name: string, version: string | null, description: string | null, author: string | null, path: string, origin: PluginOrigin, state: PluginState, enabled: boolean, permissionsReviewed: boolean, declaredCapabilities: Array<SourceCapability>, grantedCapabilities: Array<SourceCapability>, requiredHostBridges: Array<string>, providers: Array<PluginProviderState>, diagnostics: Array<PluginDiagnostic>, canRemove: boolean, canEnable: boolean, manifest: PluginManifest | null, };
 
-export type PluginState = "disabled" | "needs-review" | "enabled" | "incompatible" | "error" | "invalid";
+export type PluginState = "disabled" | "enabled" | "incompatible" | "error" | "invalid";
 
 export type RemoteCommandError = { message: string, diagnostics: Array<SourceDiagnostic>, };
 

@@ -275,7 +275,6 @@ impl PluginOrigin {
 #[ts(export_to = "bindings.ts")]
 pub enum PluginState {
     Disabled,
-    NeedsReview,
     Enabled,
     Incompatible,
     Error,
@@ -948,11 +947,7 @@ impl PluginRegistry {
                 );
             }
         } else if candidate.manifest.is_some() && candidate.state != PluginState::Incompatible {
-            candidate.state = if !candidate.declared_capabilities.is_empty() && !reviewed {
-                PluginState::NeedsReview
-            } else {
-                PluginState::Disabled
-            };
+            candidate.state = PluginState::Disabled;
         }
         update_action_flags(&mut candidate);
 
@@ -1357,47 +1352,49 @@ impl PluginRegistry {
         connection: &Connection,
         plugin_id: &str,
     ) -> Result<PluginRecord, PluginSystemError> {
-        let Some(plugin) = self.plugins.get(plugin_id) else {
-            return Err(PluginSystemError::NotFound(plugin_id.to_owned()));
+        let (manifest, declared_capabilities, should_grant_declared_capabilities) = {
+            let Some(plugin) = self.plugins.get(plugin_id) else {
+                return Err(PluginSystemError::NotFound(plugin_id.to_owned()));
+            };
+            let provider_handles_are_active = plugin.record.enabled
+                && plugin.providers.len() == plugin.record.providers.len()
+                && plugin.record.providers.iter().all(|provider| {
+                    provider.initialized && plugin.providers.contains_key(&provider.id)
+                });
+            if provider_handles_are_active {
+                return Ok(plugin.record.clone());
+            }
+            let Some(manifest) = plugin.record.manifest.clone() else {
+                return Err(PluginSystemError::InvalidState(
+                    plugin_id.to_owned(),
+                    "manifest is invalid".to_owned(),
+                ));
+            };
+            if plugin.record.state == PluginState::Incompatible {
+                return Err(PluginSystemError::InvalidState(
+                    plugin_id.to_owned(),
+                    "plugin is incompatible with the current Source Runtime".to_owned(),
+                ));
+            }
+            (
+                manifest,
+                plugin.record.declared_capabilities.clone(),
+                !plugin.record.permissions_reviewed
+                    || plugin.record.granted_capabilities != plugin.record.declared_capabilities,
+            )
         };
-        let provider_handles_are_active = plugin.record.enabled
-            && plugin.providers.len() == plugin.record.providers.len()
-            && plugin.record.providers.iter().all(|provider| {
-                provider.initialized && plugin.providers.contains_key(&provider.id)
-            });
-        if provider_handles_are_active {
-            return Ok(plugin.record.clone());
-        }
-        let Some(manifest) = plugin.record.manifest.clone() else {
-            return Err(PluginSystemError::InvalidState(
-                plugin_id.to_owned(),
-                "manifest is invalid".to_owned(),
-            ));
-        };
-        if plugin.record.state == PluginState::Incompatible {
-            return Err(PluginSystemError::InvalidState(
-                plugin_id.to_owned(),
-                "plugin is incompatible with the current Source Runtime".to_owned(),
-            ));
-        }
-        if !plugin.record.declared_capabilities.is_empty() && !plugin.record.permissions_reviewed {
-            let plugin = self
-                .plugins
-                .get_mut(plugin_id)
-                .expect("plugin checked above");
-            plugin.record.state = PluginState::NeedsReview;
-            plugin.record.enabled = false;
-            update_action_flags(&mut plugin.record);
-            persist_plugin(connection, &plugin.record)?;
-            return Err(PluginSystemError::InvalidState(
-                plugin_id.to_owned(),
-                "capabilities must be reviewed before enabling the plugin".to_owned(),
-            ));
+        if should_grant_declared_capabilities {
+            self.set_capabilities(connection, plugin_id, declared_capabilities, true)?;
         }
 
-        let granted = plugin.record.granted_capabilities.clone();
+        let (granted, package_path) = {
+            let plugin = self.plugins.get(plugin_id).expect("plugin checked above");
+            (
+                plugin.record.granted_capabilities.clone(),
+                PathBuf::from(&plugin.record.path),
+            )
+        };
         let entries = manifest.provider_entrypoints.clone();
-        let package_path = PathBuf::from(&plugin.record.path);
         let runtime = Arc::clone(&self.runtime);
         let mut providers = BTreeMap::new();
         let mut provider_states = Vec::new();
@@ -1595,12 +1592,7 @@ impl PluginRegistry {
             provider.runtime_report = None;
         }
         candidate.enabled = false;
-        candidate.state =
-            if !candidate.declared_capabilities.is_empty() && !candidate.permissions_reviewed {
-                PluginState::NeedsReview
-            } else {
-                PluginState::Disabled
-            };
+        candidate.state = PluginState::Disabled;
         append_diagnostic(
             &mut candidate.diagnostics,
             PluginDiagnostic::info(
@@ -2045,8 +2037,6 @@ fn record_for_manifest(
         PluginState::Incompatible
     } else if enabled {
         PluginState::Enabled
-    } else if !declared_capabilities.is_empty() && !permissions_reviewed {
-        PluginState::NeedsReview
     } else {
         PluginState::Disabled
     };
@@ -2089,8 +2079,7 @@ fn record_for_manifest(
 fn update_action_flags(record: &mut PluginRecord) {
     record.can_enable = record.manifest.is_some()
         && record.state != PluginState::Invalid
-        && record.state != PluginState::Incompatible
-        && (record.declared_capabilities.is_empty() || record.permissions_reviewed);
+        && record.state != PluginState::Incompatible;
 }
 
 fn build_provider(
@@ -3013,7 +3002,7 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_persists_review_enable_revoke_and_disable() {
+    fn lifecycle_auto_grants_on_enable_and_persists_revoke_and_disable() {
         let root = temp_dir("lifecycle");
         let bundled = root.join("bundled");
         let user = root.join("user");
@@ -3034,23 +3023,19 @@ mod tests {
         registry
             .refresh(&connection)
             .expect("registry should refresh");
-        assert_eq!(
-            registry.record("runtime.plugin").unwrap().state,
-            PluginState::NeedsReview
-        );
+        let disabled = registry.record("runtime.plugin").unwrap();
+        assert_eq!(disabled.state, PluginState::Disabled);
+        assert!(disabled.can_enable);
 
-        registry
-            .set_capabilities(
-                &connection,
-                "runtime.plugin",
-                [SourceCapability::NetworkAny],
-                true,
-            )
-            .expect("capabilities should be reviewed");
         let enabled = registry
             .set_enabled(&connection, "runtime.plugin", true)
             .expect("plugin should enable");
         assert_eq!(enabled.state, PluginState::Enabled);
+        assert!(enabled.permissions_reviewed);
+        assert_eq!(
+            enabled.granted_capabilities,
+            BTreeSet::from([SourceCapability::NetworkAny])
+        );
         assert!(enabled
             .diagnostics
             .iter()
@@ -3108,7 +3093,8 @@ mod tests {
         let changed = restarted_registry
             .record("runtime.plugin")
             .expect("changed plugin should remain visible");
-        assert_eq!(changed.state, PluginState::NeedsReview);
+        assert_eq!(changed.state, PluginState::Disabled);
+        assert!(changed.can_enable);
         assert!(changed.granted_capabilities.is_empty());
 
         fs::remove_dir_all(root).expect("test directory should be removed");
@@ -3896,7 +3882,8 @@ mod tests {
             .install(&connection, &package)
             .expect("package should install");
         assert_eq!(installed.origin, PluginOrigin::User);
-        assert_eq!(installed.state, PluginState::NeedsReview);
+        assert_eq!(installed.state, PluginState::Disabled);
+        assert!(installed.can_enable);
         assert!(Path::new(&installed.path).join("asset.txt").is_file());
 
         registry

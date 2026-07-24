@@ -2,7 +2,7 @@
 
 Status: accepted; package boundary amended by ADR 0013
 
-Fika Music will implement the Plugin System as a package and lifecycle layer built on top of the core LX-compatible Source Runtime. The Plugin System does not implement LX Compatibility itself; it installs, validates, enables/disables, permission-reviews, updates, and diagnoses packages that contain Source Providers and related assets.
+Fika Music will implement the Plugin System as a package and lifecycle layer built on top of the core LX-compatible Source Runtime. The Plugin System does not implement LX Compatibility itself; it installs, validates, enables/disables, grants manifest-declared capabilities, updates, and diagnoses packages that contain Source Providers and related assets.
 
 ## Context
 
@@ -23,7 +23,7 @@ The Plugin System owns:
 - Plugin package manifest schema.
 - Bundled and user-installed Plugin discovery.
 - Install/remove/enable/disable lifecycle state.
-- Capability review UI and persisted approvals.
+- Automatic grant of the complete manifest-declared capability set on enable.
 - Compatibility-target checks against the Source Runtime.
 - Plugin diagnostics assembled from Source Runtime logs, security denials, load errors, and bridge errors.
 
@@ -39,5 +39,6 @@ The Plugin System does not own:
 
 - Source Runtime APIs must expose enough lifecycle hooks for the Plugin System to load and unload Source Providers safely.
 - Plugin manifests describe capabilities and compatibility targets, but capability enforcement still happens inside host-mediated Source Runtime bindings.
+- Plugin capability declarations remain visible for inspection, but enabling is a single action without a separate review or per-capability selection step.
 - The bundled NetEase integration can be implemented later as the first production Plugin without changing the Source Runtime boundary.
 - Imported Audio Sources can reuse the Source Runtime without becoming Plugins.
