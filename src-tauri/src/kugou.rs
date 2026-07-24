@@ -2105,7 +2105,13 @@ fn kugou_album_from_json(value: &JsonValue) -> Option<SourceAlbumSearchResult> {
 fn kugou_playlist_search_from_json(value: &JsonValue) -> Option<SourcePlaylistSearchResult> {
     let id = first_json_string(
         value,
-        &["global_collection_id", "specialid", "special_id", "id"],
+        &[
+            "global_collection_id",
+            "gid",
+            "specialid",
+            "special_id",
+            "id",
+        ],
     )?;
     Some(SourcePlaylistSearchResult {
         id: id.clone(),
@@ -2767,6 +2773,18 @@ mod tests {
             ),
             ("collection_3_1863870844_4_0", 47, false)
         );
+    }
+
+    #[test]
+    fn playlist_search_parser_should_prefer_gid_over_numeric_special_id() {
+        let playlist = kugou_playlist_search_from_json(&json!({
+            "gid": "collection_3_2132029040_287_0",
+            "specialid": 6409645,
+            "specialname": "Current KuGou response"
+        }))
+        .expect("playlist should normalize");
+
+        assert_eq!(playlist.id, "collection_3_2132029040_287_0");
     }
 
     #[test]
