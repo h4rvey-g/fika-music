@@ -2,7 +2,7 @@ use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
 
 #[cfg(test)]
-const CURRENT_SCHEMA_VERSION: i64 = 7;
+const CURRENT_SCHEMA_VERSION: i64 = 9;
 
 const INITIAL_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS local_tracks (
@@ -191,6 +191,55 @@ fn migrations() -> Migrations<'static> {
             );
             ",
         ),
+        M::up(
+            "
+            CREATE TABLE IF NOT EXISTS online_search_history (
+                normalized_query TEXT PRIMARY KEY,
+                query TEXT NOT NULL,
+                searched_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_online_search_history_time
+                ON online_search_history(searched_at DESC);
+
+            CREATE TABLE IF NOT EXISTS online_download_tasks (
+                task_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                state TEXT NOT NULL,
+                destination TEXT NOT NULL,
+                total_items INTEGER NOT NULL,
+                completed_items INTEGER NOT NULL DEFAULT 0,
+                skipped_items INTEGER NOT NULL DEFAULT 0,
+                failed_items INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS online_download_items (
+                item_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                track_json TEXT NOT NULL,
+                target_path TEXT,
+                message TEXT,
+                bytes_downloaded INTEGER NOT NULL DEFAULT 0,
+                total_bytes INTEGER,
+                etag TEXT,
+                last_modified TEXT,
+                temporary_path TEXT,
+                FOREIGN KEY(task_id) REFERENCES online_download_tasks(task_id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_online_download_items_task_position
+                ON online_download_items(task_id, position);
+            ",
+        ),
+        M::up(
+            "ALTER TABLE online_download_tasks
+             ADD COLUMN selected_audio_source_id TEXT;",
+        ),
     ])
 }
 
@@ -279,6 +328,9 @@ mod tests {
         assert!(has_table(&connection, "audio_source_states"));
         assert!(has_table(&connection, "audio_source_diagnostics"));
         assert!(has_table(&connection, "kugou_accounts"));
+        assert!(has_table(&connection, "online_search_history"));
+        assert!(has_table(&connection, "online_download_tasks"));
+        assert!(has_table(&connection, "online_download_items"));
         assert!(has_column(
             &connection,
             "album_art_lookups",

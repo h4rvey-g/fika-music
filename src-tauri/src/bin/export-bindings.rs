@@ -8,6 +8,15 @@ use fika_music_lib::lyrics::{LocalTrackPlaybackDetails, TrackLyricsQuery};
 use fika_music_lib::netease::{
     NeteaseAccount, NeteaseMutationAudit, NeteaseQrLoginPoll, NeteaseQrLoginStart,
 };
+use fika_music_lib::online_download::{
+    OnlineDownloadItem, OnlineDownloadItemState, OnlineDownloadState, OnlineDownloadTask,
+};
+use fika_music_lib::online_music::{
+    OnlineAlbum, OnlineArtist, OnlineChannel, OnlineMusicSettings, OnlinePlaylist,
+    OnlinePlaylistDetailError, OnlineSearchData, OnlineSearchHistoryEntry, OnlineSearchSection,
+    OnlineSearchSectionEvent, OnlineSearchSectionResult, OnlineSuggestionsResult, OnlineTrack,
+    OnlineTrackPage,
+};
 use fika_music_lib::plugin_system::PluginRecord;
 use fika_music_lib::source_runtime::{SourceRequest, SourceRequestOutcome};
 use fika_music_lib::{
@@ -103,6 +112,24 @@ fn generate(output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     export_all::<KugouAccount>(&config)?;
     export_all::<KugouQrLoginStart>(&config)?;
     export_all::<KugouQrLoginPoll>(&config)?;
+    export_all::<OnlineMusicSettings>(&config)?;
+    export_all::<OnlineSearchHistoryEntry>(&config)?;
+    export_all::<OnlineChannel>(&config)?;
+    export_all::<OnlineSearchSection>(&config)?;
+    export_all::<OnlineSearchData>(&config)?;
+    export_all::<OnlineSearchSectionResult>(&config)?;
+    export_all::<OnlineSearchSectionEvent>(&config)?;
+    export_all::<OnlineSuggestionsResult>(&config)?;
+    export_all::<OnlineTrack>(&config)?;
+    export_all::<OnlineArtist>(&config)?;
+    export_all::<OnlineAlbum>(&config)?;
+    export_all::<OnlinePlaylist>(&config)?;
+    export_all::<OnlinePlaylistDetailError>(&config)?;
+    export_all::<OnlineTrackPage>(&config)?;
+    export_all::<OnlineDownloadState>(&config)?;
+    export_all::<OnlineDownloadItemState>(&config)?;
+    export_all::<OnlineDownloadItem>(&config)?;
+    export_all::<OnlineDownloadTask>(&config)?;
     append_command_names(&output_file)?;
     Ok(())
 }

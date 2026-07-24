@@ -330,6 +330,7 @@ struct AudioSourceEntryRuntime {
     provider: Option<Arc<dyn SourceProvider>>,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedAudioSourceRequest {
     audio_source_id: String,
     provider_id: String,

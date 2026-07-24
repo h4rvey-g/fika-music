@@ -1,7 +1,10 @@
 use crate::source_runtime::{
-    self, RemoteTrack, SourceAction, SourceCapability, SourceInfo, SourcePlaylist,
-    SourcePlaylistDetail, SourceProvider, SourceQuality, SourceRecommendationsResponse,
-    SourceRequest, SourceResponse, SourceRuntimeContext, SourceRuntimeError,
+    self, JsonScalar, RemoteTrack, SourceAction, SourceAlbumSearchResponse,
+    SourceAlbumSearchResult, SourceArtistSearchResponse, SourceArtistSearchResult,
+    SourceCapability, SourceEntityRef, SourceInfo, SourcePlaylist, SourcePlaylistDetail,
+    SourcePlaylistSearchResponse, SourcePlaylistSearchResult, SourceProvider, SourceQuality,
+    SourceRecommendationsResponse, SourceRequest, SourceResponse, SourceRuntimeContext,
+    SourceRuntimeError, SourceSearchResponse, SourceSuggestionsResponse,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
@@ -212,6 +215,60 @@ impl KugouBridgeError {
 }
 
 pub trait KugouProviderBridge: Send + Sync {
+    fn music_search(
+        &self,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceSearchResponse, KugouBridgeError>;
+
+    fn artist_search(
+        &self,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceArtistSearchResponse, KugouBridgeError>;
+
+    fn album_search(
+        &self,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceAlbumSearchResponse, KugouBridgeError>;
+
+    fn playlist_search(
+        &self,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourcePlaylistSearchResponse, KugouBridgeError>;
+
+    fn search_suggestions(
+        &self,
+        keyword: &str,
+        limit: u64,
+    ) -> Result<SourceSuggestionsResponse, KugouBridgeError>;
+
+    fn artist_top_tracks(
+        &self,
+        artist: &SourceEntityRef,
+        limit: u64,
+    ) -> Result<SourceSearchResponse, KugouBridgeError>;
+
+    fn album_tracks(
+        &self,
+        album: &SourceEntityRef,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceSearchResponse, KugouBridgeError>;
+
+    fn public_playlist_tracks(
+        &self,
+        playlist: &SourceEntityRef,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceSearchResponse, KugouBridgeError>;
+
     fn music_url(
         &self,
         account_ref: &str,
@@ -277,6 +334,32 @@ impl CredentialStore for OsCredentialStore {
 }
 
 trait KugouApi: Send + Sync {
+    fn search(
+        &self,
+        search_type: &str,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<JsonValue, KugouBridgeError>;
+    fn search_suggest(&self, keyword: &str) -> Result<JsonValue, KugouBridgeError>;
+    fn artist_audios(
+        &self,
+        artist_id: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<JsonValue, KugouBridgeError>;
+    fn album_songs(
+        &self,
+        album_id: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<JsonValue, KugouBridgeError>;
+    fn public_playlist_page(
+        &self,
+        playlist_id: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<JsonValue, KugouBridgeError>;
     fn start_qr_login(&self, device: &KugouDevice) -> Result<JsonValue, KugouBridgeError>;
     fn poll_qr_login(&self, device: &KugouDevice, key: &str)
         -> Result<JsonValue, KugouBridgeError>;
@@ -392,6 +475,156 @@ impl KugouHttpApi {
 }
 
 impl KugouApi for KugouHttpApi {
+    fn search(
+        &self,
+        search_type: &str,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<JsonValue, KugouBridgeError> {
+        let type_name = match search_type {
+            "album" | "author" | "special" => search_type,
+            _ => "song",
+        };
+        self.request_json(
+            "search KuGou",
+            GATEWAY_BASE_URL,
+            &format!(
+                "/{}/search/{type_name}",
+                if type_name == "song" { "v3" } else { "v1" }
+            ),
+            Method::GET,
+            &KugouDevice::generate(),
+            None,
+            BTreeMap::from([
+                ("albumhide".to_owned(), "0".to_owned()),
+                ("iscorrection".to_owned(), "1".to_owned()),
+                ("keyword".to_owned(), keyword.to_owned()),
+                ("nocollect".to_owned(), "0".to_owned()),
+                ("page".to_owned(), page.to_string()),
+                ("pagesize".to_owned(), page_size.to_string()),
+                ("platform".to_owned(), "AndroidFilter".to_owned()),
+            ]),
+            None,
+            SignatureKind::Android,
+            Some("complexsearch.kugou.com"),
+        )
+    }
+
+    fn search_suggest(&self, keyword: &str) -> Result<JsonValue, KugouBridgeError> {
+        self.request_json(
+            "fetch search suggestions",
+            GATEWAY_BASE_URL,
+            "/v2/getSearchTip",
+            Method::GET,
+            &KugouDevice::generate(),
+            None,
+            BTreeMap::from([
+                ("keyword".to_owned(), keyword.to_owned()),
+                ("AlbumTipCount".to_owned(), "8".to_owned()),
+                ("CorrectTipCount".to_owned(), "8".to_owned()),
+                ("MVTipCount".to_owned(), "0".to_owned()),
+                ("MusicTipCount".to_owned(), "8".to_owned()),
+                ("radiotip".to_owned(), "1".to_owned()),
+            ]),
+            None,
+            SignatureKind::Android,
+            Some("searchtip.kugou.com"),
+        )
+    }
+
+    fn artist_audios(
+        &self,
+        artist_id: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<JsonValue, KugouBridgeError> {
+        let clienttime = now_timestamp();
+        self.request_json(
+            "read artist top tracks",
+            "https://openapi.kugou.com",
+            "/kmr/v1/audio_group/author",
+            Method::POST,
+            &KugouDevice::generate(),
+            None,
+            BTreeMap::new(),
+            Some(json!({
+                "appid": APP_ID,
+                "clientver": CLIENT_VERSION,
+                "clienttime": clienttime,
+                "key": sign_params_key(clienttime),
+                "author_id": artist_id,
+                "pagesize": page_size,
+                "page": page,
+                "sort": 1,
+                "area_code": "all",
+            })),
+            SignatureKind::Android,
+            Some("openapi.kugou.com"),
+        )
+    }
+
+    fn album_songs(
+        &self,
+        album_id: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<JsonValue, KugouBridgeError> {
+        self.request_json(
+            "read album",
+            GATEWAY_BASE_URL,
+            "/v1/album_audio/lite",
+            Method::POST,
+            &KugouDevice::generate(),
+            None,
+            BTreeMap::new(),
+            Some(json!({
+                "album_id": album_id,
+                "is_buy": "",
+                "page": page,
+                "pagesize": page_size,
+            })),
+            SignatureKind::Android,
+            Some("openapi.kugou.com"),
+        )
+    }
+
+    fn public_playlist_page(
+        &self,
+        playlist_id: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<JsonValue, KugouBridgeError> {
+        self.request_json(
+            "read public playlist",
+            GATEWAY_BASE_URL,
+            "/pubsongs/v2/get_other_list_file_nofilt",
+            Method::GET,
+            &KugouDevice::generate(),
+            None,
+            BTreeMap::from([
+                ("area_code".to_owned(), "1".to_owned()),
+                (
+                    "begin_idx".to_owned(),
+                    page.saturating_sub(1).saturating_mul(page_size).to_string(),
+                ),
+                ("plat".to_owned(), "1".to_owned()),
+                ("type".to_owned(), "1".to_owned()),
+                ("mode".to_owned(), "1".to_owned()),
+                ("personal_switch".to_owned(), "1".to_owned()),
+                (
+                    "extend_fields".to_owned(),
+                    "abtags,hot_cmt,popularization".to_owned(),
+                ),
+                ("pagesize".to_owned(), page_size.to_string()),
+                ("global_collection_id".to_owned(), playlist_id.to_owned()),
+            ]),
+            None,
+            SignatureKind::Android,
+            None,
+        )
+    }
+
     fn start_qr_login(&self, device: &KugouDevice) -> Result<JsonValue, KugouBridgeError> {
         self.request_json(
             "start QR login",
@@ -957,6 +1190,155 @@ impl KugouServiceBridge {
 }
 
 impl KugouProviderBridge for KugouServiceBridge {
+    fn music_search(
+        &self,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceSearchResponse, KugouBridgeError> {
+        let body = self.api.search("song", keyword, page, page_size)?;
+        let list = kugou_items(&body)
+            .into_iter()
+            .flatten()
+            .filter_map(remote_track_from_json)
+            .collect::<Vec<_>>();
+        Ok(SourceSearchResponse {
+            is_end: kugou_is_end(&body, page, page_size, list.len()),
+            total: kugou_total(&body),
+            list,
+        })
+    }
+
+    fn artist_search(
+        &self,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceArtistSearchResponse, KugouBridgeError> {
+        let body = self.api.search("author", keyword, page, page_size)?;
+        let list = kugou_items(&body)
+            .into_iter()
+            .flatten()
+            .filter_map(kugou_artist_from_json)
+            .collect::<Vec<_>>();
+        Ok(SourceArtistSearchResponse {
+            is_end: kugou_is_end(&body, page, page_size, list.len()),
+            total: kugou_total(&body),
+            list,
+        })
+    }
+
+    fn album_search(
+        &self,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceAlbumSearchResponse, KugouBridgeError> {
+        let body = self.api.search("album", keyword, page, page_size)?;
+        let list = kugou_items(&body)
+            .into_iter()
+            .flatten()
+            .filter_map(kugou_album_from_json)
+            .collect::<Vec<_>>();
+        Ok(SourceAlbumSearchResponse {
+            is_end: kugou_is_end(&body, page, page_size, list.len()),
+            total: kugou_total(&body),
+            list,
+        })
+    }
+
+    fn playlist_search(
+        &self,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourcePlaylistSearchResponse, KugouBridgeError> {
+        let body = self.api.search("special", keyword, page, page_size)?;
+        let list = kugou_items(&body)
+            .into_iter()
+            .flatten()
+            .filter_map(kugou_playlist_search_from_json)
+            .collect::<Vec<_>>();
+        Ok(SourcePlaylistSearchResponse {
+            is_end: kugou_is_end(&body, page, page_size, list.len()),
+            total: kugou_total(&body),
+            list,
+        })
+    }
+
+    fn search_suggestions(
+        &self,
+        keyword: &str,
+        limit: u64,
+    ) -> Result<SourceSuggestionsResponse, KugouBridgeError> {
+        let body = self.api.search_suggest(keyword)?;
+        let mut list = Vec::new();
+        collect_kugou_suggestions(body.get("data").unwrap_or(&body), &mut list);
+        let mut seen = BTreeSet::new();
+        list.retain(|suggestion| seen.insert(suggestion.to_lowercase()));
+        list.truncate(limit as usize);
+        Ok(SourceSuggestionsResponse { list })
+    }
+
+    fn artist_top_tracks(
+        &self,
+        artist: &SourceEntityRef,
+        limit: u64,
+    ) -> Result<SourceSearchResponse, KugouBridgeError> {
+        let body = self.api.artist_audios(&artist.id, 1, limit)?;
+        let list = kugou_items(&body)
+            .into_iter()
+            .flatten()
+            .filter_map(remote_track_from_json)
+            .take(limit as usize)
+            .collect::<Vec<_>>();
+        Ok(SourceSearchResponse {
+            is_end: true,
+            total: kugou_total(&body),
+            list,
+        })
+    }
+
+    fn album_tracks(
+        &self,
+        album: &SourceEntityRef,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceSearchResponse, KugouBridgeError> {
+        let body = self.api.album_songs(&album.id, page, page_size)?;
+        let list = kugou_items(&body)
+            .into_iter()
+            .flatten()
+            .filter_map(remote_track_from_json)
+            .collect::<Vec<_>>();
+        Ok(SourceSearchResponse {
+            is_end: kugou_is_end(&body, page, page_size, list.len()),
+            total: kugou_total(&body),
+            list,
+        })
+    }
+
+    fn public_playlist_tracks(
+        &self,
+        playlist: &SourceEntityRef,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceSearchResponse, KugouBridgeError> {
+        let body = self
+            .api
+            .public_playlist_page(&playlist.id, page, page_size)?;
+        let list = kugou_items(&body)
+            .into_iter()
+            .flatten()
+            .filter_map(remote_track_from_json)
+            .collect::<Vec<_>>();
+        Ok(SourceSearchResponse {
+            is_end: kugou_is_end(&body, page, page_size, list.len()),
+            total: kugou_total(&body),
+            list,
+        })
+    }
+
     fn music_url(
         &self,
         account_ref: &str,
@@ -1132,7 +1514,7 @@ impl KugouSourceProvider {
         result: Result<T, KugouBridgeError>,
     ) -> Result<T, SourceRuntimeError> {
         context.ensure_not_cancelled(operation)?;
-        result.map_err(|error| context.provider_error(error.to_string()))
+        result.map_err(|error| context.provider_error_with_code(error.code(), error.to_string()))
     }
 }
 
@@ -1158,6 +1540,14 @@ impl SourceProvider for KugouSourceProvider {
                 source_runtime::LX_SOURCE_KG,
                 "KuGou Music",
                 vec![
+                    SourceAction::MusicSearch,
+                    SourceAction::ArtistSearch,
+                    SourceAction::AlbumSearch,
+                    SourceAction::PlaylistSearch,
+                    SourceAction::SearchSuggestions,
+                    SourceAction::ArtistTopTracks,
+                    SourceAction::AlbumRead,
+                    SourceAction::PlaylistReadPublic,
                     SourceAction::MusicUrl,
                     SourceAction::MusicRecommendations,
                     SourceAction::PlaylistList,
@@ -1174,6 +1564,117 @@ impl SourceProvider for KugouSourceProvider {
         request: SourceRequest,
     ) -> Result<SourceResponse, SourceRuntimeError> {
         match request {
+            SourceRequest::MusicSearch {
+                keyword,
+                page,
+                page_size,
+                ..
+            } => {
+                let operation = "search KuGou tracks";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(
+                    context,
+                    operation,
+                    self.bridge.music_search(&keyword, page, page_size),
+                )
+                .map(SourceResponse::MusicSearch)
+            }
+            SourceRequest::ArtistSearch {
+                keyword,
+                page,
+                page_size,
+                ..
+            } => {
+                let operation = "search KuGou artists";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(
+                    context,
+                    operation,
+                    self.bridge.artist_search(&keyword, page, page_size),
+                )
+                .map(SourceResponse::ArtistSearch)
+            }
+            SourceRequest::AlbumSearch {
+                keyword,
+                page,
+                page_size,
+                ..
+            } => {
+                let operation = "search KuGou albums";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(
+                    context,
+                    operation,
+                    self.bridge.album_search(&keyword, page, page_size),
+                )
+                .map(SourceResponse::AlbumSearch)
+            }
+            SourceRequest::PlaylistSearch {
+                keyword,
+                page,
+                page_size,
+                ..
+            } => {
+                let operation = "search KuGou playlists";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(
+                    context,
+                    operation,
+                    self.bridge.playlist_search(&keyword, page, page_size),
+                )
+                .map(SourceResponse::PlaylistSearch)
+            }
+            SourceRequest::SearchSuggestions { keyword, limit, .. } => {
+                let operation = "fetch KuGou search suggestions";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(
+                    context,
+                    operation,
+                    self.bridge.search_suggestions(&keyword, limit),
+                )
+                .map(SourceResponse::SearchSuggestions)
+            }
+            SourceRequest::ArtistTopTracks { artist, limit, .. } => {
+                let operation = "read KuGou artist top tracks";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(
+                    context,
+                    operation,
+                    self.bridge.artist_top_tracks(&artist, limit),
+                )
+                .map(SourceResponse::ArtistTopTracks)
+            }
+            SourceRequest::AlbumRead {
+                album,
+                page,
+                page_size,
+                ..
+            } => {
+                let operation = "read KuGou album";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(
+                    context,
+                    operation,
+                    self.bridge.album_tracks(&album, page, page_size),
+                )
+                .map(SourceResponse::AlbumRead)
+            }
+            SourceRequest::PlaylistReadPublic {
+                playlist,
+                page,
+                page_size,
+                ..
+            } => {
+                let operation = "read KuGou public playlist";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(
+                    context,
+                    operation,
+                    self.bridge
+                        .public_playlist_tracks(&playlist, page, page_size),
+                )
+                .map(SourceResponse::PlaylistReadPublic)
+            }
             SourceRequest::MusicUrl {
                 music_info,
                 quality,
@@ -1547,6 +2048,136 @@ fn songs_from_playlist_page(data: &JsonValue) -> Vec<RemoteTrack> {
         .collect()
 }
 
+fn kugou_items(body: &JsonValue) -> Option<&Vec<JsonValue>> {
+    [
+        body.pointer("/data/info"),
+        body.pointer("/data/lists"),
+        body.pointer("/data/list"),
+        body.pointer("/data/songs"),
+        body.pointer("/data/data"),
+        body.get("info"),
+        body.get("list"),
+        body.get("songs"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(JsonValue::as_array)
+}
+
+fn kugou_total(body: &JsonValue) -> Option<u64> {
+    [
+        body.pointer("/data/total"),
+        body.pointer("/data/total_count"),
+        body.pointer("/data/count"),
+        body.get("total"),
+        body.get("count"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|value| json_u64(Some(value)))
+}
+
+fn kugou_is_end(body: &JsonValue, page: u64, page_size: u64, returned: usize) -> bool {
+    kugou_total(body).is_some_and(|total| page.saturating_mul(page_size) >= total)
+        || returned < page_size as usize
+}
+
+fn kugou_entity_ids(id: &str) -> BTreeMap<String, JsonScalar> {
+    BTreeMap::from([("id".to_owned(), JsonScalar::String(id.to_owned()))])
+}
+
+fn kugou_artist_from_json(value: &JsonValue) -> Option<SourceArtistSearchResult> {
+    let id = first_json_string(value, &["author_id", "singerid", "id"])?;
+    Some(SourceArtistSearchResult {
+        id: id.clone(),
+        source: source_runtime::LX_SOURCE_KG.to_owned(),
+        name: first_json_string(value, &["author_name", "singername", "name"])?,
+        cover_url: first_json_string(value, &["sizable_avatar", "avatar", "img"])
+            .and_then(|url| normalize_image_url(&url)),
+        platform_ids: kugou_entity_ids(&id),
+        raw_info: json!({ "id": id }),
+    })
+}
+
+fn kugou_album_from_json(value: &JsonValue) -> Option<SourceAlbumSearchResult> {
+    let id = first_json_string(value, &["album_id", "albumid", "id"])?;
+    let publish = first_json_string(value, &["publish_date", "publish_time", "publishtime"]);
+    Some(SourceAlbumSearchResult {
+        id: id.clone(),
+        source: source_runtime::LX_SOURCE_KG.to_owned(),
+        title: first_json_string(value, &["album_name", "albumname", "name"])?,
+        artist: first_json_string(value, &["author_name", "singername", "artist"])
+            .unwrap_or_else(|| "Unknown artist".to_owned()),
+        release_year: publish
+            .as_deref()
+            .and_then(|value| value.get(..4))
+            .and_then(|year| year.parse().ok()),
+        cover_url: first_json_string(value, &["sizable_cover", "cover", "img"])
+            .and_then(|url| normalize_image_url(&url)),
+        track_count: ["song_count", "audio_count", "count"]
+            .into_iter()
+            .find_map(|key| json_u64(value.get(key))),
+        platform_ids: kugou_entity_ids(&id),
+        raw_info: json!({ "id": id }),
+    })
+}
+
+fn kugou_playlist_search_from_json(value: &JsonValue) -> Option<SourcePlaylistSearchResult> {
+    let id = first_json_string(
+        value,
+        &["global_collection_id", "specialid", "special_id", "id"],
+    )?;
+    Some(SourcePlaylistSearchResult {
+        id: id.clone(),
+        source: source_runtime::LX_SOURCE_KG.to_owned(),
+        name: first_json_string(value, &["specialname", "name", "title"])?,
+        description: first_json_string(value, &["intro", "description"]),
+        cover_url: first_json_string(value, &["imgurl", "sizable_cover", "cover"])
+            .and_then(|url| normalize_image_url(&url)),
+        track_count: ["songcount", "song_count", "count"]
+            .into_iter()
+            .find_map(|key| json_u64(value.get(key))),
+        owner_name: first_json_string(value, &["nickname", "username", "author_name"]),
+        platform_ids: kugou_entity_ids(&id),
+        raw_info: json!({ "id": id }),
+    })
+}
+
+fn collect_kugou_suggestions(value: &JsonValue, output: &mut Vec<String>) {
+    match value {
+        JsonValue::String(value) if !value.trim().is_empty() => output.push(value.clone()),
+        JsonValue::Array(values) => {
+            for value in values {
+                collect_kugou_suggestions(value, output);
+            }
+        }
+        JsonValue::Object(map) => {
+            if let Some(keyword) = ["keyword", "HintInfo", "name", "title"]
+                .into_iter()
+                .find_map(|key| map.get(key).and_then(json_string_value))
+            {
+                if !keyword.trim().is_empty() {
+                    output.push(keyword);
+                }
+            } else {
+                for value in map.values() {
+                    collect_kugou_suggestions(value, output);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn sign_params_key(value: i64) -> String {
+    format!(
+        "{:x}",
+        md5::compute(format!(
+            "{APP_ID}{ANDROID_SIGNATURE_SALT}{CLIENT_VERSION}{value}"
+        ))
+    )
+}
+
 fn remote_track_from_json(value: &JsonValue) -> Option<RemoteTrack> {
     let id = first_json_string(value, &["hash", "hash_128", "audio_hash"])?;
     let artist = first_json_string(value, &["author_name", "singername", "artist"])
@@ -1575,6 +2206,28 @@ fn remote_track_from_json(value: &JsonValue) -> Option<RemoteTrack> {
     let album_id = first_json_string(value, &["album_id"])
         .or_else(|| value.pointer("/albuminfo/id").and_then(json_string_value));
     let mix_song_id = first_json_string(value, &["mixsongid", "album_audio_id"]);
+    let mut platform_ids = BTreeMap::from([
+        (
+            "id".to_owned(),
+            source_runtime::JsonScalar::String(id.clone()),
+        ),
+        (
+            "hash".to_owned(),
+            source_runtime::JsonScalar::String(id.clone()),
+        ),
+    ]);
+    if let Some(album_id) = album_id.as_ref() {
+        platform_ids.insert(
+            "albumId".to_owned(),
+            source_runtime::JsonScalar::String(album_id.clone()),
+        );
+    }
+    if let Some(mix_song_id) = mix_song_id.as_ref() {
+        platform_ids.insert(
+            "mixSongId".to_owned(),
+            source_runtime::JsonScalar::String(mix_song_id.clone()),
+        );
+    }
     Some(RemoteTrack {
         id: id.clone(),
         source: source_runtime::LX_SOURCE_KG.to_owned(),
@@ -1583,6 +2236,10 @@ fn remote_track_from_json(value: &JsonValue) -> Option<RemoteTrack> {
         album,
         duration_seconds,
         cover_url,
+        track_number: json_u64(value.get("audio_group_id"))
+            .and_then(|number| u32::try_from(number).ok()),
+        disc_number: None,
+        platform_ids,
         raw_info: json!({
             "id": id,
             "hash": id,
@@ -1802,6 +2459,92 @@ mod tests {
     struct FakeProviderBridge;
 
     impl KugouProviderBridge for FakeProviderBridge {
+        fn music_search(
+            &self,
+            _keyword: &str,
+            _page: u64,
+            _page_size: u64,
+        ) -> Result<SourceSearchResponse, KugouBridgeError> {
+            Ok(SourceSearchResponse {
+                is_end: true,
+                total: Some(0),
+                list: Vec::new(),
+            })
+        }
+
+        fn artist_search(
+            &self,
+            _keyword: &str,
+            _page: u64,
+            _page_size: u64,
+        ) -> Result<SourceArtistSearchResponse, KugouBridgeError> {
+            Ok(SourceArtistSearchResponse {
+                is_end: true,
+                total: Some(0),
+                list: Vec::new(),
+            })
+        }
+
+        fn album_search(
+            &self,
+            _keyword: &str,
+            _page: u64,
+            _page_size: u64,
+        ) -> Result<SourceAlbumSearchResponse, KugouBridgeError> {
+            Ok(SourceAlbumSearchResponse {
+                is_end: true,
+                total: Some(0),
+                list: Vec::new(),
+            })
+        }
+
+        fn playlist_search(
+            &self,
+            _keyword: &str,
+            _page: u64,
+            _page_size: u64,
+        ) -> Result<SourcePlaylistSearchResponse, KugouBridgeError> {
+            Ok(SourcePlaylistSearchResponse {
+                is_end: true,
+                total: Some(0),
+                list: Vec::new(),
+            })
+        }
+
+        fn search_suggestions(
+            &self,
+            _keyword: &str,
+            _limit: u64,
+        ) -> Result<SourceSuggestionsResponse, KugouBridgeError> {
+            Ok(SourceSuggestionsResponse { list: Vec::new() })
+        }
+
+        fn artist_top_tracks(
+            &self,
+            _artist: &SourceEntityRef,
+            _limit: u64,
+        ) -> Result<SourceSearchResponse, KugouBridgeError> {
+            self.music_search("", 1, 1)
+        }
+
+        fn album_tracks(
+            &self,
+            _album: &SourceEntityRef,
+            _page: u64,
+            _page_size: u64,
+        ) -> Result<SourceSearchResponse, KugouBridgeError> {
+            self.music_search("", 1, 1)
+        }
+
+        fn public_playlist_tracks(
+            &self,
+            _playlist: &SourceEntityRef,
+            _page: u64,
+            _page_size: u64,
+        ) -> Result<SourceSearchResponse, KugouBridgeError> {
+            self.music_search("", 1, 1)
+        }
+
         fn music_url(
             &self,
             _account_ref: &str,
@@ -2095,6 +2838,14 @@ mod tests {
         assert_eq!(
             report.sources[source_runtime::LX_SOURCE_KG].actions,
             vec![
+                SourceAction::MusicSearch,
+                SourceAction::ArtistSearch,
+                SourceAction::AlbumSearch,
+                SourceAction::PlaylistSearch,
+                SourceAction::SearchSuggestions,
+                SourceAction::ArtistTopTracks,
+                SourceAction::AlbumRead,
+                SourceAction::PlaylistReadPublic,
                 SourceAction::MusicUrl,
                 SourceAction::MusicRecommendations,
                 SourceAction::PlaylistList,

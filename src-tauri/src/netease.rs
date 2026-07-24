@@ -1,14 +1,17 @@
 use crate::source_runtime::{
-    self, RemoteTrack, SourceAction, SourceCapability, SourceInfo, SourcePlaylist,
-    SourcePlaylistDetail, SourcePlaylistMutation, SourcePlaylistMutationKind, SourceProvider,
-    SourceQuality, SourceRecommendationsResponse, SourceRequest, SourceResponse,
-    SourceRuntimeContext, SourceRuntimeError, SourceTrackRef,
+    self, JsonScalar, RemoteTrack, SourceAction, SourceAlbumSearchResponse,
+    SourceAlbumSearchResult, SourceArtistSearchResponse, SourceArtistSearchResult,
+    SourceCapability, SourceEntityRef, SourceInfo, SourcePlaylist, SourcePlaylistDetail,
+    SourcePlaylistMutation, SourcePlaylistMutationKind, SourcePlaylistSearchResponse,
+    SourcePlaylistSearchResult, SourceProvider, SourceQuality, SourceRecommendationsResponse,
+    SourceRequest, SourceResponse, SourceRuntimeContext, SourceRuntimeError, SourceSearchResponse,
+    SourceSuggestionsResponse, SourceTrackRef,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use netease_music::{
-    ApiResponse, LoginQrCheckParams, NeteaseMusicClient, PlaylistDetailParams, SongDetailParams,
-    SongQualityLevel, SongUrlV1Params, UserPlaylistParams,
+    ApiResponse, LoginQrCheckParams, NeteaseMusicClient, PlaylistDetailParams, SearchParams,
+    SearchSuggestParams, SongDetailParams, SongQualityLevel, SongUrlV1Params, UserPlaylistParams,
 };
 use qrcode::render::svg;
 use qrcode::QrCode;
@@ -176,6 +179,60 @@ impl NeteaseBridgeError {
 }
 
 pub trait NeteaseProviderBridge: Send + Sync {
+    fn music_search(
+        &self,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceSearchResponse, NeteaseBridgeError>;
+
+    fn artist_search(
+        &self,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceArtistSearchResponse, NeteaseBridgeError>;
+
+    fn album_search(
+        &self,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceAlbumSearchResponse, NeteaseBridgeError>;
+
+    fn playlist_search(
+        &self,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourcePlaylistSearchResponse, NeteaseBridgeError>;
+
+    fn search_suggestions(
+        &self,
+        keyword: &str,
+        limit: u64,
+    ) -> Result<SourceSuggestionsResponse, NeteaseBridgeError>;
+
+    fn artist_top_tracks(
+        &self,
+        artist: &SourceEntityRef,
+        limit: u64,
+    ) -> Result<SourceSearchResponse, NeteaseBridgeError>;
+
+    fn album_tracks(
+        &self,
+        album: &SourceEntityRef,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceSearchResponse, NeteaseBridgeError>;
+
+    fn public_playlist_tracks(
+        &self,
+        playlist: &SourceEntityRef,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceSearchResponse, NeteaseBridgeError>;
+
     fn recommendations(
         &self,
         account_ref: &str,
@@ -708,6 +765,208 @@ impl NeteaseServiceBridge {
 }
 
 impl NeteaseProviderBridge for NeteaseServiceBridge {
+    fn music_search(
+        &self,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceSearchResponse, NeteaseBridgeError> {
+        let body = netease_search(keyword, "1", page, page_size)?;
+        let result = body.get("result").unwrap_or(&body);
+        let list = result
+            .get("songs")
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(remote_track_from_json)
+            .collect::<Vec<_>>();
+        Ok(SourceSearchResponse {
+            is_end: search_is_end(result, page, page_size, list.len(), "songCount"),
+            total: result.get("songCount").and_then(JsonValue::as_u64),
+            list,
+        })
+    }
+
+    fn artist_search(
+        &self,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceArtistSearchResponse, NeteaseBridgeError> {
+        let body = netease_search(keyword, "100", page, page_size)?;
+        let result = body.get("result").unwrap_or(&body);
+        let list = result
+            .get("artists")
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(netease_artist_from_json)
+            .collect::<Vec<_>>();
+        Ok(SourceArtistSearchResponse {
+            is_end: search_is_end(result, page, page_size, list.len(), "artistCount"),
+            total: result.get("artistCount").and_then(JsonValue::as_u64),
+            list,
+        })
+    }
+
+    fn album_search(
+        &self,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceAlbumSearchResponse, NeteaseBridgeError> {
+        let body = netease_search(keyword, "10", page, page_size)?;
+        let result = body.get("result").unwrap_or(&body);
+        let list = result
+            .get("albums")
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(netease_album_from_json)
+            .collect::<Vec<_>>();
+        Ok(SourceAlbumSearchResponse {
+            is_end: search_is_end(result, page, page_size, list.len(), "albumCount"),
+            total: result.get("albumCount").and_then(JsonValue::as_u64),
+            list,
+        })
+    }
+
+    fn playlist_search(
+        &self,
+        keyword: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourcePlaylistSearchResponse, NeteaseBridgeError> {
+        let body = netease_search(keyword, "1000", page, page_size)?;
+        let result = body.get("result").unwrap_or(&body);
+        let list = result
+            .get("playlists")
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(netease_playlist_search_from_json)
+            .collect::<Vec<_>>();
+        Ok(SourcePlaylistSearchResponse {
+            is_end: search_is_end(result, page, page_size, list.len(), "playlistCount"),
+            total: result.get("playlistCount").and_then(JsonValue::as_u64),
+            list,
+        })
+    }
+
+    fn search_suggestions(
+        &self,
+        keyword: &str,
+        limit: u64,
+    ) -> Result<SourceSuggestionsResponse, NeteaseBridgeError> {
+        let body = new_client()?
+            .search_suggest(SearchSuggestParams {
+                keywords: keyword.to_owned(),
+                suggest_type: Some("mobile".to_owned()),
+            })
+            .map_err(|error| bridge_failure("fetch search suggestions", error))
+            .and_then(|response| checked_body(response, "fetch search suggestions"))?;
+        let list = body
+            .get("result")
+            .and_then(|result| result.get("allMatch").or_else(|| result.get("suggestions")))
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                json_string(item.get("keyword"))
+                    .or_else(|| json_string(item.get("name")))
+                    .or_else(|| item.as_str().map(str::to_owned))
+            })
+            .filter(|suggestion| !suggestion.trim().is_empty())
+            .take(limit as usize)
+            .collect();
+        Ok(SourceSuggestionsResponse { list })
+    }
+
+    fn artist_top_tracks(
+        &self,
+        artist: &SourceEntityRef,
+        limit: u64,
+    ) -> Result<SourceSearchResponse, NeteaseBridgeError> {
+        validate_netease_track_id(&artist.id)?;
+        let body = new_client()?
+            .raw_weapi(
+                "https://music.163.com/api/artist/top/song",
+                json!({ "id": artist.id }),
+            )
+            .map_err(|error| bridge_failure("read artist top tracks", error))
+            .and_then(|response| checked_body(response, "read artist top tracks"))?;
+        let list = body
+            .get("songs")
+            .or_else(|| body.pointer("/data/songs"))
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(remote_track_from_json)
+            .take(limit as usize)
+            .collect();
+        Ok(SourceSearchResponse {
+            is_end: true,
+            total: None,
+            list,
+        })
+    }
+
+    fn album_tracks(
+        &self,
+        album: &SourceEntityRef,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceSearchResponse, NeteaseBridgeError> {
+        validate_netease_playlist_id(&album.id)?;
+        let body = new_client()?
+            .raw_weapi(
+                &format!("https://music.163.com/api/v1/album/{}", album.id),
+                json!({}),
+            )
+            .map_err(|error| bridge_failure("read album", error))
+            .and_then(|response| checked_playlist_body(response))?;
+        paginate_tracks(
+            body.get("songs").and_then(JsonValue::as_array),
+            page,
+            page_size,
+        )
+    }
+
+    fn public_playlist_tracks(
+        &self,
+        playlist: &SourceEntityRef,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceSearchResponse, NeteaseBridgeError> {
+        validate_netease_playlist_id(&playlist.id)?;
+        let client = new_client()?;
+        let body = checked_playlist_body(
+            client
+                .playlist_detail(PlaylistDetailParams {
+                    id: playlist.id.clone(),
+                    s: Some(8),
+                })
+                .map_err(|error| bridge_failure("read public playlist", error))?,
+        )?;
+        let playlist_json = body.get("playlist").unwrap_or(&body);
+        let ids = playlist_track_ids(playlist_json);
+        let total = ids.len();
+        let start = usize::try_from(page.saturating_sub(1).saturating_mul(page_size))
+            .unwrap_or(usize::MAX)
+            .min(total);
+        let end = start.saturating_add(page_size as usize).min(total);
+        let list = if start == end {
+            Vec::new()
+        } else {
+            fetch_playlist_tracks(&client, &ids[start..end])?
+        };
+        Ok(SourceSearchResponse {
+            is_end: end >= total,
+            total: Some(total as u64),
+            list,
+        })
+    }
+
     fn recommendations(
         &self,
         account_ref: &str,
@@ -1045,8 +1304,147 @@ impl NeteaseSourceProvider {
         result: Result<T, NeteaseBridgeError>,
     ) -> Result<T, SourceRuntimeError> {
         context.ensure_not_cancelled(operation)?;
-        result.map_err(|error| context.provider_error(error.to_string()))
+        result.map_err(|error| context.provider_error_with_code(error.code(), error.to_string()))
     }
+}
+
+fn netease_search(
+    keyword: &str,
+    search_type: &str,
+    page: u64,
+    page_size: u64,
+) -> Result<JsonValue, NeteaseBridgeError> {
+    let limit = u32::try_from(page_size).unwrap_or(100);
+    let offset =
+        u32::try_from(page.saturating_sub(1).saturating_mul(page_size)).unwrap_or(u32::MAX);
+    new_client()?
+        .search(SearchParams {
+            keywords: keyword.to_owned(),
+            search_type: Some(search_type.to_owned()),
+            limit: Some(limit),
+            offset: Some(offset),
+        })
+        .map_err(|error| bridge_failure("search NetEase", error))
+        .and_then(|response| checked_body(response, "search NetEase"))
+}
+
+fn search_is_end(
+    result: &JsonValue,
+    page: u64,
+    page_size: u64,
+    returned: usize,
+    count_key: &str,
+) -> bool {
+    result
+        .get(count_key)
+        .and_then(JsonValue::as_u64)
+        .is_some_and(|total| page.saturating_mul(page_size) >= total)
+        || returned < page_size as usize
+}
+
+fn platform_id(id: &str) -> BTreeMap<String, JsonScalar> {
+    BTreeMap::from([("id".to_owned(), JsonScalar::String(id.to_owned()))])
+}
+
+fn netease_artist_from_json(value: &JsonValue) -> Option<SourceArtistSearchResult> {
+    let id = json_id(value.get("id"))?;
+    Some(SourceArtistSearchResult {
+        id: id.clone(),
+        source: source_runtime::LX_SOURCE_WY.to_owned(),
+        name: json_string(value.get("name"))?,
+        cover_url: json_string(value.get("picUrl")).or_else(|| json_string(value.get("img1v1Url"))),
+        platform_ids: platform_id(&id),
+        raw_info: json!({ "id": id }),
+    })
+}
+
+fn netease_album_from_json(value: &JsonValue) -> Option<SourceAlbumSearchResult> {
+    let id = json_id(value.get("id"))?;
+    let artists = value
+        .get("artists")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|artist| json_string(artist.get("name")))
+        .collect::<Vec<_>>();
+    let publish_time = value.get("publishTime").and_then(JsonValue::as_u64);
+    Some(SourceAlbumSearchResult {
+        id: id.clone(),
+        source: source_runtime::LX_SOURCE_WY.to_owned(),
+        title: json_string(value.get("name"))?,
+        artist: if artists.is_empty() {
+            value
+                .get("artist")
+                .and_then(|artist| json_string(artist.get("name")))
+                .unwrap_or_else(|| "Unknown artist".to_owned())
+        } else {
+            artists.join(" / ")
+        },
+        release_year: publish_time
+            .and_then(|millis| UNIX_EPOCH.checked_add(Duration::from_millis(millis)))
+            .and_then(system_time_year),
+        cover_url: json_string(value.get("picUrl")),
+        track_count: value.get("size").and_then(JsonValue::as_u64),
+        platform_ids: platform_id(&id),
+        raw_info: json!({ "id": id }),
+    })
+}
+
+fn system_time_year(time: SystemTime) -> Option<u32> {
+    let seconds = time.duration_since(UNIX_EPOCH).ok()?.as_secs();
+    let days = seconds / 86_400;
+    let mut year = 1970_u32;
+    let mut remaining = days;
+    loop {
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let days_in_year = if leap { 366 } else { 365 };
+        if remaining < days_in_year {
+            return Some(year);
+        }
+        remaining -= days_in_year;
+        year = year.saturating_add(1);
+    }
+}
+
+fn netease_playlist_search_from_json(value: &JsonValue) -> Option<SourcePlaylistSearchResult> {
+    let id = json_id(value.get("id"))?;
+    Some(SourcePlaylistSearchResult {
+        id: id.clone(),
+        source: source_runtime::LX_SOURCE_WY.to_owned(),
+        name: json_string(value.get("name"))?,
+        description: json_string(value.get("description")),
+        cover_url: json_string(value.get("coverImgUrl")),
+        track_count: value.get("trackCount").and_then(JsonValue::as_u64),
+        owner_name: value
+            .get("creator")
+            .and_then(|creator| json_string(creator.get("nickname"))),
+        platform_ids: platform_id(&id),
+        raw_info: json!({ "id": id }),
+    })
+}
+
+fn paginate_tracks(
+    songs: Option<&Vec<JsonValue>>,
+    page: u64,
+    page_size: u64,
+) -> Result<SourceSearchResponse, NeteaseBridgeError> {
+    let songs = songs.ok_or_else(|| NeteaseBridgeError::InvalidResponse {
+        operation: "read collection",
+        message: "response did not include tracks".to_owned(),
+    })?;
+    let total = songs.len();
+    let start = usize::try_from(page.saturating_sub(1).saturating_mul(page_size))
+        .unwrap_or(usize::MAX)
+        .min(total);
+    let end = start.saturating_add(page_size as usize).min(total);
+    Ok(SourceSearchResponse {
+        is_end: end >= total,
+        total: Some(total as u64),
+        list: songs[start..end]
+            .iter()
+            .filter_map(remote_track_from_json)
+            .collect(),
+    })
 }
 
 impl SourceProvider for NeteaseSourceProvider {
@@ -1071,6 +1469,14 @@ impl SourceProvider for NeteaseSourceProvider {
                 source_runtime::LX_SOURCE_WY,
                 "NetEase Cloud Music",
                 vec![
+                    SourceAction::MusicSearch,
+                    SourceAction::ArtistSearch,
+                    SourceAction::AlbumSearch,
+                    SourceAction::PlaylistSearch,
+                    SourceAction::SearchSuggestions,
+                    SourceAction::ArtistTopTracks,
+                    SourceAction::AlbumRead,
+                    SourceAction::PlaylistReadPublic,
                     SourceAction::MusicUrl,
                     SourceAction::MusicRecommendations,
                     SourceAction::PlaylistList,
@@ -1089,6 +1495,117 @@ impl SourceProvider for NeteaseSourceProvider {
         request: SourceRequest,
     ) -> Result<SourceResponse, SourceRuntimeError> {
         match request {
+            SourceRequest::MusicSearch {
+                keyword,
+                page,
+                page_size,
+                ..
+            } => {
+                let operation = "search NetEase tracks";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(
+                    context,
+                    operation,
+                    self.bridge.music_search(&keyword, page, page_size),
+                )
+                .map(SourceResponse::MusicSearch)
+            }
+            SourceRequest::ArtistSearch {
+                keyword,
+                page,
+                page_size,
+                ..
+            } => {
+                let operation = "search NetEase artists";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(
+                    context,
+                    operation,
+                    self.bridge.artist_search(&keyword, page, page_size),
+                )
+                .map(SourceResponse::ArtistSearch)
+            }
+            SourceRequest::AlbumSearch {
+                keyword,
+                page,
+                page_size,
+                ..
+            } => {
+                let operation = "search NetEase albums";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(
+                    context,
+                    operation,
+                    self.bridge.album_search(&keyword, page, page_size),
+                )
+                .map(SourceResponse::AlbumSearch)
+            }
+            SourceRequest::PlaylistSearch {
+                keyword,
+                page,
+                page_size,
+                ..
+            } => {
+                let operation = "search NetEase playlists";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(
+                    context,
+                    operation,
+                    self.bridge.playlist_search(&keyword, page, page_size),
+                )
+                .map(SourceResponse::PlaylistSearch)
+            }
+            SourceRequest::SearchSuggestions { keyword, limit, .. } => {
+                let operation = "fetch NetEase search suggestions";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(
+                    context,
+                    operation,
+                    self.bridge.search_suggestions(&keyword, limit),
+                )
+                .map(SourceResponse::SearchSuggestions)
+            }
+            SourceRequest::ArtistTopTracks { artist, limit, .. } => {
+                let operation = "read NetEase artist top tracks";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(
+                    context,
+                    operation,
+                    self.bridge.artist_top_tracks(&artist, limit),
+                )
+                .map(SourceResponse::ArtistTopTracks)
+            }
+            SourceRequest::AlbumRead {
+                album,
+                page,
+                page_size,
+                ..
+            } => {
+                let operation = "read NetEase album";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(
+                    context,
+                    operation,
+                    self.bridge.album_tracks(&album, page, page_size),
+                )
+                .map(SourceResponse::AlbumRead)
+            }
+            SourceRequest::PlaylistReadPublic {
+                playlist,
+                page,
+                page_size,
+                ..
+            } => {
+                let operation = "read NetEase public playlist";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(
+                    context,
+                    operation,
+                    self.bridge
+                        .public_playlist_tracks(&playlist, page, page_size),
+                )
+                .map(SourceResponse::PlaylistReadPublic)
+            }
             SourceRequest::MusicUrl {
                 music_info,
                 quality,
@@ -1449,6 +1966,10 @@ fn remote_track_from_json(value: &JsonValue) -> Option<RemoteTrack> {
         .or_else(|| value.get("duration"))
         .and_then(JsonValue::as_u64);
     let raw_info = json!({ "id": id.clone() });
+    let platform_ids = BTreeMap::from([(
+        "id".to_owned(),
+        source_runtime::JsonScalar::String(id.clone()),
+    )]);
     Some(RemoteTrack {
         id,
         source: source_runtime::LX_SOURCE_WY.to_owned(),
@@ -1463,6 +1984,16 @@ fn remote_track_from_json(value: &JsonValue) -> Option<RemoteTrack> {
         cover_url: album
             .and_then(|album| json_string(album.get("picUrl")))
             .or_else(|| json_string(value.get("picUrl"))),
+        track_number: value
+            .get("no")
+            .and_then(JsonValue::as_u64)
+            .and_then(|number| u32::try_from(number).ok()),
+        disc_number: value
+            .get("cd")
+            .and_then(JsonValue::as_str)
+            .and_then(|disc| disc.split('/').next())
+            .and_then(|disc| disc.parse().ok()),
+        platform_ids,
         raw_info,
     })
 }
@@ -1704,6 +2235,92 @@ mod tests {
     }
 
     impl NeteaseProviderBridge for FakeProviderBridge {
+        fn music_search(
+            &self,
+            _keyword: &str,
+            _page: u64,
+            _page_size: u64,
+        ) -> Result<SourceSearchResponse, NeteaseBridgeError> {
+            Ok(SourceSearchResponse {
+                is_end: true,
+                total: Some(0),
+                list: Vec::new(),
+            })
+        }
+
+        fn artist_search(
+            &self,
+            _keyword: &str,
+            _page: u64,
+            _page_size: u64,
+        ) -> Result<SourceArtistSearchResponse, NeteaseBridgeError> {
+            Ok(SourceArtistSearchResponse {
+                is_end: true,
+                total: Some(0),
+                list: Vec::new(),
+            })
+        }
+
+        fn album_search(
+            &self,
+            _keyword: &str,
+            _page: u64,
+            _page_size: u64,
+        ) -> Result<SourceAlbumSearchResponse, NeteaseBridgeError> {
+            Ok(SourceAlbumSearchResponse {
+                is_end: true,
+                total: Some(0),
+                list: Vec::new(),
+            })
+        }
+
+        fn playlist_search(
+            &self,
+            _keyword: &str,
+            _page: u64,
+            _page_size: u64,
+        ) -> Result<SourcePlaylistSearchResponse, NeteaseBridgeError> {
+            Ok(SourcePlaylistSearchResponse {
+                is_end: true,
+                total: Some(0),
+                list: Vec::new(),
+            })
+        }
+
+        fn search_suggestions(
+            &self,
+            _keyword: &str,
+            _limit: u64,
+        ) -> Result<SourceSuggestionsResponse, NeteaseBridgeError> {
+            Ok(SourceSuggestionsResponse { list: Vec::new() })
+        }
+
+        fn artist_top_tracks(
+            &self,
+            _artist: &SourceEntityRef,
+            _limit: u64,
+        ) -> Result<SourceSearchResponse, NeteaseBridgeError> {
+            self.music_search("", 1, 1)
+        }
+
+        fn album_tracks(
+            &self,
+            _album: &SourceEntityRef,
+            _page: u64,
+            _page_size: u64,
+        ) -> Result<SourceSearchResponse, NeteaseBridgeError> {
+            self.music_search("", 1, 1)
+        }
+
+        fn public_playlist_tracks(
+            &self,
+            _playlist: &SourceEntityRef,
+            _page: u64,
+            _page_size: u64,
+        ) -> Result<SourceSearchResponse, NeteaseBridgeError> {
+            self.music_search("", 1, 1)
+        }
+
         fn recommendations(
             &self,
             _account_ref: &str,
@@ -1718,6 +2335,9 @@ mod tests {
                     album: Some("Test Album".to_owned()),
                     duration_seconds: Some(180),
                     cover_url: None,
+                    track_number: None,
+                    disc_number: None,
+                    platform_ids: BTreeMap::new(),
                     raw_info: json!({ "id": 347230 }),
                 }],
             })
@@ -1851,6 +2471,9 @@ mod tests {
                     album: None,
                     duration_seconds: None,
                     cover_url: None,
+                    track_number: None,
+                    disc_number: None,
+                    platform_ids: BTreeMap::new(),
                     raw_info: json!({ "id": id }),
                 })
                 .collect())
@@ -1880,6 +2503,14 @@ mod tests {
         assert_eq!(
             report.sources[source_runtime::LX_SOURCE_WY].actions,
             vec![
+                SourceAction::MusicSearch,
+                SourceAction::ArtistSearch,
+                SourceAction::AlbumSearch,
+                SourceAction::PlaylistSearch,
+                SourceAction::SearchSuggestions,
+                SourceAction::ArtistTopTracks,
+                SourceAction::AlbumRead,
+                SourceAction::PlaylistReadPublic,
                 SourceAction::MusicUrl,
                 SourceAction::MusicRecommendations,
                 SourceAction::PlaylistList,

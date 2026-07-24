@@ -16,6 +16,7 @@ import {
   Palette,
   Play,
   Plug,
+  Radio,
   RefreshCw,
   Repeat2,
   RotateCcw,
@@ -33,6 +34,8 @@ import PluginManager from "./components/PluginManager.vue";
 import PluginWorkspace from "./components/PluginWorkspace.vue";
 import NeteaseSource from "./components/NeteaseSource.vue";
 import NowPlayingPanel from "./components/NowPlayingPanel.vue";
+import OnlineMusic from "./components/OnlineMusic.vue";
+import OnlineMusicSettingsPanel from "./components/OnlineMusicSettings.vue";
 import { NETEASE_PLUGIN_ID, type NeteasePlayback } from "./lib/netease-api";
 import { KUGOU_PLUGIN_ID } from "./lib/kugou-api";
 import {
@@ -42,6 +45,17 @@ import {
 } from "./lib/audio-source-api";
 import { listPlugins, type PluginRecord } from "./lib/plugin-api";
 import { PlayCountTracker } from "./lib/play-count-tracker";
+import {
+  getOnlineMusicSettings,
+  clearOnlinePlaybackFailures,
+  invalidateOnlinePlaybackCaches,
+  listOnlineMusicChannels,
+  playbackAttemptKey,
+  resolveOnlineTrack,
+  type OnlineMusicSettings,
+  type OnlinePlayback,
+  type OnlineTrack,
+} from "./lib/online-music-api";
 import { TAURI_COMMANDS } from "./generated/bindings";
 import type {
   LibraryPlaybackQueue,
@@ -97,6 +111,12 @@ const mainSections = [
     icon: Library,
   },
   {
+    id: "online",
+    label: "Online Music",
+    description: "Search enabled music channels",
+    icon: Radio,
+  },
+  {
     id: "sources",
     label: "Audio Sources",
     description: "Import sources and manage their permissions",
@@ -132,6 +152,13 @@ const sidebarOpen = ref(false);
 const activeTrack = ref<LocalTrack | null>(null);
 const activeRemoteTitle = ref<string | null>(null);
 const activeRemoteProvider = ref<string | null>(null);
+const activeOnlineTrack = ref<OnlineTrack | null>(null);
+const activeRemoteQuality = ref<string | null>(null);
+const activeOnlineAudioSourceId = ref<string | null>(null);
+const activeOnlineChannelId = ref<string | null>(null);
+const activeOnlineAttemptKey = ref<string | null>(null);
+const activeOnlineUrl = ref<string | null>(null);
+const sourceChangeMessage = ref<string | null>(null);
 const activeSource = ref<PlaybackSource | null>(null);
 const audioUrl = ref<string | null>(null);
 const isPlaying = ref(false);
@@ -160,11 +187,19 @@ const localQueueTotal = ref(0);
 const localQueueIndex = ref(-1);
 const queuedLocalTrack = ref<LocalTrack | null>(null);
 const localQueueActive = ref(false);
+const remoteQueue = ref<OnlineTrack[]>([]);
+const remoteQueueIndex = ref(-1);
+const remoteQueueActive = ref(false);
+const resolvingOnlineTrackKey = ref<string | null>(null);
 const playbackAudioSourceId = ref(savedUiPreferences.audioSourceId);
 const remoteQuality = ref(savedUiPreferences.streamQuality);
+const onlineMusicSettings = ref<OnlineMusicSettings | null>(null);
 
 let unlistenScanProgress: UnlistenFn | null = null;
 let playbackDetailsGeneration = 0;
+let onlinePlaybackController: AbortController | null = null;
+const failedOnlineAttempts = new Map<string, number>();
+const failedOnlineUrls = new Map<string, number>();
 const playCountTracker = new PlayCountTracker();
 
 const enabledPlugins = computed(() => pluginRecords.value.filter((plugin) => plugin.enabled));
@@ -192,12 +227,16 @@ const nowPlayingSubtitle = computed(() => {
     return trackSubtitle(activeTrack.value);
   }
 
-  return activeRemoteTitle.value
-    ? activeRemoteProvider.value || "Remote Source Provider"
-    : "Select a local or remote track";
+  if (!activeRemoteTitle.value) return "Select a local or remote track";
+  return [activeRemoteProvider.value || "Remote Source Provider", activeRemoteQuality.value]
+    .filter(Boolean)
+    .join(" · ");
 });
 const volumePercent = computed(() => Math.round(volume.value * 100));
 const canGoPrevious = computed(() => {
+  if (remoteQueueActive.value && remoteQueueIndex.value >= 0) {
+    return playbackMode.value !== "sequential" || remoteQueueIndex.value > 0;
+  }
   if (
     !activeTrack.value ||
     !localQueueActive.value ||
@@ -209,6 +248,12 @@ const canGoPrevious = computed(() => {
   return playbackMode.value !== "sequential" || localQueueIndex.value > 0;
 });
 const canGoNext = computed(() => {
+  if (remoteQueueActive.value && remoteQueueIndex.value >= 0) {
+    return (
+      playbackMode.value !== "sequential" ||
+      remoteQueueIndex.value < remoteQueue.value.length - 1
+    );
+  }
   if (
     !activeTrack.value ||
     !localQueueActive.value ||
@@ -268,17 +313,20 @@ watch(
 );
 
 onMounted(async () => {
-  await Promise.all([
+  const [, , , , settings] = await Promise.all([
     loadScanStatus(),
     bindScanProgress(),
     loadPluginNavigation(),
     loadAudioSourceNavigation(),
+    getOnlineMusicSettings().catch(() => null),
   ]);
+  onlineMusicSettings.value = settings;
 });
 
 onBeforeUnmount(() => {
   unlistenScanProgress?.();
   playbackDetailsGeneration += 1;
+  onlinePlaybackController?.abort();
   sampleListeningTime();
 });
 
@@ -323,9 +371,20 @@ function updatePluginRecords(records: PluginRecord[]) {
 
 function updateAudioSourceRecords(records: AudioSourceRecord[]) {
   audioSourceRecords.value = records;
+  invalidateOnlinePlaybackCaches();
   const sourceOptions = buildAudioSourceOptions(records);
   if (!sourceOptions.some((source) => source.value === playbackAudioSourceId.value)) {
     playbackAudioSourceId.value = sourceOptions[0]?.value ?? "";
+  }
+}
+
+function handleOnlineDownloadCompleted(destination: string) {
+  if (!selectedFolder.value || scanStatus.value.isRunning) return;
+  const normalize = (path: string) => path.replace(/[\\/]+$/, "");
+  const library = normalize(selectedFolder.value);
+  const downloaded = normalize(destination);
+  if (downloaded === library || downloaded.startsWith(`${library}/`) || downloaded.startsWith(`${library}\\`)) {
+    void startScan();
   }
 }
 
@@ -503,6 +562,7 @@ function retryLyrics() {
 
 async function playTrack(track: LocalTrack) {
   sampleListeningTime();
+  clearRemotePlaybackQueue();
   isPreparingPlayback.value = true;
   appError.value = null;
 
@@ -514,6 +574,7 @@ async function playTrack(track: LocalTrack) {
     activeTrack.value = track;
     activeRemoteTitle.value = null;
     activeRemoteProvider.value = null;
+    activeRemoteQuality.value = null;
     activeSource.value = source;
     audioUrl.value = convertFileSrc(source.filePath);
     queuedLocalTrack.value = track;
@@ -553,6 +614,22 @@ function clearLocalPlaybackQueue() {
   localQueueActive.value = false;
 }
 
+function clearRemotePlaybackQueue() {
+  onlinePlaybackController?.abort();
+  onlinePlaybackController = null;
+  remoteQueue.value = [];
+  remoteQueueIndex.value = -1;
+  remoteQueueActive.value = false;
+  resolvingOnlineTrackKey.value = null;
+  activeOnlineTrack.value = null;
+  activeRemoteQuality.value = null;
+  activeOnlineAudioSourceId.value = null;
+  activeOnlineChannelId.value = null;
+  activeOnlineAttemptKey.value = null;
+  activeOnlineUrl.value = null;
+  sourceChangeMessage.value = null;
+}
+
 function updateLibrarySummary(summary: { libraryTotal: number; filteredTotal: number }) {
   libraryTrackCount.value = summary.libraryTotal;
   filteredLibraryTrackCount.value = summary.filteredTotal;
@@ -565,12 +642,14 @@ function showLibraryError(message: string) {
 async function playRemotePlayback(playback: NeteasePlayback) {
   sampleListeningTime();
   clearLocalPlaybackQueue();
+  clearRemotePlaybackQueue();
   isPreparingPlayback.value = true;
   appError.value = null;
   try {
     activeTrack.value = null;
     activeRemoteTitle.value = `${playback.track.title} - ${playback.track.artist}`;
     activeRemoteProvider.value = playback.providerName;
+    activeRemoteQuality.value = null;
     activeSource.value = { url: playback.url, mimeType: playback.mimeType };
     audioUrl.value = playback.url;
     void loadRemoteTrackLyrics(
@@ -589,6 +668,107 @@ async function playRemotePlayback(playback: NeteasePlayback) {
     isPlaying.value = false;
   } finally {
     isPreparingPlayback.value = false;
+  }
+}
+
+async function handleOnlinePlayRequest(
+  track: OnlineTrack,
+  queue: OnlineTrack[],
+  index: number,
+  appendable: boolean,
+) {
+  clearFailedOnlinePlayback(track.key);
+  clearOnlinePlaybackFailures(track.key);
+  const targetIndex = index >= 0 ? index : queue.findIndex((item) => item.key === track.key);
+  remoteQueue.value = appendable ? queue : [...queue];
+  remoteQueueActive.value = true;
+  await playOnlineQueueTrack(Math.max(0, targetIndex));
+}
+
+async function playOnlineQueueTrack(index: number) {
+  const snapshotTrack = remoteQueue.value[index];
+  if (!snapshotTrack) return;
+
+  onlinePlaybackController?.abort();
+  const controller = new AbortController();
+  onlinePlaybackController = controller;
+  resolvingOnlineTrackKey.value = snapshotTrack.key;
+  isPreparingPlayback.value = true;
+  appError.value = null;
+
+  try {
+    const [settings, channels] = await Promise.all([
+      getOnlineMusicSettings(),
+      listOnlineMusicChannels(),
+    ]);
+    const enabledChannels = new Set(channels.map((channel) => channel.id));
+    const track = {
+      ...snapshotTrack,
+      candidates: snapshotTrack.candidates.filter((candidate) =>
+        enabledChannels.has(candidate.channelId),
+      ),
+    };
+    if (!track.candidates.length) {
+      throw new Error("Playback is unavailable from the configured Audio Sources.");
+    }
+    onlineMusicSettings.value = settings;
+    const playback = await resolveOnlineTrack({
+      track,
+      audioSources: audioSourceRecords.value,
+      settings,
+      selectedAudioSourceId: playbackAudioSourceId.value,
+      signal: controller.signal,
+      excludedAttempts: activeFailedAttempts(track.key),
+      excludedUrls: activeFailedUrls(track.key),
+    });
+    if (controller.signal.aborted || onlinePlaybackController !== controller) return;
+    remoteQueueIndex.value = index;
+    await applyOnlinePlayback(playback);
+  } catch (error) {
+    if (!(error instanceof DOMException && error.name === "AbortError")) {
+      appError.value = normalizeError(error);
+    }
+  } finally {
+    if (onlinePlaybackController === controller) {
+      resolvingOnlineTrackKey.value = null;
+      isPreparingPlayback.value = false;
+    }
+  }
+}
+
+async function applyOnlinePlayback(playback: OnlinePlayback) {
+  sampleListeningTime();
+  clearLocalPlaybackQueue();
+  activeTrack.value = null;
+  activeOnlineTrack.value = playback.track;
+  activeRemoteTitle.value = playback.track.title;
+  activeRemoteProvider.value = `${playback.providerName} · ${playback.channelName}`;
+  activeRemoteQuality.value = playback.quality;
+  activeOnlineAudioSourceId.value = playback.audioSourceId;
+  activeOnlineChannelId.value = playback.channelId;
+  activeOnlineAttemptKey.value = activeOnlineChannelId.value
+    ? playbackAttemptKey(playback.audioSourceId, activeOnlineChannelId.value, playback.quality)
+    : null;
+  activeOnlineUrl.value = playback.url;
+  activeSource.value = { url: playback.url, mimeType: playback.mimeType };
+  audioUrl.value = playback.url;
+  void loadRemoteTrackLyrics(
+    {
+      title: playback.track.title,
+      artist: playback.track.artist || null,
+      album: playback.track.album,
+      durationSeconds: playback.track.durationSeconds,
+      source: playback.track.candidates[0]?.sourceId ?? null,
+      trackId: playback.track.candidates[0]?.id ?? null,
+    },
+    playback.track.coverUrl,
+  );
+
+  await nextTick();
+  if (audioElement.value) {
+    audioElement.value.volume = volume.value;
+    await audioElement.value.play();
+    isPlaying.value = true;
   }
 }
 
@@ -640,6 +820,11 @@ function cyclePlaybackMode() {
 }
 
 async function playPreviousTrack() {
+  if (remoteQueueActive.value) {
+    const index = remoteQueueNavigationIndex("previous");
+    if (index >= 0) await playOnlineQueueTrack(index);
+    return;
+  }
   if (
     !activeTrack.value ||
     !localQueueActive.value ||
@@ -665,6 +850,11 @@ async function playPreviousTrack() {
 }
 
 async function playNextTrack() {
+  if (remoteQueueActive.value) {
+    const index = remoteQueueNavigationIndex("next");
+    if (index >= 0) await playOnlineQueueTrack(index);
+    return;
+  }
   if (
     !activeTrack.value ||
     !localQueueActive.value ||
@@ -687,6 +877,22 @@ async function playNextTrack() {
   }
 
   await playLocalQueueTrack(nextIndex);
+}
+
+function remoteQueueNavigationIndex(direction: "previous" | "next") {
+  const total = remoteQueue.value.length;
+  const current = remoteQueueIndex.value;
+  if (!total || current < 0) return -1;
+  if (playbackMode.value === "shuffle") {
+    if (total === 1) return 0;
+    const candidate = Math.floor(Math.random() * (total - 1));
+    return candidate >= current ? candidate + 1 : candidate;
+  }
+  const offset = direction === "previous" ? -1 : 1;
+  const candidate = current + offset;
+  if (candidate >= 0 && candidate < total) return candidate;
+  if (playbackMode.value !== "repeat") return -1;
+  return direction === "previous" ? total - 1 : 0;
 }
 
 async function playLocalQueueTrack(index: number) {
@@ -844,7 +1050,73 @@ function seekPlayback(event: Event) {
 
 function onAudioError() {
   isPlaying.value = false;
+  if (activeOnlineTrack.value && remoteQueueActive.value) {
+    void recoverOnlinePlayback();
+    return;
+  }
   appError.value = "Playback failed for the selected track.";
+}
+
+async function recoverOnlinePlayback() {
+  const track = activeOnlineTrack.value;
+  if (!track || remoteQueueIndex.value < 0) return;
+  const priorPosition = playbackPosition.value;
+  const priorDuration = playbackDuration.value || track.durationSeconds || 0;
+  if (activeOnlineAttemptKey.value) {
+    failedOnlineAttempts.set(
+      `${track.key}::${activeOnlineAttemptKey.value}`,
+      Date.now() + 5 * 60_000,
+    );
+  }
+  if (activeOnlineUrl.value) {
+    failedOnlineUrls.set(`${track.key}::${activeOnlineUrl.value}`, Date.now() + 5 * 60_000);
+  }
+  sourceChangeMessage.value = "Changing playback source";
+  await playOnlineQueueTrack(remoteQueueIndex.value);
+  const nextDuration = playbackDuration.value || activeOnlineTrack.value?.durationSeconds || 0;
+  if (audioElement.value && Math.abs(nextDuration - priorDuration) <= 3) {
+    audioElement.value.currentTime = Math.min(priorPosition, Math.max(0, nextDuration - 0.25));
+  }
+  window.setTimeout(() => {
+    sourceChangeMessage.value = null;
+  }, 2_500);
+}
+
+function activeFailedAttempts(trackKey: string) {
+  pruneFailedOnlinePlayback();
+  return new Set(
+    [...failedOnlineAttempts.keys()]
+      .filter((key) => key.startsWith(`${trackKey}::`))
+      .map((key) => key.slice(trackKey.length + 2)),
+  );
+}
+
+function activeFailedUrls(trackKey: string) {
+  pruneFailedOnlinePlayback();
+  return new Set(
+    [...failedOnlineUrls.keys()]
+      .filter((key) => key.startsWith(`${trackKey}::`))
+      .map((key) => key.slice(trackKey.length + 2)),
+  );
+}
+
+function clearFailedOnlinePlayback(trackKey: string) {
+  for (const key of [...failedOnlineAttempts.keys()]) {
+    if (key.startsWith(`${trackKey}::`)) failedOnlineAttempts.delete(key);
+  }
+  for (const key of [...failedOnlineUrls.keys()]) {
+    if (key.startsWith(`${trackKey}::`)) failedOnlineUrls.delete(key);
+  }
+}
+
+function pruneFailedOnlinePlayback() {
+  const now = Date.now();
+  for (const [key, expiresAt] of failedOnlineAttempts) {
+    if (expiresAt <= now) failedOnlineAttempts.delete(key);
+  }
+  for (const [key, expiresAt] of failedOnlineUrls) {
+    if (expiresAt <= now) failedOnlineUrls.delete(key);
+  }
 }
 
 function formatPlaybackTime(seconds: number) {
@@ -1012,6 +1284,34 @@ function normalizeError(error: unknown) {
           <AudioSourceManager @sources-changed="updateAudioSourceRecords" />
         </section>
 
+        <section v-show="activeSection === 'online'" class="min-h-full">
+          <div v-if="appError" role="alert" class="alert alert-error mx-auto mt-3 w-[calc(100%-1.5rem)] max-w-7xl py-2 lg:w-[calc(100%-2.5rem)]">
+            <AlertCircle :size="17" aria-hidden="true" />
+            <span class="min-w-0 flex-1 text-sm">{{ appError }}</span>
+            <button
+              class="btn btn-square btn-ghost btn-xs"
+              type="button"
+              aria-label="Dismiss playback error"
+              @click="appError = null"
+            >
+              <X :size="14" aria-hidden="true" />
+            </button>
+          </div>
+          <OnlineMusic
+            :audio-sources="audioSourceRecords"
+            :selected-audio-source-id="playbackAudioSourceId"
+            :active-online-track-key="activeOnlineTrack?.key ?? null"
+            :resolving-online-track-key="resolvingOnlineTrackKey"
+            :is-playing="isPlaying"
+            :local-music-folder="selectedFolder"
+            @play-request="handleOnlinePlayRequest"
+            @open-audio-sources="selectSection('sources')"
+            @open-plugin="selectPlugin"
+            @download-completed="handleOnlineDownloadCompleted"
+            @toggle-playback="togglePlayback"
+          />
+        </section>
+
         <section
           v-if="activeSection === 'plugin' && activePlugin"
           class="mx-auto grid w-full max-w-7xl gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]"
@@ -1112,6 +1412,11 @@ function normalizeError(error: unknown) {
             </div>
           </section>
 
+          <OnlineMusicSettingsPanel
+            :audio-sources="audioSourceRecords"
+            @settings-changed="onlineMusicSettings = $event"
+          />
+
           <section class="overflow-hidden rounded border border-base-300 bg-base-100">
             <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
               <Headphones :size="18" aria-hidden="true" />
@@ -1207,6 +1512,7 @@ function normalizeError(error: unknown) {
             <div class="min-w-0">
               <div class="truncate text-sm font-medium">{{ nowPlayingTitle }}</div>
               <div class="truncate text-xs text-base-content/60">{{ nowPlayingSubtitle }}</div>
+              <div v-if="sourceChangeMessage" class="truncate text-xs text-warning">{{ sourceChangeMessage }}</div>
             </div>
           </div>
 

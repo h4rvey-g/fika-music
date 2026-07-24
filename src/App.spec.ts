@@ -203,6 +203,27 @@ describe("application shell", () => {
       if (command === "list_audio_sources") {
         return Promise.resolve(listedAudioSources);
       }
+      if (command === "get_online_music_settings") {
+        return Promise.resolve({
+          excludedChannels: [],
+          channelPriority: [],
+          audioSourcePriority: [],
+          layerTimeoutSeconds: 8,
+          playbackTimeoutSeconds: 20,
+          preferredQuality: "320k",
+          searchHistoryEnabled: true,
+          downloadDirectory: null,
+          filenameTemplate: "{artist} - {title}[ \\[{album}\\]]",
+          downloadConcurrency: 2,
+          batchNotifications: true,
+        });
+      }
+      if (command === "list_online_download_tasks") {
+        return Promise.resolve([]);
+      }
+      if (command === "list_online_music_channels") {
+        return Promise.resolve([]);
+      }
       return Promise.resolve(null);
     });
   });
@@ -219,6 +240,7 @@ describe("application shell", () => {
     const navigation = wrapper.get('nav[aria-label="Primary navigation"]');
     expect(navigation.findAll("button").map((button) => button.text())).toEqual([
       "Local Music",
+      "Online Music",
       "Audio Sources",
       "Plugins",
       "Settings",
@@ -240,6 +262,14 @@ describe("application shell", () => {
     expect(wrapper.get('footer[aria-label="Playback bar"]').element).toBe(playbackBar.element);
     expect(settingsButton?.attributes("aria-current")).toBe("page");
     expect(drawerToggle.element.checked).toBe(false);
+
+    const onlineButton = navigation
+      .findAll("button")
+      .find((button) => button.text() === "Online Music");
+    await onlineButton?.trigger("click");
+    expect(wrapper.get("h1").text()).toBe("Online Music");
+    expect(wrapper.get('input[aria-label="Search Online Music"]').attributes("placeholder"))
+      .toBe("Search songs, artists, albums, and playlists");
 
     const sourcesButton = navigation
       .findAll("button")
@@ -303,6 +333,35 @@ describe("application shell", () => {
     expect(wrapper.get("h1").text()).toBe("Fika Runtime Demo");
     expect(wrapper.get('[data-testid="plugin-workspace"]').text()).toContain("Demo Music");
     expect(pluginButtons[1].attributes("aria-current")).toBe("page");
+    wrapper.unmount();
+  });
+
+  it("preserves Online Music state while opening a dedicated plugin page", async () => {
+    listedPlugins = [
+      pluginRecord({
+        id: "fika.netease",
+        name: "NetEase Cloud Music",
+        state: "enabled",
+        enabled: true,
+      }),
+    ];
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const navigation = wrapper.get('nav[aria-label="Primary navigation"]');
+    const onlineButton = navigation
+      .findAll("button")
+      .find((button) => button.text() === "Online Music");
+    await onlineButton?.trigger("click");
+    await wrapper.get('input[aria-label="Search Online Music"]').setValue("M83");
+
+    wrapper.getComponent({ name: "OnlineMusic" }).vm.$emit("openPlugin", "fika.netease");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get("h1").text()).toBe("NetEase Cloud Music");
+
+    await onlineButton?.trigger("click");
+    expect(wrapper.get<HTMLInputElement>('input[aria-label="Search Online Music"]').element.value)
+      .toBe("M83");
     wrapper.unmount();
   });
 

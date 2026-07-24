@@ -3,13 +3,13 @@ use crate::netease::{
     NeteaseProviderBridge, NeteaseSourceProvider, NETEASE_PLUGIN_ID, NETEASE_PROVIDER_ID,
 };
 use crate::source_runtime::{
-    self, DiagnosticLevel, SourceCapability, SourceInfo, SourceProvider, SourceRequest,
-    SourceRequestOutcome, SourceRuntime, SourceRuntimeApiVersion, SourceRuntimeError,
+    self, DiagnosticLevel, SourceAction, SourceCapability, SourceInfo, SourceProvider,
+    SourceRequest, SourceRequestOutcome, SourceRuntime, SourceRuntimeApiVersion,
+    SourceRuntimeError,
 };
 #[cfg(test)]
 use crate::source_runtime::{
-    LyricResponse, SourceAction, SourceResponse, SourceRuntimeContext, SourceSearchResponse,
-    SourceSearchResult,
+    LyricResponse, SourceResponse, SourceRuntimeContext, SourceSearchResponse, SourceSearchResult,
 };
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -424,6 +424,7 @@ pub enum PluginSystemError {
     #[error("plugin {plugin_id} runtime error: {message}")]
     Runtime {
         plugin_id: String,
+        code: Option<String>,
         message: String,
         diagnostics: Vec<PluginDiagnostic>,
     },
@@ -467,6 +468,7 @@ struct PluginEntryRuntime {
     providers: BTreeMap<String, Arc<dyn SourceProvider>>,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedPluginRequest {
     plugin_id: String,
     provider_id: String,
@@ -484,6 +486,7 @@ impl PreparedPluginRequest {
             .dispatch_request_with_cancellation(self.provider.as_ref(), request, cancellation)
             .map_err(|error| {
                 let message = error.to_string();
+                let code = error.code().map(str::to_owned);
                 let diagnostics = error
                     .diagnostics()
                     .iter()
@@ -491,6 +494,7 @@ impl PreparedPluginRequest {
                     .collect();
                 PluginSystemError::Runtime {
                     plugin_id: self.plugin_id.clone(),
+                    code,
                     message,
                     diagnostics,
                 }
@@ -1210,6 +1214,15 @@ impl PluginRegistry {
         plugin_id: &str,
         request: &SourceRequest,
     ) -> Result<PreparedPluginRequest, PluginSystemError> {
+        self.prepare_action(plugin_id, request.source(), request.action())
+    }
+
+    pub(crate) fn prepare_action(
+        &self,
+        plugin_id: &str,
+        source_id: &str,
+        action: SourceAction,
+    ) -> Result<PreparedPluginRequest, PluginSystemError> {
         let Some(plugin) = self.plugins.get(plugin_id) else {
             return Err(PluginSystemError::NotFound(plugin_id.to_owned()));
         };
@@ -1219,19 +1232,18 @@ impl PluginRegistry {
                 "plugin must be enabled before dispatch".to_owned(),
             ));
         }
-        let action = request.action();
         let mut matching_providers = plugin.record.providers.iter().filter(|provider| {
             provider
                 .sources
                 .iter()
-                .any(|source| source.id == request.source() && source.actions.contains(&action))
+                .any(|source| source.id == source_id && source.actions.contains(&action))
         });
         let provider_id = match (matching_providers.next(), matching_providers.next()) {
             (Some(provider), None) => provider.id.clone(),
             (Some(first), Some(second)) => {
                 return Err(PluginSystemError::Package(format!(
                     "plugin {plugin_id} has an ambiguous route for source {} action {action:?}: providers {} and {}",
-                    request.source(),
+                    source_id,
                     first.id,
                     second.id
                 )));
@@ -1245,7 +1257,7 @@ impl PluginRegistry {
             (None, _) => {
                 return Err(PluginSystemError::Package(format!(
                     "no provider in plugin {plugin_id} exposes source {} action {action:?}",
-                    request.source()
+                    source_id
                 )));
             }
         };
@@ -2215,6 +2227,9 @@ impl SourceProvider for DemoSourceProvider {
                     album: Some("Plugin System MVP".to_owned()),
                     duration_seconds: Some(180),
                     cover_url: Some("https://example.invalid/runtime-demo-cover.jpg".to_owned()),
+                    track_number: None,
+                    disc_number: None,
+                    platform_ids: BTreeMap::new(),
                     raw_info: json!({ "id": "runtime-demo-track" }),
                 }],
             })),
@@ -2472,6 +2487,7 @@ fn runtime_error(plugin_id: &str, error: SourceRuntimeError) -> PluginSystemErro
         .collect();
     PluginSystemError::Runtime {
         plugin_id: plugin_id.to_owned(),
+        code: error.code().map(str::to_owned),
         message: error.to_string(),
         diagnostics,
     }

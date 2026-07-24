@@ -30,7 +30,7 @@ pub const LX_SOURCE_WY: &str = "wy";
 pub const LX_SOURCE_MG: &str = "mg";
 pub const LX_SOURCE_LOCAL: &str = "local";
 
-pub const SOURCE_RUNTIME_API_VERSION: SourceRuntimeApiVersion = SourceRuntimeApiVersion::new(1, 1);
+pub const SOURCE_RUNTIME_API_VERSION: SourceRuntimeApiVersion = SourceRuntimeApiVersion::new(1, 2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
@@ -117,6 +117,13 @@ pub struct SourceDiagnostic {
 #[ts(export_to = "bindings.ts")]
 pub enum SourceAction {
     MusicSearch,
+    ArtistSearch,
+    AlbumSearch,
+    PlaylistSearch,
+    SearchSuggestions,
+    ArtistTopTracks,
+    AlbumRead,
+    PlaylistReadPublic,
     MusicUrl,
     Lyric,
     Pic,
@@ -208,6 +215,51 @@ pub enum SourceRequest {
         #[serde(rename = "pageSize")]
         page_size: u64,
     },
+    ArtistSearch {
+        source: String,
+        keyword: String,
+        page: u64,
+        #[serde(rename = "pageSize")]
+        page_size: u64,
+    },
+    AlbumSearch {
+        source: String,
+        keyword: String,
+        page: u64,
+        #[serde(rename = "pageSize")]
+        page_size: u64,
+    },
+    PlaylistSearch {
+        source: String,
+        keyword: String,
+        page: u64,
+        #[serde(rename = "pageSize")]
+        page_size: u64,
+    },
+    SearchSuggestions {
+        source: String,
+        keyword: String,
+        limit: u64,
+    },
+    ArtistTopTracks {
+        source: String,
+        artist: SourceEntityRef,
+        limit: u64,
+    },
+    AlbumRead {
+        source: String,
+        album: SourceEntityRef,
+        page: u64,
+        #[serde(rename = "pageSize")]
+        page_size: u64,
+    },
+    PlaylistReadPublic {
+        source: String,
+        playlist: SourceEntityRef,
+        page: u64,
+        #[serde(rename = "pageSize")]
+        page_size: u64,
+    },
     MusicUrl {
         source: String,
         #[serde(rename = "musicInfo")]
@@ -268,6 +320,13 @@ impl SourceRequest {
     pub fn source(&self) -> &str {
         match self {
             Self::MusicSearch { source, .. }
+            | Self::ArtistSearch { source, .. }
+            | Self::AlbumSearch { source, .. }
+            | Self::PlaylistSearch { source, .. }
+            | Self::SearchSuggestions { source, .. }
+            | Self::ArtistTopTracks { source, .. }
+            | Self::AlbumRead { source, .. }
+            | Self::PlaylistReadPublic { source, .. }
             | Self::MusicUrl { source, .. }
             | Self::Lyric { source, .. }
             | Self::Pic { source, .. }
@@ -282,6 +341,13 @@ impl SourceRequest {
     pub const fn action(&self) -> SourceAction {
         match self {
             Self::MusicSearch { .. } => SourceAction::MusicSearch,
+            Self::ArtistSearch { .. } => SourceAction::ArtistSearch,
+            Self::AlbumSearch { .. } => SourceAction::AlbumSearch,
+            Self::PlaylistSearch { .. } => SourceAction::PlaylistSearch,
+            Self::SearchSuggestions { .. } => SourceAction::SearchSuggestions,
+            Self::ArtistTopTracks { .. } => SourceAction::ArtistTopTracks,
+            Self::AlbumRead { .. } => SourceAction::AlbumRead,
+            Self::PlaylistReadPublic { .. } => SourceAction::PlaylistReadPublic,
             Self::MusicUrl { .. } => SourceAction::MusicUrl,
             Self::Lyric { .. } => SourceAction::Lyric,
             Self::Pic { .. } => SourceAction::Pic,
@@ -311,16 +377,66 @@ impl SourceRequest {
                 page,
                 page_size,
                 ..
+            }
+            | Self::ArtistSearch {
+                keyword,
+                page,
+                page_size,
+                ..
+            }
+            | Self::AlbumSearch {
+                keyword,
+                page,
+                page_size,
+                ..
+            }
+            | Self::PlaylistSearch {
+                keyword,
+                page,
+                page_size,
+                ..
             } => {
                 if keyword.trim().is_empty() {
-                    return Err("musicSearch keyword must not be empty".to_owned());
+                    return Err("search keyword must not be empty".to_owned());
                 }
                 if *page == 0 {
-                    return Err("musicSearch page must be at least 1".to_owned());
+                    return Err("search page must be at least 1".to_owned());
                 }
                 if !(1..=100).contains(page_size) {
-                    return Err("musicSearch pageSize must be between 1 and 100".to_owned());
+                    return Err("search pageSize must be between 1 and 100".to_owned());
                 }
+            }
+            Self::SearchSuggestions { keyword, limit, .. } => {
+                if keyword.trim().is_empty() {
+                    return Err("searchSuggestions keyword must not be empty".to_owned());
+                }
+                if !(1..=20).contains(limit) {
+                    return Err("searchSuggestions limit must be between 1 and 20".to_owned());
+                }
+            }
+            Self::ArtistTopTracks { artist, limit, .. } => {
+                artist.validate("artist")?;
+                if !(1..=50).contains(limit) {
+                    return Err("artistTopTracks limit must be between 1 and 50".to_owned());
+                }
+            }
+            Self::AlbumRead {
+                album,
+                page,
+                page_size,
+                ..
+            } => {
+                album.validate("album")?;
+                validate_detail_page(*page, *page_size, "albumRead")?;
+            }
+            Self::PlaylistReadPublic {
+                playlist,
+                page,
+                page_size,
+                ..
+            } => {
+                playlist.validate("playlist")?;
+                validate_detail_page(*page, *page_size, "playlistReadPublic")?;
             }
             Self::MusicUrl { music_info, .. }
             | Self::Lyric { music_info, .. }
@@ -366,6 +482,77 @@ impl SourceRequest {
 
         Ok(())
     }
+}
+
+fn validate_detail_page(page: u64, page_size: u64, action: &str) -> Result<(), String> {
+    if page == 0 {
+        return Err(format!("{action} page must be at least 1"));
+    }
+    if !(1..=200).contains(&page_size) {
+        return Err(format!("{action} pageSize must be between 1 and 200"));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct SourceEntityRef {
+    pub id: String,
+    #[serde(default)]
+    #[ts(type = "Record<string, string | number>")]
+    pub platform_ids: BTreeMap<String, JsonScalar>,
+    #[serde(default)]
+    #[ts(type = "Record<string, unknown>")]
+    pub raw_info: JsonValue,
+}
+
+impl SourceEntityRef {
+    fn validate(&self, kind: &str) -> Result<(), String> {
+        if self.id.trim().is_empty() {
+            return Err(format!("{kind} id must not be empty"));
+        }
+        validate_platform_ids(&self.platform_ids)?;
+        if !self.raw_info.is_object() {
+            return Err(format!("{kind} rawInfo must be a JSON object"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(untagged)]
+#[ts(export_to = "bindings.ts")]
+pub enum JsonScalar {
+    String(String),
+    Number(i64),
+}
+
+fn validate_platform_ids(platform_ids: &BTreeMap<String, JsonScalar>) -> Result<(), String> {
+    const MAX_PLATFORM_IDS: usize = 16;
+    const MAX_PLATFORM_IDS_BYTES: usize = 2 * 1024;
+    if platform_ids.len() > MAX_PLATFORM_IDS {
+        return Err(format!(
+            "platformIds may contain at most {MAX_PLATFORM_IDS} entries"
+        ));
+    }
+    if platform_ids.keys().any(|key| {
+        key.is_empty()
+            || key.len() > 64
+            || !key.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+            })
+    }) {
+        return Err("platformIds contains an invalid key".to_owned());
+    }
+    let serialized = serde_json::to_vec(platform_ids)
+        .map_err(|error| format!("platformIds could not be serialized: {error}"))?;
+    if serialized.len() > MAX_PLATFORM_IDS_BYTES {
+        return Err(format!(
+            "platformIds must not exceed {MAX_PLATFORM_IDS_BYTES} bytes"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_account_ref(account_ref: &str) -> Result<(), String> {
@@ -425,6 +612,16 @@ pub struct SourceSearchResult {
     pub album: Option<String>,
     pub duration_seconds: Option<u64>,
     pub cover_url: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub track_number: Option<u32>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub disc_number: Option<u32>,
+    #[serde(default)]
+    #[ts(optional)]
+    #[ts(type = "Record<string, string | number>")]
+    pub platform_ids: BTreeMap<String, JsonScalar>,
     #[ts(type = "Record<string, unknown>")]
     pub raw_info: JsonValue,
 }
@@ -436,6 +633,94 @@ pub struct SourceSearchResponse {
     pub is_end: bool,
     pub total: Option<u64>,
     pub list: Vec<SourceSearchResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct SourceArtistSearchResult {
+    pub id: String,
+    pub source: String,
+    pub name: String,
+    pub cover_url: Option<String>,
+    #[serde(default)]
+    #[ts(type = "Record<string, string | number>")]
+    pub platform_ids: BTreeMap<String, JsonScalar>,
+    #[serde(default)]
+    #[ts(type = "Record<string, unknown>")]
+    pub raw_info: JsonValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct SourceArtistSearchResponse {
+    pub is_end: bool,
+    pub total: Option<u64>,
+    pub list: Vec<SourceArtistSearchResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct SourceAlbumSearchResult {
+    pub id: String,
+    pub source: String,
+    pub title: String,
+    pub artist: String,
+    pub release_year: Option<u32>,
+    pub cover_url: Option<String>,
+    pub track_count: Option<u64>,
+    #[serde(default)]
+    #[ts(type = "Record<string, string | number>")]
+    pub platform_ids: BTreeMap<String, JsonScalar>,
+    #[serde(default)]
+    #[ts(type = "Record<string, unknown>")]
+    pub raw_info: JsonValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct SourceAlbumSearchResponse {
+    pub is_end: bool,
+    pub total: Option<u64>,
+    pub list: Vec<SourceAlbumSearchResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct SourcePlaylistSearchResult {
+    pub id: String,
+    pub source: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub cover_url: Option<String>,
+    pub track_count: Option<u64>,
+    pub owner_name: Option<String>,
+    #[serde(default)]
+    #[ts(type = "Record<string, string | number>")]
+    pub platform_ids: BTreeMap<String, JsonScalar>,
+    #[serde(default)]
+    #[ts(type = "Record<string, unknown>")]
+    pub raw_info: JsonValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct SourcePlaylistSearchResponse {
+    pub is_end: bool,
+    pub total: Option<u64>,
+    pub list: Vec<SourcePlaylistSearchResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct SourceSuggestionsResponse {
+    pub list: Vec<String>,
 }
 
 pub type RemoteTrack = SourceSearchResult;
@@ -492,6 +777,13 @@ pub struct SourcePlaylistMutation {
 #[ts(export_to = "bindings.ts")]
 pub enum SourceResponse {
     MusicSearch(SourceSearchResponse),
+    ArtistSearch(SourceArtistSearchResponse),
+    AlbumSearch(SourceAlbumSearchResponse),
+    PlaylistSearch(SourcePlaylistSearchResponse),
+    SearchSuggestions(SourceSuggestionsResponse),
+    ArtistTopTracks(SourceSearchResponse),
+    AlbumRead(SourceSearchResponse),
+    PlaylistReadPublic(SourceSearchResponse),
     MusicUrl(String),
     Lyric(LyricResponse),
     Pic(String),
@@ -1239,10 +1531,20 @@ impl SourceRuntimeContext {
     }
 
     pub fn provider_error(&mut self, message: impl Into<String>) -> SourceRuntimeError {
+        self.provider_error_with_code("provider-failure", message)
+    }
+
+    pub fn provider_error_with_code(
+        &mut self,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> SourceRuntimeError {
+        let code = code.into();
         let message = message.into();
         self.push_diagnostic(DiagnosticLevel::Error, message.clone());
         SourceRuntimeError::Provider {
             source_id: self.source_id.clone(),
+            code,
             message,
             diagnostics: self.diagnostics.clone(),
         }
@@ -1828,6 +2130,7 @@ pub enum SourceRuntimeError {
     #[error("source {source_id} failed: {message}")]
     Provider {
         source_id: String,
+        code: String,
         message: String,
         diagnostics: Vec<SourceDiagnostic>,
     },
@@ -1847,6 +2150,13 @@ pub enum SourceRuntimeError {
 }
 
 impl SourceRuntimeError {
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Self::Provider { code, .. } => Some(code),
+            _ => None,
+        }
+    }
+
     pub fn diagnostics(&self) -> &[SourceDiagnostic] {
         match self {
             Self::Compatibility { diagnostics, .. }
@@ -2132,6 +2442,25 @@ fn validate_response(
     let matches_action = matches!(
         (action, response),
         (SourceAction::MusicSearch, SourceResponse::MusicSearch(_))
+            | (SourceAction::ArtistSearch, SourceResponse::ArtistSearch(_))
+            | (SourceAction::AlbumSearch, SourceResponse::AlbumSearch(_))
+            | (
+                SourceAction::PlaylistSearch,
+                SourceResponse::PlaylistSearch(_)
+            )
+            | (
+                SourceAction::SearchSuggestions,
+                SourceResponse::SearchSuggestions(_)
+            )
+            | (
+                SourceAction::ArtistTopTracks,
+                SourceResponse::ArtistTopTracks(_)
+            )
+            | (SourceAction::AlbumRead, SourceResponse::AlbumRead(_))
+            | (
+                SourceAction::PlaylistReadPublic,
+                SourceResponse::PlaylistReadPublic(_)
+            )
             | (SourceAction::MusicUrl, SourceResponse::MusicUrl(_))
             | (SourceAction::Lyric, SourceResponse::Lyric(_))
             | (SourceAction::Pic, SourceResponse::Pic(_))
@@ -2158,11 +2487,59 @@ fn validate_response(
 
     match response {
         SourceResponse::MusicSearch(search) => {
-            if search.list.iter().any(|item| item.source != source_key) {
-                return Err(context.provider_error(
-                    "musicSearch result source does not match the request source",
-                ));
+            validate_track_page(source_key, search, "musicSearch", context)?;
+        }
+        SourceResponse::ArtistSearch(search) => {
+            if search.list.iter().any(|item| {
+                item.source != source_key
+                    || item.id.trim().is_empty()
+                    || item.name.trim().is_empty()
+                    || validate_platform_ids(&item.platform_ids).is_err()
+                    || !item.raw_info.is_object()
+            }) {
+                return Err(context.provider_error("artistSearch returned an invalid entity"));
             }
+        }
+        SourceResponse::AlbumSearch(search) => {
+            if search.list.iter().any(|item| {
+                item.source != source_key
+                    || item.id.trim().is_empty()
+                    || item.title.trim().is_empty()
+                    || item.artist.trim().is_empty()
+                    || validate_platform_ids(&item.platform_ids).is_err()
+                    || !item.raw_info.is_object()
+            }) {
+                return Err(context.provider_error("albumSearch returned an invalid entity"));
+            }
+        }
+        SourceResponse::PlaylistSearch(search) => {
+            if search.list.iter().any(|item| {
+                item.source != source_key
+                    || item.id.trim().is_empty()
+                    || item.name.trim().is_empty()
+                    || validate_platform_ids(&item.platform_ids).is_err()
+                    || !item.raw_info.is_object()
+            }) {
+                return Err(context.provider_error("playlistSearch returned an invalid entity"));
+            }
+        }
+        SourceResponse::SearchSuggestions(suggestions) => {
+            if suggestions
+                .list
+                .iter()
+                .any(|suggestion| suggestion.trim().is_empty())
+            {
+                return Err(context.provider_error("searchSuggestions returned an empty value"));
+            }
+        }
+        SourceResponse::ArtistTopTracks(search) => {
+            validate_track_page(source_key, search, "artistTopTracks", context)?;
+        }
+        SourceResponse::AlbumRead(search) => {
+            validate_track_page(source_key, search, "albumRead", context)?;
+        }
+        SourceResponse::PlaylistReadPublic(search) => {
+            validate_track_page(source_key, search, "playlistReadPublic", context)?;
         }
         SourceResponse::MusicRecommendations(recommendations) => {
             if recommendations
@@ -2235,6 +2612,25 @@ fn validate_response(
             }
         }
         SourceResponse::Lyric(_) => {}
+    }
+    Ok(())
+}
+
+fn validate_track_page(
+    source_key: &str,
+    page: &SourceSearchResponse,
+    action: &str,
+    context: &mut SourceRuntimeContext,
+) -> Result<(), SourceRuntimeError> {
+    if page.list.iter().any(|item| {
+        item.source != source_key
+            || item.id.trim().is_empty()
+            || item.title.trim().is_empty()
+            || item.artist.trim().is_empty()
+            || validate_platform_ids(&item.platform_ids).is_err()
+            || !item.raw_info.is_object()
+    }) {
+        return Err(context.provider_error(format!("{action} returned an invalid track")));
     }
     Ok(())
 }
@@ -3466,6 +3862,27 @@ mod tests {
 
         assert_eq!(context.diagnostics().len(), MAX_DIAGNOSTICS);
         assert_eq!(context.diagnostics()[0].message, "message 5");
+    }
+
+    #[test]
+    fn provider_errors_should_preserve_stable_codes() {
+        let runtime = SourceRuntime::new();
+        let mut context = SourceRuntimeContext::new(
+            "coded-provider",
+            BTreeSet::new(),
+            BTreeSet::new(),
+            Arc::clone(&runtime.host),
+            SourceCancellationToken::default(),
+        );
+
+        let error =
+            context.provider_error_with_code("credential-expired", "account session expired");
+
+        assert_eq!(error.code(), Some("credential-expired"));
+        assert!(matches!(
+            error,
+            SourceRuntimeError::Provider { ref code, .. } if code == "credential-expired"
+        ));
     }
 
     #[test]

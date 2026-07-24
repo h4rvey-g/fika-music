@@ -919,6 +919,9 @@ fn normalize_qishui_song_info(raw: &serde_json::Value) -> SourceSearchResult {
         album,
         duration_seconds,
         cover_url,
+        track_number: None,
+        disc_number: None,
+        platform_ids: BTreeMap::new(),
         raw_info,
     }
 }
