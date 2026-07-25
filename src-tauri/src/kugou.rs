@@ -30,6 +30,7 @@ pub const KUGOU_API_BASIS_VERSION: &str = "1.5.1 (283f1e9)";
 
 const ACCOUNT_REF_PREFIX: &str = "kugou-account:";
 const GATEWAY_BASE_URL: &str = "https://gateway.kugou.com";
+const SONG_SEARCH_BASE_URL: &str = "https://songsearch.kugou.com";
 const LOGIN_BASE_URL: &str = "https://login-user.kugou.com";
 const WEB_SIGNATURE_SALT: &str = "NVPh5oo715z5DIWAeQlhMDsWXXQV4hwt";
 const ANDROID_SIGNATURE_SALT: &str = "OIlwieks28dk2k092lksi2UIkp";
@@ -470,6 +471,28 @@ impl KugouApi for KugouHttpApi {
             "album" | "author" | "special" => search_type,
             _ => "song",
         };
+        if type_name == "song" {
+            return self.request_json(
+                "search KuGou",
+                SONG_SEARCH_BASE_URL,
+                "/song_search_v2",
+                Method::GET,
+                &KugouDevice::generate(),
+                None,
+                BTreeMap::from([
+                    ("albumhide".to_owned(), "0".to_owned()),
+                    ("iscorrection".to_owned(), "1".to_owned()),
+                    ("keyword".to_owned(), keyword.to_owned()),
+                    ("nocollect".to_owned(), "0".to_owned()),
+                    ("page".to_owned(), page.to_string()),
+                    ("pagesize".to_owned(), page_size.to_string()),
+                    ("platform".to_owned(), "AndroidFilter".to_owned()),
+                ]),
+                None,
+                SignatureKind::Android,
+                None,
+            );
+        }
         self.request_json(
             "search KuGou",
             GATEWAY_BASE_URL,
@@ -1911,7 +1934,7 @@ fn read_api_response(
 }
 
 fn upstream_message(body: &JsonValue) -> String {
-    ["errmsg", "error", "msg", "message"]
+    ["errmsg", "error_msg", "error", "msg", "message"]
         .into_iter()
         .find_map(|key| json_string(body.get(key)))
         .unwrap_or_else(|| "request failed".to_owned())
@@ -2165,33 +2188,41 @@ fn sign_params_key(value: i64) -> String {
 }
 
 fn remote_track_from_json(value: &JsonValue) -> Option<RemoteTrack> {
-    let id = first_json_string(value, &["hash", "hash_128", "audio_hash"])?;
-    let artist = first_json_string(value, &["author_name", "singername", "artist"])
-        .or_else(|| singer_names(value))
-        .unwrap_or_else(|| "Unknown artist".to_owned());
-    let raw_title = first_json_string(value, &["songname", "audio_name", "name", "filename"])?;
+    let id = first_json_string(value, &["hash", "FileHash", "hash_128", "audio_hash"])?;
+    let artist = first_json_string(
+        value,
+        &["author_name", "SingerName", "singername", "artist"],
+    )
+    .or_else(|| singer_names(value))
+    .unwrap_or_else(|| "Unknown artist".to_owned());
+    let raw_title = first_json_string(
+        value,
+        &["songname", "SongName", "audio_name", "name", "filename"],
+    )?;
     let title = raw_title
         .strip_prefix(&format!("{artist} - "))
         .unwrap_or(&raw_title)
         .to_owned();
-    let album = first_json_string(value, &["album_name", "remark"])
+    let album = first_json_string(value, &["album_name", "AlbumName", "remark"])
         .or_else(|| value.pointer("/albuminfo/name").and_then(json_string_value))
         .filter(|album| !album.trim().is_empty());
-    let duration_seconds = json_u64(value.get("time_length")).or_else(|| {
-        json_u64(value.get("timelen"))
-            .or_else(|| json_u64(value.get("duration")))
-            .map(|milliseconds| milliseconds / 1_000)
-    });
-    let cover_url = first_json_string(value, &["sizable_cover", "cover", "img"])
-        .or_else(|| {
-            value
-                .pointer("/trans_param/union_cover")
-                .and_then(json_string_value)
-        })
-        .and_then(|url| normalize_image_url(&url));
-    let album_id = first_json_string(value, &["album_id"])
+    let duration_seconds = json_u64(value.get("time_length"))
+        .or_else(|| json_u64(value.get("Duration")))
+        .or_else(|| json_u64(value.get("duration")))
+        .or_else(|| json_u64(value.get("timelen")).map(|milliseconds| milliseconds / 1_000));
+    let cover_url = first_json_string(
+        value,
+        &["sizable_cover", "Image", "AlbumImage", "cover", "img"],
+    )
+    .or_else(|| {
+        value
+            .pointer("/trans_param/union_cover")
+            .and_then(json_string_value)
+    })
+    .and_then(|url| normalize_image_url(&url));
+    let album_id = first_json_string(value, &["album_id", "AlbumID"])
         .or_else(|| value.pointer("/albuminfo/id").and_then(json_string_value));
-    let mix_song_id = first_json_string(value, &["mixsongid", "album_audio_id"]);
+    let mix_song_id = first_json_string(value, &["mixsongid", "MixSongID", "album_audio_id"]);
     let mut platform_ids = BTreeMap::from([
         (
             "id".to_owned(),
@@ -2656,6 +2687,44 @@ mod tests {
                 source_runtime::LX_SOURCE_KG,
                 Some(205),
                 Some("https://imge.kugou.com/stdmusic/400/cover.jpg".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn song_search_parser_should_normalize_current_web_response() {
+        let track = remote_track_from_json(&json!({
+            "FileHash": "B3A52A7A958BF0AED0EBFBA2E9A818B7",
+            "SongName": "Sunny Day",
+            "SingerName": "Jay Chou",
+            "AlbumName": "Ye Hui Mei",
+            "Duration": 269,
+            "AlbumID": "966846",
+            "MixSongID": "32100650",
+            "Image": "http://imge.kugou.com/stdmusic/{size}/cover.jpg"
+        }))
+        .expect("current KuGou search track should normalize");
+
+        assert_eq!(
+            (
+                track.id.as_str(),
+                track.title.as_str(),
+                track.artist.as_str(),
+                track.album.as_deref(),
+                track.duration_seconds,
+                track.cover_url.as_deref(),
+                track.platform_ids.get("albumId"),
+                track.platform_ids.get("mixSongId"),
+            ),
+            (
+                "B3A52A7A958BF0AED0EBFBA2E9A818B7",
+                "Sunny Day",
+                "Jay Chou",
+                Some("Ye Hui Mei"),
+                Some(269),
+                Some("https://imge.kugou.com/stdmusic/400/cover.jpg"),
+                Some(&JsonScalar::String("966846".to_owned())),
+                Some(&JsonScalar::String("32100650".to_owned())),
             )
         );
     }
