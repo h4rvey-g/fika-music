@@ -27,11 +27,12 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: tauriMocks.listen }));
 
 const settings = createOnlineMusicSettings();
 
-function track(index: number): OnlineTrack {
+function track(index: number, coverUrl: string | null = null): OnlineTrack {
   const title = `Song ${index}`;
   return createOnlineTrack({
     key: `song-${index}`,
     title,
+    coverUrl,
     trackNumber: index,
     candidates: [
       createOnlineTrackCandidate({
@@ -92,9 +93,10 @@ function failedDownloadTask(): OnlineDownloadTask {
   };
 }
 
-function mountOnlineMusic() {
+function mountOnlineMusic(isActive = true) {
   return mount(OnlineMusic, {
     props: {
+      isActive,
       audioSources: [],
       selectedAudioSourceId: "",
       activeOnlineTrackKey: null,
@@ -147,6 +149,250 @@ describe("Online Music workspace", () => {
       if (command === "start_online_music_search") return Promise.resolve("search-1");
       return Promise.resolve(null);
     });
+  });
+
+  it("shows the three personalized entrances on the Online Music home", async () => {
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+
+    expect(
+      wrapper.findAll("[data-online-home] button[aria-label]").map((button) =>
+        button.attributes("aria-label")
+      ),
+    ).toEqual(["每日推荐", "私人漫游", "私人雷达"]);
+    wrapper.unmount();
+  });
+
+  it("preloads recommendation covers only while Online Music is active", async () => {
+    const wrapper = mountOnlineMusic(false);
+    await flushPromises();
+
+    expect(
+      tauriMocks.invoke.mock.calls.filter(([command]) => command === "online_music_recommendations"),
+    ).toHaveLength(0);
+
+    await wrapper.setProps({ isActive: true });
+    await flushPromises();
+    expect(
+      tauriMocks.invoke.mock.calls.filter(([command]) => command === "online_music_recommendations"),
+    ).toHaveLength(3);
+    wrapper.unmount();
+  });
+
+  it("fills each recommendation entrance with its first track cover", async () => {
+    const covers = {
+      daily: "https://cdn.test/daily.jpg",
+      roaming: "https://cdn.test/roaming.jpg",
+      radar: "https://cdn.test/radar.jpg",
+    } as const;
+    tauriMocks.invoke.mockImplementation((command: string, args?: { kind?: keyof typeof covers }) => {
+      if (command === "get_online_music_settings") return Promise.resolve(settings);
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "online_music_recommendations" && args?.kind) {
+        return Promise.resolve({
+          kind: args.kind,
+          items: [track(1, covers[args.kind])],
+          failures: [],
+          supportedChannels: args.kind === "daily" ? 2 : 1,
+          completedChannels: args.kind === "daily" ? 2 : 1,
+        });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+
+    const cards = wrapper.findAll("[data-online-home] button[aria-label]");
+    expect(cards.map((card) => card.get("img").attributes("src"))).toEqual([
+      covers.daily,
+      covers.roaming,
+      covers.radar,
+    ]);
+
+    await wrapper.get('button[aria-label="私人漫游"]').trigger("click");
+    await flushPromises();
+    expect(
+      tauriMocks.invoke.mock.calls.filter(
+        ([command, args]) => command === "online_music_recommendations" && args.kind === "roaming",
+      ),
+    ).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("cancels an in-flight recommendation when returning home", async () => {
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "get_online_music_settings") return Promise.resolve(settings);
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "online_music_recommendations") return new Promise(() => undefined);
+      if (command === "cancel_source_request") return Promise.resolve(true);
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic(false);
+    await flushPromises();
+
+    await wrapper.get('button[aria-label="每日推荐"]').trigger("click");
+    const request = tauriMocks.invoke.mock.calls.find(
+      ([command]) => command === "online_music_recommendations",
+    );
+    (wrapper.vm as unknown as { showHome: () => void }).showHome();
+    await flushPromises();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("cancel_source_request", {
+      requestId: request?.[1].requestId,
+    });
+    wrapper.unmount();
+  });
+
+  it("loads the aggregated daily recommendations into the shared track table", async () => {
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "get_online_music_settings") return Promise.resolve(settings);
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "online_music_recommendations") {
+        return Promise.resolve({
+          kind: "daily",
+          items: [track(1)],
+          failures: [],
+          supportedChannels: 2,
+          completedChannels: 2,
+        });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+
+    await wrapper.get('button[aria-label="每日推荐"]').trigger("click");
+    await flushPromises();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("online_music_recommendations", {
+      kind: "daily",
+      requestId: expect.stringMatching(/^online-recommendation-daily-/),
+    });
+    expect(wrapper.find('button[aria-label="Play Song 1"]').exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("appends unique private roaming tracks from a control below the current batch", async () => {
+    let roamingRequests = 0;
+    tauriMocks.invoke.mockImplementation((command: string, args?: { kind?: string }) => {
+      if (command === "get_online_music_settings") return Promise.resolve(settings);
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "online_music_recommendations") {
+        if (args?.kind === "roaming") {
+          roamingRequests += 1;
+          const items = roamingRequests === 1
+            ? [track(1), track(2), track(3)]
+            : [track(3), track(4), track(4), track(5)];
+          return Promise.resolve({
+            kind: "roaming",
+            items,
+            failures: [],
+            supportedChannels: 1,
+            completedChannels: 1,
+          });
+        }
+        return Promise.resolve({
+          kind: args?.kind ?? "daily",
+          items: [track(10)],
+          failures: [],
+          supportedChannels: 1,
+          completedChannels: 1,
+        });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+
+    await wrapper.get('button[aria-label="私人漫游"]').trigger("click");
+    await flushPromises();
+
+    expect(
+      wrapper.find(
+        '[data-online-recommendation] > div:first-child button[aria-label="Load next private roaming batch"]',
+      ).exists(),
+    ).toBe(false);
+    const loadNext = wrapper.get('[data-private-roaming-next]');
+    expect(loadNext.text()).toContain("Load next songs");
+    await loadNext.trigger("click");
+    await flushPromises();
+
+    expect(
+      wrapper.findAll('button[aria-label^="Play Song "]').map((button) =>
+        button.attributes("aria-label")
+      ),
+    ).toEqual([
+      "Play Song 1",
+      "Play Song 2",
+      "Play Song 3",
+      "Play Song 4",
+      "Play Song 5",
+    ]);
+    expect(roamingRequests).toBe(2);
+    wrapper.unmount();
+  });
+
+  it("keeps the private roaming playback queue appendable by later batches", async () => {
+    let roamingRequests = 0;
+    tauriMocks.invoke.mockImplementation((command: string, args?: { kind?: string }) => {
+      if (command === "get_online_music_settings") return Promise.resolve(settings);
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "list_online_music_channels") {
+        return Promise.resolve([{ id: "fika.netease:wy" }]);
+      }
+      if (command === "online_music_recommendations") {
+        if (args?.kind === "roaming") roamingRequests += 1;
+        return Promise.resolve({
+          kind: args?.kind ?? "daily",
+          items: args?.kind === "roaming" && roamingRequests > 1
+            ? [track(4), track(5), track(6)]
+            : [track(1), track(2), track(3)],
+          failures: [],
+          supportedChannels: 1,
+          completedChannels: 1,
+        });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+
+    await wrapper.get('button[aria-label="私人漫游"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('button[aria-label="Play Song 3"]').trigger("click");
+    await flushPromises();
+
+    const requests = wrapper.emitted("playRequest") ?? [];
+    const request = requests[requests.length - 1];
+    expect(request?.[3]).toBe(true);
+    expect(request?.[4]).toEqual(expect.any(Function));
+    const queue = request?.[1] as OnlineTrack[];
+    const loadNext = request?.[4] as () => Promise<OnlineTrack[]>;
+    await loadNext();
+
+    expect(queue.map((item) => item.title)).toEqual([
+      "Song 1",
+      "Song 2",
+      "Song 3",
+      "Song 4",
+      "Song 5",
+      "Song 6",
+    ]);
+    wrapper.unmount();
+  });
+
+  it("returns a submitted search to the Online Music home through its exposed action", async () => {
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+    await search(wrapper, "Song", "songs", [track(1)]);
+
+    (wrapper.vm as unknown as { showHome: () => void }).showHome();
+    await nextTick();
+
+    expect(wrapper.find("[data-online-home]").exists()).toBe(true);
+    expect(wrapper.get<HTMLInputElement>('input[aria-label="Search Online Music"]').element.value)
+      .toBe("");
+    wrapper.unmount();
   });
 
   it("keeps a category visible while expanding its complete result page", async () => {

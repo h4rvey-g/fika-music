@@ -101,6 +101,7 @@ macro_rules! with_tauri_commands {
             get_online_music_settings,
             update_online_music_settings,
             list_online_music_channels,
+            online_music_recommendations,
             online_music_suggestions,
             start_online_music_search,
             online_music_search_page,
@@ -1496,6 +1497,169 @@ fn all_online_music_channels(state: &AppState) -> CommandResult<Vec<online_music
 }
 
 #[tauri::command]
+async fn online_music_recommendations(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    kind: source_runtime::MusicRecommendationKind,
+    request_id: Option<String>,
+) -> CommandResult<online_music::OnlineRecommendationsResult> {
+    let cancellation = register_source_request(state.inner(), request_id.as_deref())
+        .map_err(|error| error.message)?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        online_music_recommendations_inner(&state, kind, cancellation)
+    })
+    .await;
+    unregister_source_request(state.inner(), request_id.as_deref());
+    result.map_err(|error| format!("online music recommendation task failed: {error}"))?
+}
+
+fn online_music_recommendations_inner(
+    state: &AppState,
+    kind: source_runtime::MusicRecommendationKind,
+    cancellation: source_runtime::SourceCancellationToken,
+) -> CommandResult<online_music::OnlineRecommendationsResult> {
+    let channels = online_music_channels(state)?;
+    let eligible = channels
+        .into_iter()
+        .filter(|channel| {
+            channel
+                .actions
+                .contains(&source_runtime::SourceAction::MusicRecommendations)
+                && recommendation_channel_supports(channel, kind)
+        })
+        .collect::<Vec<_>>();
+    let supported_channels = eligible.len() as u32;
+    let netease_account_ref = if eligible
+        .iter()
+        .any(|channel| channel.plugin_id == netease::NETEASE_PLUGIN_ID)
+    {
+        state
+            .netease_bridge
+            .accounts()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|account| account.status == netease::NeteaseAccountStatus::Active)
+            .map(|account| account.account_ref)
+    } else {
+        None
+    };
+    let kugou_account_ref = if eligible
+        .iter()
+        .any(|channel| channel.plugin_id == kugou::KUGOU_PLUGIN_ID)
+    {
+        state
+            .kugou_bridge
+            .accounts()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|account| account.status == kugou::KugouAccountStatus::Active)
+            .map(|account| account.account_ref)
+    } else {
+        None
+    };
+
+    let mut failures = Vec::new();
+    let ready = eligible
+        .into_iter()
+        .filter(|channel| {
+            let connected = match channel.plugin_id.as_str() {
+                netease::NETEASE_PLUGIN_ID => netease_account_ref.is_some(),
+                kugou::KUGOU_PLUGIN_ID => kugou_account_ref.is_some(),
+                _ => false,
+            };
+            if !connected {
+                failures.push(online_music::OnlineChannelFailure {
+                    channel_id: channel.id.clone(),
+                    channel_name: channel.source_name.clone(),
+                    message: format!(
+                        "Connect an active {} account to load recommendations.",
+                        channel.source_name
+                    ),
+                });
+            }
+            connected
+        })
+        .collect::<Vec<_>>();
+    let outcomes = dispatch_channels(state, &ready, cancellation, |channel| {
+        let account_ref = match channel.plugin_id.as_str() {
+            netease::NETEASE_PLUGIN_ID => netease_account_ref.as_deref(),
+            kugou::KUGOU_PLUGIN_ID => kugou_account_ref.as_deref(),
+            _ => None,
+        }
+        .unwrap_or_default()
+        .to_owned();
+        source_runtime::SourceRequest::MusicRecommendations {
+            source: channel.source_id.clone(),
+            account_ref,
+            kind,
+            limit: recommendation_request_limit(kind),
+        }
+    });
+    let completed_channels = outcomes.len() as u32;
+    let mut candidates = Vec::new();
+    for (channel, outcome) in outcomes {
+        match outcome.and_then(|outcome| match outcome.response {
+            source_runtime::SourceResponse::MusicRecommendations(response) => Ok(response.list),
+            _ => Err("provider returned an unexpected response".to_owned()),
+        }) {
+            Ok(tracks) => {
+                candidates.extend(tracks.into_iter().enumerate().map(|(index, track)| {
+                    online_music::OnlineTrackCandidate::from_source(
+                        &channel,
+                        track,
+                        index as u32 + 1,
+                    )
+                }))
+            }
+            Err(message) => failures.push(online_music::OnlineChannelFailure {
+                channel_id: channel.id,
+                channel_name: channel.source_name,
+                message,
+            }),
+        }
+    }
+    let settings = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| "database lock was poisoned".to_owned())?;
+        online_music::load_settings(&db).map_err(|error| error.to_string())?
+    };
+    Ok(online_music::OnlineRecommendationsResult {
+        kind,
+        items: online_music::merge_tracks(candidates, &settings.channel_priority),
+        failures,
+        supported_channels,
+        completed_channels,
+    })
+}
+
+fn recommendation_channel_supports(
+    channel: &online_music::OnlineChannel,
+    kind: source_runtime::MusicRecommendationKind,
+) -> bool {
+    match kind {
+        source_runtime::MusicRecommendationKind::Daily => matches!(
+            channel.plugin_id.as_str(),
+            netease::NETEASE_PLUGIN_ID | kugou::KUGOU_PLUGIN_ID
+        ),
+        source_runtime::MusicRecommendationKind::Roaming
+        | source_runtime::MusicRecommendationKind::Radar => {
+            channel.plugin_id == netease::NETEASE_PLUGIN_ID
+        }
+    }
+}
+
+fn recommendation_request_limit(kind: source_runtime::MusicRecommendationKind) -> u64 {
+    match kind {
+        source_runtime::MusicRecommendationKind::Roaming => 3,
+        source_runtime::MusicRecommendationKind::Daily
+        | source_runtime::MusicRecommendationKind::Radar => 50,
+    }
+}
+
+#[tauri::command]
 async fn online_music_suggestions(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -2143,6 +2307,16 @@ fn dispatch_candidate_request_typed(
     )
 }
 
+fn should_cache_online_request(request: &source_runtime::SourceRequest) -> bool {
+    !matches!(
+        request,
+        source_runtime::SourceRequest::MusicRecommendations {
+            kind: source_runtime::MusicRecommendationKind::Roaming,
+            ..
+        }
+    )
+}
+
 fn execute_cached_plugin_request(
     cache: &online_music::OnlineMusicCache,
     channel: &online_music::OnlineChannel,
@@ -2152,6 +2326,9 @@ fn execute_cached_plugin_request(
 ) -> Result<source_runtime::SourceRequestOutcome, PluginSystemError> {
     if cancellation.is_cancelled() {
         return Err(PluginSystemError::Package("request cancelled".to_owned()));
+    }
+    if !should_cache_online_request(&request) {
+        return dispatch.execute(request, cancellation);
     }
     let cache_key = serde_json::to_string(&(
         channel.plugin_id.as_str(),
@@ -3845,6 +4022,86 @@ mod tests {
             std::env::temp_dir().join(format!("fika-music-{name}-{}-{id}", std::process::id()));
         fs::create_dir_all(&dir).expect("test temp directory should be created");
         dir
+    }
+
+    #[test]
+    fn recommendation_channel_support_should_match_each_home_entry_provider() {
+        let netease = candidate_channel(
+            "netease",
+            netease::NETEASE_PLUGIN_ID,
+            source_runtime::LX_SOURCE_WY,
+            "NetEase",
+            source_runtime::SourceAction::MusicRecommendations,
+        );
+        let kugou = candidate_channel(
+            "kugou",
+            kugou::KUGOU_PLUGIN_ID,
+            source_runtime::LX_SOURCE_KG,
+            "KuGou",
+            source_runtime::SourceAction::MusicRecommendations,
+        );
+        let actual = [
+            recommendation_channel_supports(
+                &netease,
+                source_runtime::MusicRecommendationKind::Daily,
+            ),
+            recommendation_channel_supports(&kugou, source_runtime::MusicRecommendationKind::Daily),
+            recommendation_channel_supports(
+                &netease,
+                source_runtime::MusicRecommendationKind::Roaming,
+            ),
+            recommendation_channel_supports(
+                &kugou,
+                source_runtime::MusicRecommendationKind::Roaming,
+            ),
+            recommendation_channel_supports(
+                &netease,
+                source_runtime::MusicRecommendationKind::Radar,
+            ),
+            recommendation_channel_supports(&kugou, source_runtime::MusicRecommendationKind::Radar),
+        ];
+
+        assert_eq!(actual, [true, true, true, false, true, false]);
+    }
+
+    #[test]
+    fn private_roaming_recommendations_should_not_use_response_cache() {
+        let request = source_runtime::SourceRequest::MusicRecommendations {
+            source: source_runtime::LX_SOURCE_WY.to_owned(),
+            account_ref: "account".to_owned(),
+            kind: source_runtime::MusicRecommendationKind::Roaming,
+            limit: 3,
+        };
+
+        assert!(!should_cache_online_request(&request));
+    }
+
+    #[test]
+    fn stable_recommendations_should_use_response_cache() {
+        let requests = [
+            source_runtime::MusicRecommendationKind::Daily,
+            source_runtime::MusicRecommendationKind::Radar,
+        ]
+        .map(|kind| source_runtime::SourceRequest::MusicRecommendations {
+            source: source_runtime::LX_SOURCE_WY.to_owned(),
+            account_ref: "account".to_owned(),
+            kind,
+            limit: 50,
+        });
+
+        assert!(requests.iter().all(should_cache_online_request));
+    }
+
+    #[test]
+    fn recommendation_request_limit_should_match_feed_semantics() {
+        let limits = [
+            source_runtime::MusicRecommendationKind::Daily,
+            source_runtime::MusicRecommendationKind::Roaming,
+            source_runtime::MusicRecommendationKind::Radar,
+        ]
+        .map(recommendation_request_limit);
+
+        assert_eq!(limits, [50, 3, 50]);
     }
 
     #[test]

@@ -1709,7 +1709,10 @@ impl SourceProvider for KugouSourceProvider {
                 Ok(SourceResponse::MusicUrl(resolved.url))
             }
             SourceRequest::MusicRecommendations {
-                account_ref, limit, ..
+                account_ref,
+                kind: source_runtime::MusicRecommendationKind::Daily,
+                limit,
+                ..
             } => {
                 let operation = "fetch KuGou recommendations";
                 Self::prepare_bridge(context, operation)?;
@@ -2944,6 +2947,7 @@ mod tests {
                 SourceRequest::MusicRecommendations {
                     source: source_runtime::LX_SOURCE_KG.to_owned(),
                     account_ref: "account".to_owned(),
+                    kind: source_runtime::MusicRecommendationKind::Daily,
                     limit: 10,
                 },
             )

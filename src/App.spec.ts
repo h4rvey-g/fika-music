@@ -4,6 +4,7 @@ import { defineComponent } from "vue";
 import App from "./App.vue";
 import type { PluginRecord } from "./lib/plugin-api";
 import type { AudioSourceRecord } from "./lib/audio-source-api";
+import type { OnlineTrack } from "./lib/online-music-api";
 import { THEME_OPTIONS, UI_PREFERENCES_STORAGE_KEY } from "./lib/ui-preferences";
 import {
   createAudioSourceRecord,
@@ -277,6 +278,29 @@ describe("application shell", () => {
     wrapper.unmount();
   });
 
+  it("returns to the Online Music home when its active navigation item is clicked again", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const navigation = wrapper.get('nav[aria-label="Primary navigation"]');
+    const onlineButton = navigation
+      .findAll("button")
+      .find((button) => button.text() === "Online Music");
+    await onlineButton?.trigger("click");
+    await wrapper.get('input[aria-label="Search Online Music"]').setValue("M83");
+    await wrapper.get('form[role="search"]').trigger("submit");
+    await flushPromises();
+
+    expect(wrapper.find("[data-online-results]").exists()).toBe(true);
+    await onlineButton?.trigger("click");
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.find("[data-online-home]").exists()).toBe(true);
+    expect(wrapper.get<HTMLInputElement>('input[aria-label="Search Online Music"]').element.value)
+      .toBe("");
+    wrapper.unmount();
+  });
+
   it("uses the shared audio source setting for NetEase playback", async () => {
     listedPlugins = [
       createPluginRecord({
@@ -420,6 +444,89 @@ describe("application shell", () => {
       query: expect.objectContaining({ source: "kg", trackId: "track-hash" }),
     });
     expect(wrapper.get("audio").attributes("type")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  it("preloads and plays the next appendable online batch after reaching the queue end", async () => {
+    listedAudioSources = [
+      createAudioSourceRecord({
+        id: "source-one",
+        name: "Source One",
+        sources: [{
+          id: "wy",
+          name: "NetEase",
+          type: "music",
+          actions: ["musicUrl"],
+          qualities: ["320k"],
+        }],
+      }),
+    ];
+    const tracks = [1, 2, 3, 4].map((index) => createOnlineTrack({
+      key: `roaming-${index}`,
+      title: `Roaming ${index}`,
+      candidates: [createOnlineTrackCandidate({
+        id: String(index),
+        title: `Roaming ${index}`,
+        platformIds: { id: index },
+      })],
+    }));
+    const queue = tracks.slice(0, 3);
+    let resolveNextBatch!: () => void;
+    const loadNext = vi.fn(() => new Promise<OnlineTrack[]>((resolve) => {
+      resolveNextBatch = () => {
+        queue.push(tracks[3]);
+        resolve([tracks[3]]);
+      };
+    }));
+    const defaultInvoke = tauriMocks.invoke.getMockImplementation();
+    tauriMocks.invoke.mockImplementation((command: string, payload?: unknown) => {
+      if (command === "list_online_music_channels") {
+        return Promise.resolve([{
+          id: "netease",
+          pluginId: "fika.netease",
+          pluginName: "NetEase",
+          providerId: "netease",
+          sourceId: "wy",
+          sourceName: "NetEase",
+          excluded: false,
+          actions: ["musicUrl"],
+        }]);
+      }
+      if (command === "dispatch_audio_source_request") {
+        return Promise.resolve({
+          response: { action: "musicUrl", data: "https://cdn.example.test/roaming.mp3" },
+          diagnostics: [],
+        });
+      }
+      if (command === "resolve_remote_track_lyrics") return Promise.resolve(null);
+      return defaultInvoke?.(command, payload);
+    });
+    vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(function (
+      this: HTMLMediaElement,
+    ) {
+      queueMicrotask(() => this.dispatchEvent(new Event("canplay")));
+    });
+    const wrapper = mount(App);
+    await flushPromises();
+
+    wrapper
+      .getComponent({ name: "OnlineMusic" })
+      .vm.$emit("playRequest", tracks[2], queue, 2, true, loadNext);
+    await flushPromises();
+
+    expect(loadNext).toHaveBeenCalledTimes(1);
+    expect(wrapper.get('footer[aria-label="Playback bar"]').text()).toContain("Roaming 3");
+
+    wrapper.get("audio").element.dispatchEvent(new Event("ended"));
+    await flushPromises();
+
+    expect(loadNext).toHaveBeenCalledTimes(1);
+    expect(wrapper.get('footer[aria-label="Playback bar"]').text()).toContain("Roaming 3");
+
+    resolveNextBatch();
+    await flushPromises();
+
+    expect(wrapper.get('footer[aria-label="Playback bar"]').text()).toContain("Roaming 4");
     wrapper.unmount();
   });
 

@@ -52,6 +52,7 @@ describe("KuGou API", () => {
         action: "musicRecommendations",
         source: "kg",
         accountRef,
+        kind: "daily",
         limit: 50,
       },
       requestId: "request-1",

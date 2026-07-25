@@ -78,6 +78,8 @@ export type MetadataLookupItemResult = { trackId: number, title: string, updated
 
 export type MetadataLookupTaskStatus = { state: LibraryTaskState, total: number, processed: number, updated: number, unchanged: number, failed: number, currentTrack: string | null, results: Array<MetadataLookupItemResult>, };
 
+export type MusicRecommendationKind = "daily" | "roaming" | "radar";
+
 export type NeteaseAccount = { accountRef: string, userId: string, displayName: string, avatarUrl: string | null, status: NeteaseAccountStatus, connectedAt: number, lastVerifiedAt: number, };
 
 export type NeteaseAccountStatus = "active" | "expired";
@@ -117,6 +119,8 @@ export type OnlineMusicSettings = { excludedChannels: Array<string>, channelPrio
 export type OnlinePlaylist = { key: string, channelId: string, pluginId: string, sourceId: string, channelName: string, id: string, name: string, description: string | null, coverUrl: string | null, trackCount: number | null, ownerName: string | null, platformIds: Record<string, string | number>, rawInfo: Record<string, unknown>, rank: number, };
 
 export type OnlinePlaylistDetailError = { code: string, message: string, pluginId: string, channelName: string, };
+
+export type OnlineRecommendationsResult = { kind: MusicRecommendationKind, items: Array<OnlineTrack>, failures: Array<OnlineChannelFailure>, supportedChannels: number, completedChannels: number, };
 
 export type OnlineSearchData = { "section": "songs", "items": Array<OnlineTrack> } | { "section": "artists", "items": Array<OnlineArtist> } | { "section": "albums", "items": Array<OnlineAlbum> } | { "section": "playlists", "items": Array<OnlinePlaylist> };
 
@@ -196,7 +200,7 @@ export type SourceQuality = "128k" | "320k" | "flac" | "flac24bit";
 
 export type SourceRecommendationsResponse = { list: Array<SourceSearchResult>, };
 
-export type SourceRequest = { "action": "musicSearch", source: string, keyword: string, page: number, pageSize: number, } | { "action": "artistSearch", source: string, keyword: string, page: number, pageSize: number, } | { "action": "albumSearch", source: string, keyword: string, page: number, pageSize: number, } | { "action": "playlistSearch", source: string, keyword: string, page: number, pageSize: number, } | { "action": "searchSuggestions", source: string, keyword: string, limit: number, } | { "action": "artistTopTracks", source: string, artist: SourceEntityRef, limit: number, } | { "action": "albumRead", source: string, album: SourceEntityRef, page: number, pageSize: number, } | { "action": "playlistReadPublic", source: string, playlist: SourceEntityRef, page: number, pageSize: number, } | { "action": "musicUrl", source: string, musicInfo: Record<string, unknown>, quality: SourceQuality, } | { "action": "lyric", source: string, musicInfo: Record<string, unknown>, } | { "action": "pic", source: string, musicInfo: Record<string, unknown>, } | { "action": "musicRecommendations", source: string, accountRef: string, limit: number, } | { "action": "playlistList", source: string, accountRef: string, } | { "action": "playlistRead", source: string, accountRef: string, playlistId: string, } | { "action": "playlistAddTrack", source: string, accountRef: string, playlistId: string, track: SourceTrackRef, } | { "action": "playlistRemoveTrack", source: string, accountRef: string, playlistId: string, track: SourceTrackRef, };
+export type SourceRequest = { "action": "musicSearch", source: string, keyword: string, page: number, pageSize: number, } | { "action": "artistSearch", source: string, keyword: string, page: number, pageSize: number, } | { "action": "albumSearch", source: string, keyword: string, page: number, pageSize: number, } | { "action": "playlistSearch", source: string, keyword: string, page: number, pageSize: number, } | { "action": "searchSuggestions", source: string, keyword: string, limit: number, } | { "action": "artistTopTracks", source: string, artist: SourceEntityRef, limit: number, } | { "action": "albumRead", source: string, album: SourceEntityRef, page: number, pageSize: number, } | { "action": "playlistReadPublic", source: string, playlist: SourceEntityRef, page: number, pageSize: number, } | { "action": "musicUrl", source: string, musicInfo: Record<string, unknown>, quality: SourceQuality, } | { "action": "lyric", source: string, musicInfo: Record<string, unknown>, } | { "action": "pic", source: string, musicInfo: Record<string, unknown>, } | { "action": "musicRecommendations", source: string, accountRef: string, kind: MusicRecommendationKind, limit: number, } | { "action": "playlistList", source: string, accountRef: string, } | { "action": "playlistRead", source: string, accountRef: string, playlistId: string, } | { "action": "playlistAddTrack", source: string, accountRef: string, playlistId: string, track: SourceTrackRef, } | { "action": "playlistRemoveTrack", source: string, accountRef: string, playlistId: string, track: SourceTrackRef, };
 
 export type SourceRequestOutcome = { response: SourceResponse, diagnostics: Array<SourceDiagnostic>, };
 
@@ -243,6 +247,7 @@ export const TAURI_COMMANDS = {
   getOnlineMusicSettings: "get_online_music_settings",
   updateOnlineMusicSettings: "update_online_music_settings",
   listOnlineMusicChannels: "list_online_music_channels",
+  onlineMusicRecommendations: "online_music_recommendations",
   onlineMusicSuggestions: "online_music_suggestions",
   startOnlineMusicSearch: "start_online_music_search",
   onlineMusicSearchPage: "online_music_search_page",

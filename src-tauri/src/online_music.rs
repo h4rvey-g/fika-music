@@ -1,6 +1,6 @@
 use crate::source_runtime::{
-    JsonScalar, SourceAlbumSearchResult, SourceArtistSearchResult, SourcePlaylistSearchResult,
-    SourceQuality, SourceSearchResult,
+    JsonScalar, MusicRecommendationKind, SourceAlbumSearchResult, SourceArtistSearchResult,
+    SourcePlaylistSearchResult, SourceQuality, SourceSearchResult,
 };
 use moka::sync::Cache;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -484,6 +484,17 @@ pub struct OnlineTrackPage {
     pub items: Vec<OnlineTrack>,
     pub has_more: bool,
     pub total: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct OnlineRecommendationsResult {
+    pub kind: MusicRecommendationKind,
+    pub items: Vec<OnlineTrack>,
+    pub failures: Vec<OnlineChannelFailure>,
+    pub supported_channels: u32,
+    pub completed_channels: u32,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]

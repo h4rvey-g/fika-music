@@ -30,7 +30,7 @@ pub const LX_SOURCE_WY: &str = "wy";
 pub const LX_SOURCE_MG: &str = "mg";
 pub const LX_SOURCE_LOCAL: &str = "local";
 
-pub const SOURCE_RUNTIME_API_VERSION: SourceRuntimeApiVersion = SourceRuntimeApiVersion::new(1, 2);
+pub const SOURCE_RUNTIME_API_VERSION: SourceRuntimeApiVersion = SourceRuntimeApiVersion::new(1, 3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
@@ -132,6 +132,16 @@ pub enum SourceAction {
     PlaylistRead,
     PlaylistAddTrack,
     PlaylistRemoveTrack,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub enum MusicRecommendationKind {
+    #[default]
+    Daily,
+    Roaming,
+    Radar,
 }
 
 #[derive(
@@ -284,6 +294,8 @@ pub enum SourceRequest {
         source: String,
         #[serde(rename = "accountRef")]
         account_ref: String,
+        #[serde(default)]
+        kind: MusicRecommendationKind,
         limit: u64,
     },
     PlaylistList {
@@ -3517,6 +3529,38 @@ mod tests {
         assert_eq!(serialized["action"], "musicUrl");
         assert_eq!(serialized["quality"], "128k");
         assert_eq!(serialized["musicInfo"]["id"], "track-1");
+    }
+
+    #[test]
+    fn legacy_recommendation_request_should_default_to_daily() {
+        let request = serde_json::from_value::<SourceRequest>(json!({
+            "action": "musicRecommendations",
+            "source": "wy",
+            "accountRef": "account",
+            "limit": 50
+        }))
+        .expect("legacy request should deserialize");
+
+        assert!(matches!(
+            request,
+            SourceRequest::MusicRecommendations {
+                kind: MusicRecommendationKind::Daily,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn recommendation_request_should_serialize_the_selected_kind() {
+        let serialized = serde_json::to_value(SourceRequest::MusicRecommendations {
+            source: LX_SOURCE_WY.to_owned(),
+            account_ref: "account".to_owned(),
+            kind: MusicRecommendationKind::Radar,
+            limit: 50,
+        })
+        .expect("recommendation request should serialize");
+
+        assert_eq!(serialized["kind"], "radar");
     }
 
     #[test]

@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { TAURI_COMMANDS } from "../generated/bindings";
 import type {
   AudioSourceRecord,
+  MusicRecommendationKind,
   OnlineAlbum,
   OnlineArtist,
   OnlineChannel,
@@ -10,6 +11,7 @@ import type {
   OnlineMusicSettings,
   OnlinePlaylist,
   OnlinePlaylistDetailError,
+  OnlineRecommendationsResult,
   OnlineSearchSection,
   OnlineSearchSectionEvent,
   OnlineSearchSectionResult,
@@ -24,6 +26,7 @@ import { ExpiringCache } from "./expiring-cache";
 import { cancelSourceRequest } from "./plugin-api";
 
 export type {
+  MusicRecommendationKind,
   OnlineAlbum,
   OnlineArtist,
   OnlineChannel,
@@ -31,6 +34,7 @@ export type {
   OnlineMusicSettings,
   OnlinePlaylist,
   OnlinePlaylistDetailError,
+  OnlineRecommendationsResult,
   OnlineSearchSection,
   OnlineSearchSectionEvent,
   OnlineSearchSectionResult,
@@ -81,6 +85,16 @@ export async function updateOnlineMusicSettings(settings: OnlineMusicSettings) {
 
 export function listOnlineMusicChannels(includeExcluded = false) {
   return invoke<OnlineChannel[]>(TAURI_COMMANDS.listOnlineMusicChannels, { includeExcluded });
+}
+
+export function getOnlineMusicRecommendations(
+  kind: MusicRecommendationKind,
+  requestId?: string,
+) {
+  return invoke<OnlineRecommendationsResult>(TAURI_COMMANDS.onlineMusicRecommendations, {
+    kind,
+    requestId,
+  });
 }
 
 export function clearOnlineSearchHistory() {

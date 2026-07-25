@@ -76,6 +76,7 @@ export async function getNeteaseRecommendations(
     action: "musicRecommendations",
     source: NETEASE_SOURCE_ID,
     accountRef,
+    kind: "daily",
     limit: 50,
   }, requestId);
   return operationResult(outcome, "musicRecommendations", (response) => response.data.list);

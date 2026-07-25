@@ -13,9 +13,9 @@ use fika_music_lib::online_download::{
 };
 use fika_music_lib::online_music::{
     OnlineAlbum, OnlineArtist, OnlineChannel, OnlineMusicSettings, OnlinePlaylist,
-    OnlinePlaylistDetailError, OnlineSearchData, OnlineSearchHistoryEntry, OnlineSearchSection,
-    OnlineSearchSectionEvent, OnlineSearchSectionResult, OnlineSuggestionsResult, OnlineTrack,
-    OnlineTrackPage,
+    OnlinePlaylistDetailError, OnlineRecommendationsResult, OnlineSearchData,
+    OnlineSearchHistoryEntry, OnlineSearchSection, OnlineSearchSectionEvent,
+    OnlineSearchSectionResult, OnlineSuggestionsResult, OnlineTrack, OnlineTrackPage,
 };
 use fika_music_lib::plugin_system::PluginRecord;
 use fika_music_lib::source_runtime::{SourceRequest, SourceRequestOutcome};
@@ -126,6 +126,7 @@ fn generate(output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     export_all::<OnlinePlaylist>(&config)?;
     export_all::<OnlinePlaylistDetailError>(&config)?;
     export_all::<OnlineTrackPage>(&config)?;
+    export_all::<OnlineRecommendationsResult>(&config)?;
     export_all::<OnlineDownloadState>(&config)?;
     export_all::<OnlineDownloadItemState>(&config)?;
     export_all::<OnlineDownloadItem>(&config)?;

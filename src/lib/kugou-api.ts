@@ -63,6 +63,7 @@ export async function getKugouRecommendations(
       action: "musicRecommendations",
       source: KUGOU_SOURCE_ID,
       accountRef,
+      kind: "daily",
       limit: 50,
     },
     requestId,

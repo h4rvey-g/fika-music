@@ -21,7 +21,7 @@
   "compatibilityTarget": "fika-music",
   "supportedApiVersion": {
     "major": 1,
-    "minor": 2
+    "minor": 3
   },
   "requiredHostBridges": ["kugou-music-api"]
 }

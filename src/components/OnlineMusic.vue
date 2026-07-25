@@ -1,15 +1,21 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   AlertCircle,
   ArrowLeft,
   Ban,
+  CalendarDays,
+  ChevronRight,
   Disc3,
   Download,
+  House,
+  ListPlus,
   ListMusic,
   Music2,
   Pause,
   Play,
+  Radar,
+  RadioTower,
   RefreshCw,
   Search,
   UserRound,
@@ -24,6 +30,7 @@ import {
   createOnlineDownloadTask,
   getOnlineAlbumTracks,
   getOnlineArtistTracks,
+  getOnlineMusicRecommendations,
   getOnlineMusicSearchPage,
   getOnlineMusicSettings,
   getOnlineMusicSuggestions,
@@ -45,12 +52,16 @@ import {
   type OnlineArtist,
   type OnlineMusicSettings,
   type OnlineDownloadTask,
+  type MusicRecommendationKind,
+  type OnlineRecommendationsResult,
   type OnlinePlaylist,
   type OnlineSearchSection,
   type OnlineSearchSectionEvent,
   type OnlineSearchSectionResult,
   type OnlineTrack,
 } from "../lib/online-music-api";
+import { NETEASE_PLUGIN_ID } from "../lib/netease-api";
+import { KUGOU_PLUGIN_ID } from "../lib/kugou-api";
 
 type SectionState = {
   loading: boolean;
@@ -65,7 +76,23 @@ type DetailState =
   | { kind: "album"; entity: OnlineAlbum }
   | { kind: "playlist"; entity: OnlinePlaylist };
 
+type RecommendationEntry = {
+  id: MusicRecommendationKind;
+  label: string;
+  icon: typeof Music2;
+  providers: Array<{ label: string; pluginId: string }>;
+};
+
+type RecommendationPreviewState = {
+  result: OnlineRecommendationsResult | null;
+  loading: boolean;
+  error: string | null;
+  requestId: string | null;
+  generation: number;
+};
+
 const props = defineProps<{
+  isActive: boolean;
   audioSources: AudioSourceRecord[];
   selectedAudioSourceId: string;
   activeOnlineTrackKey: string | null;
@@ -80,6 +107,7 @@ const emit = defineEmits<{
     queue: OnlineTrack[],
     index: number,
     appendable: boolean,
+    loadMore?: () => Promise<OnlineTrack[]>,
   ];
   openAudioSources: [];
   downloadCompleted: [destination: string];
@@ -92,6 +120,30 @@ const sections: Array<{ id: OnlineSearchSection; label: string; icon: typeof Mus
   { id: "artists", label: "Artists", icon: UserRound },
   { id: "albums", label: "Albums", icon: Disc3 },
   { id: "playlists", label: "Playlists", icon: ListMusic },
+];
+
+const recommendationEntries: RecommendationEntry[] = [
+  {
+    id: "daily",
+    label: "每日推荐",
+    icon: CalendarDays,
+    providers: [
+      { label: "NetEase", pluginId: NETEASE_PLUGIN_ID },
+      { label: "KuGou", pluginId: KUGOU_PLUGIN_ID },
+    ],
+  },
+  {
+    id: "roaming",
+    label: "私人漫游",
+    icon: RadioTower,
+    providers: [{ label: "NetEase", pluginId: NETEASE_PLUGIN_ID }],
+  },
+  {
+    id: "radar",
+    label: "私人雷达",
+    icon: Radar,
+    providers: [{ label: "NetEase", pluginId: NETEASE_PLUGIN_ID }],
+  },
 ];
 
 const query = ref("");
@@ -119,6 +171,15 @@ const settings = ref<OnlineMusicSettings | null>(null);
 const sectionStates = ref<Record<OnlineSearchSection, SectionState>>(newSectionStates());
 const resultScrollPosition = ref(0);
 const summaryScrollPosition = ref(0);
+const activeRecommendation = ref<MusicRecommendationKind | null>(null);
+const recommendationTracks = ref<OnlineTrack[]>([]);
+const recommendationLoading = ref(false);
+const recommendationError = ref<string | null>(null);
+const recommendationFailures = ref<OnlineRecommendationsResult["failures"]>([]);
+const privateRoamingBatchLoading = ref(false);
+const recommendationPreviews = ref<Record<MusicRecommendationKind, RecommendationPreviewState>>(
+  newRecommendationPreviewStates(),
+);
 
 let unlistenSearch: (() => void) | null = null;
 let unlistenDownloads: (() => void) | null = null;
@@ -129,7 +190,15 @@ let detailRequestGeneration = 0;
 let suggestionTimer: number | null = null;
 let suggestionRequestId: string | null = null;
 let detailRequestId: string | null = null;
+let recommendationGeneration = 0;
+let privateRoamingBatchGeneration = 0;
+let privateRoamingBatchRequestId: string | null = null;
+let pendingPrivateRoamingBatch: Promise<OnlineRecommendationsResult | null> | null = null;
 let pendingSearchEvents: OnlineSearchSectionEvent[] = [];
+const pendingRecommendationLoads = new Map<
+  MusicRecommendationKind,
+  Promise<OnlineRecommendationsResult | null>
+>();
 
 const hasSubmittedSearch = computed(() => Boolean(submittedQuery.value));
 const visibleSections = computed(() =>
@@ -143,6 +212,9 @@ const visibleDetailTitle = computed(() => {
   if (detail.value.kind === "album") return detail.value.entity.title;
   return detail.value.entity.name;
 });
+const activeRecommendationEntry = computed(() =>
+  recommendationEntries.find((entry) => entry.id === activeRecommendation.value) ?? null,
+);
 
 onMounted(async () => {
   [unlistenSearch, unlistenDownloads, unlistenDownloadCompletions] = await Promise.all([
@@ -165,7 +237,15 @@ onMounted(async () => {
   } catch (error) {
     globalError.value = normalizeError(error);
   }
+  if (props.isActive) void preloadRecommendationEntries();
 });
+
+watch(
+  () => props.isActive,
+  (isActive) => {
+    if (isActive) void preloadRecommendationEntries();
+  },
+);
 
 onBeforeUnmount(() => {
   unlistenSearch?.();
@@ -174,6 +254,8 @@ onBeforeUnmount(() => {
   if (suggestionTimer !== null) window.clearTimeout(suggestionTimer);
   if (suggestionRequestId) void cancelSourceRequest(suggestionRequestId);
   if (detailRequestId) void cancelSourceRequest(detailRequestId);
+  cancelRecommendationLoads();
+  cancelPrivateRoamingBatchLoad();
   if (searchId.value) void cancelSourceRequest(searchId.value);
 });
 
@@ -183,6 +265,24 @@ function newSectionStates(): Record<OnlineSearchSection, SectionState> {
     artists: { loading: false, result: null, error: null, page: 1, loadingMore: false },
     albums: { loading: false, result: null, error: null, page: 1, loadingMore: false },
     playlists: { loading: false, result: null, error: null, page: 1, loadingMore: false },
+  };
+}
+
+function newRecommendationPreviewStates(): Record<
+  MusicRecommendationKind,
+  RecommendationPreviewState
+> {
+  const createState = (): RecommendationPreviewState => ({
+    result: null,
+    loading: false,
+    error: null,
+    requestId: null,
+    generation: 0,
+  });
+  return {
+    daily: createState(),
+    roaming: createState(),
+    radar: createState(),
   };
 }
 
@@ -214,11 +314,215 @@ function onQueryInput() {
   }, 300);
 }
 
+function recommendationCoverUrl(kind: MusicRecommendationKind) {
+  return recommendationPreviews.value[kind].result?.items[0]?.coverUrl ?? null;
+}
+
+function recommendationResultError(result: OnlineRecommendationsResult) {
+  if (result.supportedChannels === 0) {
+    return "No enabled channel supports this recommendation.";
+  }
+  if (!result.items.length) {
+    return result.failures[0]?.message ?? "No recommendations available.";
+  }
+  return null;
+}
+
+function applyRecommendationResult(result: OnlineRecommendationsResult) {
+  recommendationTracks.value = result.items;
+  recommendationFailures.value = result.failures;
+  recommendationError.value = recommendationResultError(result);
+}
+
+async function loadRecommendation(
+  kind: MusicRecommendationKind,
+  force = false,
+): Promise<OnlineRecommendationsResult | null> {
+  const state = recommendationPreviews.value[kind];
+  const pending = pendingRecommendationLoads.get(kind);
+  if (!force && pending) return pending;
+  if (!force && state.result) return state.result;
+
+  if (state.requestId) void cancelSourceRequest(state.requestId);
+  const generation = ++state.generation;
+  const requestId = `online-recommendation-${kind}-${Date.now()}-${generation}`;
+  state.requestId = requestId;
+  state.loading = true;
+  state.error = null;
+
+  const load = (async () => {
+    try {
+      const result = await getOnlineMusicRecommendations(kind, requestId);
+      if (generation !== state.generation) return null;
+      state.result = result;
+      return result;
+    } catch (error) {
+      if (generation === state.generation) state.error = normalizeError(error);
+      return null;
+    } finally {
+      if (generation === state.generation) {
+        state.loading = false;
+        state.requestId = null;
+      }
+    }
+  })();
+  pendingRecommendationLoads.set(kind, load);
+  void load.finally(() => {
+    if (pendingRecommendationLoads.get(kind) === load) {
+      pendingRecommendationLoads.delete(kind);
+    }
+  });
+  return load;
+}
+
+async function preloadRecommendationEntries() {
+  if (
+    !props.isActive
+    || activeTab.value !== "search"
+    || hasSubmittedSearch.value
+    || detail.value
+    || activeRecommendation.value
+  ) {
+    return;
+  }
+  await Promise.all(recommendationEntries.map((entry) => loadRecommendation(entry.id)));
+}
+
+function cancelRecommendationLoad(kind: MusicRecommendationKind) {
+  const state = recommendationPreviews.value[kind];
+  state.generation += 1;
+  if (state.requestId) void cancelSourceRequest(state.requestId);
+  state.requestId = null;
+  state.loading = false;
+  pendingRecommendationLoads.delete(kind);
+}
+
+function cancelRecommendationLoads() {
+  for (const entry of recommendationEntries) cancelRecommendationLoad(entry.id);
+  pendingRecommendationLoads.clear();
+}
+
+function appendUniqueTracks(target: OnlineTrack[], candidates: OnlineTrack[]) {
+  const existingKeys = new Set(target.map((track) => track.key));
+  const appended = candidates.filter((track) => {
+    if (existingKeys.has(track.key)) return false;
+    existingKeys.add(track.key);
+    return true;
+  });
+  target.push(...appended);
+  return appended;
+}
+
+function cancelPrivateRoamingBatchLoad() {
+  privateRoamingBatchGeneration += 1;
+  if (privateRoamingBatchRequestId) {
+    void cancelSourceRequest(privateRoamingBatchRequestId);
+  }
+  privateRoamingBatchRequestId = null;
+  privateRoamingBatchLoading.value = false;
+  pendingPrivateRoamingBatch = null;
+}
+
+function fetchNextPrivateRoamingBatch() {
+  if (pendingPrivateRoamingBatch) return pendingPrivateRoamingBatch;
+
+  const generation = ++privateRoamingBatchGeneration;
+  const requestId = `online-recommendation-roaming-next-${Date.now()}-${generation}`;
+  privateRoamingBatchRequestId = requestId;
+  privateRoamingBatchLoading.value = true;
+  if (activeRecommendation.value === "roaming") recommendationError.value = null;
+
+  const load = (async () => {
+    try {
+      const result = await getOnlineMusicRecommendations("roaming", requestId);
+      if (generation !== privateRoamingBatchGeneration) return null;
+      return result;
+    } catch (error) {
+      if (generation !== privateRoamingBatchGeneration) return null;
+      const message = normalizeError(error);
+      recommendationPreviews.value.roaming.error = message;
+      if (activeRecommendation.value === "roaming") recommendationError.value = message;
+      return null;
+    } finally {
+      if (generation === privateRoamingBatchGeneration) {
+        privateRoamingBatchRequestId = null;
+        privateRoamingBatchLoading.value = false;
+      }
+    }
+  })();
+  pendingPrivateRoamingBatch = load;
+  void load.finally(() => {
+    if (pendingPrivateRoamingBatch === load) pendingPrivateRoamingBatch = null;
+  });
+  return load;
+}
+
+async function loadNextPrivateRoamingBatch(targetQueue = recommendationTracks.value) {
+  const result = await fetchNextPrivateRoamingBatch();
+  if (!result) return [];
+
+  const appended = appendUniqueTracks(targetQueue, result.items);
+  const state = recommendationPreviews.value.roaming;
+  const previewItems = state.result?.items ?? [];
+  if (previewItems !== targetQueue) appendUniqueTracks(previewItems, result.items);
+  state.result = { ...result, items: previewItems };
+  state.error = recommendationResultError(state.result);
+  if (activeRecommendation.value === "roaming") {
+    if (recommendationTracks.value !== targetQueue && recommendationTracks.value !== previewItems) {
+      appendUniqueTracks(recommendationTracks.value, result.items);
+    }
+    recommendationFailures.value = result.failures;
+    recommendationError.value = state.error;
+  }
+  return appended;
+}
+
+async function openRecommendation(kind: MusicRecommendationKind, force = false) {
+  abandonRecommendationRequest();
+  activeRecommendation.value = kind;
+  recommendationTracks.value = [];
+  recommendationFailures.value = [];
+  recommendationError.value = null;
+  recommendationLoading.value = true;
+  activeTab.value = "search";
+  globalError.value = null;
+  const generation = recommendationGeneration;
+  const result = await loadRecommendation(kind, force);
+  if (generation !== recommendationGeneration || activeRecommendation.value !== kind) return;
+  if (result) applyRecommendationResult(result);
+  else recommendationError.value = recommendationPreviews.value[kind].error;
+  recommendationLoading.value = false;
+}
+
+function abandonRecommendationRequest() {
+  recommendationGeneration += 1;
+  if (activeRecommendation.value) cancelRecommendationLoad(activeRecommendation.value);
+  recommendationLoading.value = false;
+}
+
+function closeRecommendation() {
+  abandonRecommendationRequest();
+  activeRecommendation.value = null;
+  recommendationTracks.value = [];
+  recommendationFailures.value = [];
+  recommendationError.value = null;
+  void preloadRecommendationEntries();
+  void nextTick(() => {
+    const main = document.querySelector("main");
+    if (main) main.scrollTop = 0;
+  });
+}
+
 async function submitSearch(suggestion?: string) {
   const keyword = (suggestion ?? query.value).trim();
   if (!keyword) return;
   query.value = keyword;
   suggestionsOpen.value = false;
+  abandonRecommendationRequest();
+  activeRecommendation.value = null;
+  recommendationTracks.value = [];
+  recommendationFailures.value = [];
+  recommendationError.value = null;
   detail.value = null;
   expandedSection.value = null;
   activeTab.value = "search";
@@ -424,13 +728,10 @@ async function playTrack(track: OnlineTrack, queue: OnlineTrack[], appendable = 
   const queueIndex = queue.findIndex((item) => item.key === track.key);
   const currentQueue = appendable ? queue : [...queue];
   if (queueIndex >= 0) currentQueue[queueIndex] = currentTrack;
-  emit(
-    "playRequest",
-    currentTrack,
-    currentQueue,
-    queueIndex,
-    appendable,
-  );
+  const loadMore = activeRecommendation.value === "roaming" && appendable
+    ? () => loadNextPrivateRoamingBatch(currentQueue)
+    : undefined;
+  emit("playRequest", currentTrack, currentQueue, queueIndex, appendable, loadMore);
 }
 
 function requestTrackPlayback(track: OnlineTrack, queue: OnlineTrack[]) {
@@ -441,7 +742,8 @@ function requestTrackPlayback(track: OnlineTrack, queue: OnlineTrack[]) {
     emit("togglePlayback");
     return;
   }
-  void playTrack(track, queue);
+  const privateRoaming = activeRecommendation.value === "roaming";
+  void playTrack(track, queue, privateRoaming);
 }
 
 async function openSection(section: OnlineSearchSection) {
@@ -483,6 +785,23 @@ async function playAllDetail() {
       break;
     }
   }
+}
+
+async function playAllRecommendation() {
+  if (!recommendationTracks.value.length) return;
+  const queue = activeRecommendation.value === "roaming"
+    ? recommendationTracks.value
+    : [...recommendationTracks.value];
+  await playTrack(queue[0], queue, true);
+}
+
+async function downloadAllRecommendation() {
+  if (!recommendationTracks.value.length || !activeRecommendationEntry.value) return;
+  await createDownload(
+    "recommendation",
+    activeRecommendationEntry.value.label,
+    [...recommendationTracks.value],
+  );
 }
 
 async function downloadTrack(track: OnlineTrack) {
@@ -628,6 +947,53 @@ function dismissGlobalError() {
   loginRequiredPluginId.value = null;
   detailRetryAvailable.value = false;
 }
+
+function showHome() {
+  activeTab.value = "search";
+  query.value = "";
+  submittedQuery.value = "";
+  suggestions.value = [];
+  suggestionsOpen.value = false;
+  suggestionLoading.value = false;
+  suggestionGeneration += 1;
+  if (suggestionTimer !== null) window.clearTimeout(suggestionTimer);
+  suggestionTimer = null;
+  if (suggestionRequestId) void cancelSourceRequest(suggestionRequestId);
+  suggestionRequestId = null;
+
+  searchGeneration += 1;
+  if (searchId.value) void cancelSourceRequest(searchId.value);
+  searchId.value = null;
+  pendingSearchEvents = [];
+  expandedSection.value = null;
+  sectionStates.value = newSectionStates();
+
+  detailAppendGeneration.value += 1;
+  detailRequestGeneration += 1;
+  if (detailRequestId) void cancelSourceRequest(detailRequestId);
+  detailRequestId = null;
+  detail.value = null;
+  detailTracks.value = [];
+  detailLoading.value = false;
+  detailLoadingMore.value = false;
+  detailHasMore.value = false;
+
+  abandonRecommendationRequest();
+  activeRecommendation.value = null;
+  recommendationTracks.value = [];
+  recommendationFailures.value = [];
+  recommendationError.value = null;
+  globalError.value = null;
+  loginRequiredPluginId.value = null;
+  detailRetryAvailable.value = false;
+  void preloadRecommendationEntries();
+  void nextTick(() => {
+    const main = document.querySelector("main");
+    if (main) main.scrollTop = 0;
+  });
+}
+
+defineExpose({ showHome });
 
 </script>
 
@@ -858,11 +1224,204 @@ function dismissGlobalError() {
       </div>
     </div>
 
-    <div v-else data-online-results class="flex flex-col gap-5">
-      <div v-if="!hasSubmittedSearch" class="flex min-h-64 flex-col items-center justify-center gap-3 text-center text-base-content/55">
-        <Music2 :size="28" aria-hidden="true" />
-        <div class="text-sm font-medium text-base-content/75">Search enabled music channels</div>
+    <div v-else-if="activeRecommendationEntry" data-online-recommendation class="min-w-0">
+      <div class="mb-3 flex min-w-0 flex-wrap items-center gap-3 border-b border-base-300 pb-3">
+        <button
+          class="btn btn-square btn-ghost btn-sm"
+          type="button"
+          aria-label="Back to Online Music home"
+          title="Back"
+          @click="closeRecommendation"
+        >
+          <ArrowLeft :size="17" aria-hidden="true" />
+        </button>
+        <div class="flex size-12 shrink-0 items-center justify-center rounded bg-base-200">
+          <component :is="activeRecommendationEntry.icon" :size="22" aria-hidden="true" />
+        </div>
+        <div class="min-w-0 flex-1">
+          <h2 class="truncate text-base font-semibold">{{ activeRecommendationEntry.label }}</h2>
+          <div class="mt-1 flex flex-wrap gap-1">
+            <span
+              v-for="provider in activeRecommendationEntry.providers"
+              :key="provider.pluginId"
+              class="badge badge-sm"
+            >
+              {{ provider.label }}
+            </span>
+            <span v-if="recommendationFailures.length && recommendationTracks.length" class="badge badge-warning badge-sm">
+              Partial
+            </span>
+          </div>
+        </div>
+        <div class="ml-auto flex basis-full justify-end gap-1 sm:basis-auto">
+          <button
+            v-if="activeRecommendationEntry.id !== 'roaming'"
+            class="btn btn-square btn-ghost btn-sm"
+            type="button"
+            :disabled="recommendationLoading"
+            aria-label="Refresh recommendations"
+            title="Refresh recommendations"
+            @click="openRecommendation(activeRecommendationEntry.id, true)"
+          >
+            <RefreshCw
+              :class="{ 'animate-spin': recommendationLoading }"
+              :size="16"
+              aria-hidden="true"
+            />
+          </button>
+          <button
+            v-if="recommendationTracks.length"
+            class="btn btn-sm"
+            type="button"
+            @click="playAllRecommendation"
+          >
+            <Play :size="15" aria-hidden="true" />
+            Play all
+          </button>
+          <button
+            v-if="recommendationTracks.length"
+            class="btn btn-square btn-ghost btn-sm"
+            type="button"
+            aria-label="Download all recommendations"
+            title="Download all"
+            @click="downloadAllRecommendation"
+          >
+            <Download :size="15" aria-hidden="true" />
+          </button>
+        </div>
       </div>
+
+      <div v-if="recommendationError" role="alert" class="alert alert-error mb-3 py-2">
+        <AlertCircle :size="17" aria-hidden="true" />
+        <span class="min-w-0 flex-1 text-sm">{{ recommendationError }}</span>
+        <div v-if="!recommendationTracks.length" class="flex shrink-0 flex-wrap gap-1">
+          <button
+            v-for="provider in activeRecommendationEntry.providers"
+            :key="provider.pluginId"
+            class="btn btn-sm"
+            type="button"
+            @click="emit('openPlugin', provider.pluginId)"
+          >
+            Open {{ provider.label }}
+          </button>
+        </div>
+      </div>
+      <div
+        v-else-if="recommendationFailures.length && recommendationTracks.length"
+        role="status"
+        class="alert alert-warning mb-3 py-2 text-sm"
+      >
+        <AlertCircle :size="17" aria-hidden="true" />
+        {{ recommendationFailures.map((failure) => failure.channelName).join(', ') }} unavailable
+      </div>
+
+      <div v-if="recommendationLoading" class="space-y-2">
+        <div v-for="index in 8" :key="index" class="skeleton h-11 w-full"></div>
+      </div>
+      <OnlineTrackTable
+        v-else-if="recommendationTracks.length"
+        :tracks="recommendationTracks"
+        :active-key="activeOnlineTrackKey"
+        :playing="isPlaying"
+        :resolving-key="resolvingOnlineTrackKey"
+        @play="requestTrackPlayback($event, recommendationTracks)"
+        @download="downloadTrack"
+      />
+      <div
+        v-if="activeRecommendationEntry.id === 'roaming' && recommendationTracks.length"
+        class="flex justify-center border-t border-base-300 py-4"
+      >
+        <button
+          data-private-roaming-next
+          class="btn btn-sm"
+          type="button"
+          :disabled="privateRoamingBatchLoading"
+          aria-label="Load next private roaming batch"
+          @click="loadNextPrivateRoamingBatch()"
+        >
+          <span
+            v-if="privateRoamingBatchLoading"
+            class="loading loading-spinner loading-xs"
+            aria-hidden="true"
+          ></span>
+          <ListPlus v-else :size="16" aria-hidden="true" />
+          Load next songs
+        </button>
+      </div>
+      <div v-else-if="!recommendationError" class="flex min-h-48 items-center justify-center text-sm text-base-content/55">
+        No recommendations available
+      </div>
+    </div>
+
+    <div v-else-if="!hasSubmittedSearch" data-online-home class="min-h-64 py-2">
+      <div class="mb-3 flex items-center gap-2">
+        <House :size="17" aria-hidden="true" />
+        <h2 class="text-sm font-semibold">For you</h2>
+      </div>
+      <div class="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <button
+          v-for="entry in recommendationEntries"
+          :key="entry.id"
+          class="card card-border card-sm group relative isolate h-36 w-full overflow-hidden bg-base-100 text-left transition-colors hover:bg-base-200/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+          type="button"
+          :aria-label="entry.label"
+          @click="openRecommendation(entry.id)"
+        >
+          <img
+            v-if="recommendationCoverUrl(entry.id)"
+            :src="recommendationCoverUrl(entry.id) ?? undefined"
+            class="absolute inset-0 size-full object-cover transition-transform duration-300 group-hover:scale-105"
+            alt=""
+            decoding="async"
+          />
+          <div
+            v-if="recommendationCoverUrl(entry.id)"
+            class="absolute inset-0 bg-neutral/60 transition-colors group-hover:bg-neutral/50"
+            aria-hidden="true"
+          ></div>
+          <div class="card-body relative z-10 w-full gap-3">
+            <div class="flex items-start justify-between gap-3">
+              <div
+                class="flex size-10 shrink-0 items-center justify-center rounded"
+                :class="recommendationCoverUrl(entry.id)
+                  ? 'bg-base-100/20 text-neutral-content backdrop-blur-sm'
+                  : 'bg-base-200'"
+              >
+                <component :is="entry.icon" :size="20" aria-hidden="true" />
+              </div>
+              <ChevronRight
+                :size="18"
+                class="mt-2 shrink-0"
+                :class="recommendationCoverUrl(entry.id)
+                  ? 'text-neutral-content/75'
+                  : 'text-base-content/45'"
+                aria-hidden="true"
+              />
+            </div>
+            <div class="min-w-0">
+              <h3
+                class="card-title text-base"
+                :class="{ 'text-neutral-content': recommendationCoverUrl(entry.id) }"
+              >
+                {{ entry.label }}
+              </h3>
+              <div class="mt-2 flex flex-wrap gap-1">
+                <span
+                  v-for="provider in entry.providers"
+                  :key="provider.pluginId"
+                  class="badge badge-sm"
+                  :class="{ 'border-neutral-content/25 bg-neutral/50 text-neutral-content': recommendationCoverUrl(entry.id) }"
+                >
+                  {{ provider.label }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </button>
+      </div>
+    </div>
+
+    <div v-else data-online-results class="flex flex-col gap-5">
 
       <div v-if="expandedSection" class="flex items-center gap-2 border-b border-base-300 pb-3">
         <button class="btn btn-square btn-ghost btn-sm" type="button" aria-label="Back to search summary" title="Back" @click="closeSection">

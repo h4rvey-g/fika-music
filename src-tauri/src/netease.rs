@@ -1,12 +1,12 @@
 use crate::database::AppCredentialStore;
 use crate::source_runtime::{
-    self, JsonScalar, RemoteTrack, SourceAction, SourceAlbumSearchResponse,
-    SourceAlbumSearchResult, SourceArtistSearchResponse, SourceArtistSearchResult,
-    SourceCapability, SourceEntityRef, SourceInfo, SourcePlaylist, SourcePlaylistDetail,
-    SourcePlaylistMutation, SourcePlaylistMutationKind, SourcePlaylistSearchResponse,
-    SourcePlaylistSearchResult, SourceProvider, SourceQuality, SourceRecommendationsResponse,
-    SourceRequest, SourceResponse, SourceRuntimeContext, SourceRuntimeError, SourceSearchResponse,
-    SourceSuggestionsResponse, SourceTrackRef,
+    self, JsonScalar, MusicRecommendationKind, RemoteTrack, SourceAction,
+    SourceAlbumSearchResponse, SourceAlbumSearchResult, SourceArtistSearchResponse,
+    SourceArtistSearchResult, SourceCapability, SourceEntityRef, SourceInfo, SourcePlaylist,
+    SourcePlaylistDetail, SourcePlaylistMutation, SourcePlaylistMutationKind,
+    SourcePlaylistSearchResponse, SourcePlaylistSearchResult, SourceProvider, SourceQuality,
+    SourceRecommendationsResponse, SourceRequest, SourceResponse, SourceRuntimeContext,
+    SourceRuntimeError, SourceSearchResponse, SourceSuggestionsResponse, SourceTrackRef,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
@@ -43,6 +43,8 @@ const MAX_PLAYLIST_TRACK_CONCURRENCY: usize = 4;
 const MAX_AUDIT_RECORDS: u32 = 200;
 const MAX_AUDIT_MESSAGE_CHARS: usize = 512;
 const MAX_UPSTREAM_MESSAGE_CHARS: usize = 512;
+const PRIVATE_RADAR_PLAYLIST_ID: &str = "3136952023";
+const PRIVATE_RADAR_NAME: &str = "\u{79c1}\u{4eba}\u{96f7}\u{8fbe}";
 
 type SharedConnection = Arc<Mutex<Connection>>;
 
@@ -236,6 +238,7 @@ pub trait NeteaseProviderBridge: Send + Sync {
     fn recommendations(
         &self,
         account_ref: &str,
+        kind: MusicRecommendationKind,
         limit: u64,
     ) -> Result<SourceRecommendationsResponse, NeteaseBridgeError>;
 
@@ -958,27 +961,16 @@ impl NeteaseProviderBridge for NeteaseServiceBridge {
     fn recommendations(
         &self,
         account_ref: &str,
+        kind: MusicRecommendationKind,
         limit: u64,
     ) -> Result<SourceRecommendationsResponse, NeteaseBridgeError> {
         let client = self.client_for_account(account_ref)?;
-        let result = client
-            .recommend_songs()
-            .map_err(|error| bridge_failure("fetch recommendations", error))
-            .and_then(|response| checked_body(response, "fetch recommendations"));
-        let body = self.account_result(account_ref, result)?;
-        let songs = body
-            .pointer("/data/dailySongs")
-            .or_else(|| body.get("recommend"))
-            .and_then(JsonValue::as_array)
-            .ok_or_else(|| NeteaseBridgeError::InvalidResponse {
-                operation: "fetch recommendations",
-                message: "response did not include recommended tracks".to_owned(),
-            })?;
-        let list = songs
-            .iter()
-            .filter_map(remote_track_from_json)
-            .take(limit.min(100) as usize)
-            .collect();
+        let result = match kind {
+            MusicRecommendationKind::Daily => daily_recommendations(&client, limit),
+            MusicRecommendationKind::Roaming => roaming_recommendations(&client, limit),
+            MusicRecommendationKind::Radar => radar_recommendations(&client, limit),
+        };
+        let list = self.account_result(account_ref, result)?;
         Ok(SourceRecommendationsResponse { list })
     }
 
@@ -1124,6 +1116,123 @@ impl NeteaseProviderBridge for NeteaseServiceBridge {
                 )
             })
     }
+}
+
+fn daily_recommendations(
+    client: &NeteaseMusicClient,
+    limit: u64,
+) -> Result<Vec<RemoteTrack>, NeteaseBridgeError> {
+    let body = client
+        .recommend_songs()
+        .map_err(|error| bridge_failure("fetch daily recommendations", error))
+        .and_then(|response| checked_body(response, "fetch daily recommendations"))?;
+    let songs = body
+        .pointer("/data/dailySongs")
+        .or_else(|| body.get("recommend"))
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| NeteaseBridgeError::InvalidResponse {
+            operation: "fetch daily recommendations",
+            message: "response did not include recommended tracks".to_owned(),
+        })?;
+    Ok(songs
+        .iter()
+        .filter_map(remote_track_from_json)
+        .take(limit.min(100) as usize)
+        .collect())
+}
+
+fn roaming_recommendations(
+    client: &NeteaseMusicClient,
+    limit: u64,
+) -> Result<Vec<RemoteTrack>, NeteaseBridgeError> {
+    let body = client
+        .raw_eapi(
+            "https://music.163.com/api/v1/radio/get",
+            json!({
+                "mode": "DEFAULT",
+                "subMode": "",
+                "limit": limit.min(100),
+            }),
+        )
+        .map_err(|error| bridge_failure("fetch private roaming", error))
+        .and_then(|response| checked_body(response, "fetch private roaming"))?;
+    let songs = body
+        .get("data")
+        .filter(|value| value.is_array())
+        .or_else(|| body.pointer("/data/songs"))
+        .or_else(|| body.get("songs"))
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| NeteaseBridgeError::InvalidResponse {
+            operation: "fetch private roaming",
+            message: "response did not include roaming tracks".to_owned(),
+        })?;
+    Ok(songs
+        .iter()
+        .filter_map(remote_track_from_json)
+        .take(limit.min(100) as usize)
+        .collect())
+}
+
+fn radar_recommendations(
+    client: &NeteaseMusicClient,
+    limit: u64,
+) -> Result<Vec<RemoteTrack>, NeteaseBridgeError> {
+    let resources = client
+        .recommend_resource()
+        .map_err(|error| bridge_failure("find private radar", error))
+        .and_then(|response| checked_body(response, "find private radar"))?;
+    let playlist_id = private_radar_playlist_id(&resources)
+        .unwrap_or_else(|| PRIVATE_RADAR_PLAYLIST_ID.to_owned());
+    let body = client
+        .playlist_detail(PlaylistDetailParams {
+            id: playlist_id,
+            s: Some(0),
+        })
+        .map_err(|error| bridge_failure("read private radar", error))
+        .and_then(checked_playlist_body)?;
+    let playlist = body.get("playlist").unwrap_or(&body);
+    let mut ids = playlist_track_ids(playlist);
+    ids.truncate(limit.min(100) as usize);
+    let list = if ids.is_empty() {
+        playlist
+            .get("tracks")
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(remote_track_from_json)
+            .take(limit.min(100) as usize)
+            .collect()
+    } else {
+        fetch_playlist_tracks(client, &ids)?
+    };
+    if list.is_empty() {
+        return Err(NeteaseBridgeError::InvalidResponse {
+            operation: "read private radar",
+            message: "response did not include radar tracks".to_owned(),
+        });
+    }
+    Ok(list)
+}
+
+fn private_radar_playlist_id(body: &JsonValue) -> Option<String> {
+    let resources = body
+        .get("recommend")
+        .or_else(|| body.pointer("/data/recommend"))
+        .and_then(JsonValue::as_array)?;
+    resources.iter().find_map(|resource| {
+        let id = json_id(resource.get("id"))?;
+        let is_radar = id == PRIVATE_RADAR_PLAYLIST_ID
+            || [resource.get("name"), resource.get("copywriter")]
+                .into_iter()
+                .flatten()
+                .filter_map(JsonValue::as_str)
+                .any(|value| value.contains(PRIVATE_RADAR_NAME))
+            || resource
+                .get("alg")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|value| value.to_ascii_lowercase().contains("radar"));
+        is_radar.then_some(id)
+    })
 }
 
 impl NeteaseServiceBridge {
@@ -1616,12 +1725,15 @@ impl SourceProvider for NeteaseSourceProvider {
                 Self::finish(context, operation, result).map(SourceResponse::MusicUrl)
             }
             SourceRequest::MusicRecommendations {
-                account_ref, limit, ..
+                account_ref,
+                kind,
+                limit,
+                ..
             } => {
                 let operation = "fetch NetEase recommendations";
                 Self::prepare_bridge(context, operation)?;
                 let account_ref = Self::account_ref(context, &account_ref, operation)?;
-                let result = self.bridge.recommendations(&account_ref, limit);
+                let result = self.bridge.recommendations(&account_ref, kind, limit);
                 Self::finish(context, operation, result).map(SourceResponse::MusicRecommendations)
             }
             SourceRequest::PlaylistList { account_ref, .. } => {
@@ -2326,6 +2438,7 @@ mod tests {
         fn recommendations(
             &self,
             _account_ref: &str,
+            _kind: MusicRecommendationKind,
             _limit: u64,
         ) -> Result<SourceRecommendationsResponse, NeteaseBridgeError> {
             Ok(SourceRecommendationsResponse {
@@ -2436,6 +2549,18 @@ mod tests {
                 < 1_024,
             "normalized tracks should not retain the full upstream payload"
         );
+    }
+
+    #[test]
+    fn private_radar_parser_should_find_the_personalized_playlist_by_name() {
+        let playlist_id = private_radar_playlist_id(&json!({
+            "recommend": [{
+                "id": 3136952023_u64,
+                "name": format!("{PRIVATE_RADAR_NAME}| personalized")
+            }]
+        }));
+
+        assert_eq!(playlist_id.as_deref(), Some(PRIVATE_RADAR_PLAYLIST_ID));
     }
 
     #[test]
@@ -2707,6 +2832,7 @@ mod tests {
                 SourceRequest::MusicRecommendations {
                     source: source_runtime::LX_SOURCE_WY.to_owned(),
                     account_ref: "account".to_owned(),
+                    kind: MusicRecommendationKind::Daily,
                     limit: 10,
                 },
             )

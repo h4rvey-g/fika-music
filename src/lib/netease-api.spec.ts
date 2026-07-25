@@ -57,6 +57,7 @@ describe("NetEase API", () => {
         action: "musicRecommendations",
         source: "wy",
         accountRef,
+        kind: "daily",
         limit: 50,
       },
       requestId: "request-1",

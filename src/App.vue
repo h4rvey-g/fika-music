@@ -82,6 +82,12 @@ type LibraryBrowserInstance = {
   updatePlayCount: (trackId: number, playCount: number) => void;
 };
 
+type OnlineMusicInstance = {
+  showHome: () => void;
+};
+
+type OnlineQueueLoadMore = () => Promise<OnlineTrack[]>;
+
 const mainSections = [
   {
     id: "local",
@@ -166,6 +172,7 @@ const lyricsError = ref<string | null>(null);
 const isPreparingPlayback = ref(false);
 const audioElement = ref<HTMLAudioElement | null>(null);
 const libraryBrowser = ref<LibraryBrowserInstance | null>(null);
+const onlineMusic = ref<OnlineMusicInstance | null>(null);
 const libraryTrackCount = ref(0);
 const filteredLibraryTrackCount = ref(0);
 const localQueueId = ref<string | null>(null);
@@ -176,6 +183,7 @@ const localQueueActive = ref(false);
 const remoteQueue = ref<OnlineTrack[]>([]);
 const remoteQueueIndex = ref(-1);
 const remoteQueueActive = ref(false);
+const remoteQueueLoadMore = ref<OnlineQueueLoadMore | null>(null);
 const resolvingOnlineTrackKey = ref<string | null>(null);
 const playbackAudioSourceId = ref(savedUiPreferences.audioSourceId);
 const remoteQuality = ref(savedUiPreferences.streamQuality);
@@ -183,6 +191,8 @@ const onlineMusicConfig = useOnlineMusicConfig();
 
 let playbackDetailsGeneration = 0;
 let onlinePlaybackController: AbortController | null = null;
+let pendingRemoteQueueLoad: Promise<OnlineTrack[]> | null = null;
+let remoteQueueGeneration = 0;
 let sourceChangeMessageTimer: ReturnType<typeof setTimeout> | null = null;
 const failedOnlineAttempts = new ExpiringCache<string, true>(5 * 60_000, 256);
 const failedOnlineUrls = new ExpiringCache<string, true>(5 * 60_000, 256);
@@ -233,6 +243,7 @@ const canGoPrevious = computed(() => {
 const canGoNext = computed(() => {
   if (remoteQueueActive.value && remoteQueueIndex.value >= 0) {
     return (
+      Boolean(remoteQueueLoadMore.value) ||
       playbackMode.value !== "sequential" ||
       remoteQueueIndex.value < remoteQueue.value.length - 1
     );
@@ -312,9 +323,13 @@ onBeforeUnmount(() => {
 });
 
 function selectSection(section: AppSection) {
+  const resetOnlineHome = section === "online" && activeSection.value === "online";
   activeSection.value = section;
   activePluginId.value = null;
   sidebarOpen.value = false;
+  if (resetOnlineHome) {
+    void nextTick(() => onlineMusic.value?.showHome());
+  }
 }
 
 function selectPlugin(pluginId: string) {
@@ -532,11 +547,14 @@ function clearLocalPlaybackQueue() {
 }
 
 function clearRemotePlaybackQueue() {
+  remoteQueueGeneration += 1;
   onlinePlaybackController?.abort();
   onlinePlaybackController = null;
   remoteQueue.value = [];
   remoteQueueIndex.value = -1;
   remoteQueueActive.value = false;
+  remoteQueueLoadMore.value = null;
+  pendingRemoteQueueLoad = null;
   resolvingOnlineTrackKey.value = null;
   activeOnlineTrack.value = null;
   activeRemoteQuality.value = null;
@@ -596,12 +614,16 @@ async function handleOnlinePlayRequest(
   queue: OnlineTrack[],
   index: number,
   appendable: boolean,
+  loadMore?: OnlineQueueLoadMore,
 ) {
+  remoteQueueGeneration += 1;
   clearFailedOnlinePlayback(track.key);
   clearOnlinePlaybackFailures(track.key);
   const targetIndex = index >= 0 ? index : queue.findIndex((item) => item.key === track.key);
   remoteQueue.value = appendable ? queue : [...queue];
   remoteQueueActive.value = true;
+  remoteQueueLoadMore.value = loadMore ?? null;
+  pendingRemoteQueueLoad = null;
   await playOnlineQueueTrack(Math.max(0, targetIndex));
 }
 
@@ -640,6 +662,7 @@ async function playOnlineQueueTrack(index: number) {
     if (controller.signal.aborted || onlinePlaybackController !== controller) return;
     remoteQueueIndex.value = index;
     await applyOnlinePlayback(playback);
+    if (index === remoteQueue.value.length - 1) void loadMoreRemoteQueue();
   } catch (error) {
     if (!(error instanceof DOMException && error.name === "AbortError")) {
       appError.value = normalizeError(error);
@@ -766,6 +789,12 @@ async function playPreviousTrack() {
 
 async function playNextTrack() {
   if (remoteQueueActive.value) {
+    if (
+      remoteQueueLoadMore.value &&
+      remoteQueueIndex.value === remoteQueue.value.length - 1
+    ) {
+      await loadMoreRemoteQueue();
+    }
     const index = remoteQueueNavigationIndex("next");
     if (index >= 0) await playOnlineQueueTrack(index);
     return;
@@ -792,6 +821,22 @@ async function playNextTrack() {
   }
 
   await playLocalQueueTrack(nextIndex);
+}
+
+function loadMoreRemoteQueue() {
+  if (pendingRemoteQueueLoad) return pendingRemoteQueueLoad;
+  const loadMore = remoteQueueLoadMore.value;
+  if (!loadMore) return Promise.resolve([]);
+
+  const generation = remoteQueueGeneration;
+  const load = loadMore().catch(() => []);
+  pendingRemoteQueueLoad = load;
+  void load.finally(() => {
+    if (generation === remoteQueueGeneration && pendingRemoteQueueLoad === load) {
+      pendingRemoteQueueLoad = null;
+    }
+  });
+  return load;
 }
 
 function remoteQueueNavigationIndex(direction: "previous" | "next") {
@@ -1187,6 +1232,8 @@ function trackSubtitle(track: LocalTrack) {
             </button>
           </div>
           <OnlineMusic
+            ref="onlineMusic"
+            :is-active="activeSection === 'online'"
             :audio-sources="audioSourceRecords"
             :selected-audio-source-id="playbackAudioSourceId"
             :active-online-track-key="activeOnlineTrack?.key ?? null"
