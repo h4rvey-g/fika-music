@@ -1,16 +1,14 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ref } from "vue";
 import LibraryBrowser from "./LibraryBrowser.vue";
 import type {
   AlbumArtTaskStatus,
   LibraryAlbumGroup,
   LibraryQueryPage,
   LibraryViewItem,
-  LocalTrack,
   MetadataLookupTaskStatus,
-  ScanStatus,
 } from "../generated/bindings";
+import { createLocalTrack, createScanStatus } from "../test/fixtures";
 
 const tauriMocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -30,82 +28,38 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: tauriMocks.listen,
 }));
 
-vi.mock("@tanstack/vue-virtual", () => ({
-  useVirtualizer: (options: { value: { count: number; estimateSize: () => number } }) => {
-    const virtualizer = {
-      getVirtualItems: () =>
-        Array.from({ length: Math.min(options.value.count, 20) }, (_, index) => ({
-          index,
-          key: index,
-          start: index * options.value.estimateSize(),
-          size: options.value.estimateSize(),
-          end: (index + 1) * options.value.estimateSize(),
-          lane: 0,
-        })),
-      getTotalSize: () => options.value.count * options.value.estimateSize(),
-      scrollToIndex: vi.fn(),
-      measure: vi.fn(),
-    };
-    return ref(virtualizer);
-  },
-}));
+vi.mock("@tanstack/vue-virtual", () => import("../test/vue-virtual.mock"));
 
-const idleScanStatus: ScanStatus = {
-  isRunning: false,
+const idleScanStatus = createScanStatus({
   folderPath: "/music",
   discoveredFiles: 2,
   scannedFiles: 2,
   indexedTracks: 2,
-  skippedFiles: 0,
-  errorCount: 0,
-  lastError: null,
-  startedAt: null,
-  finishedAt: null,
-};
+});
 
-const tracks: LocalTrack[] = [
-  {
-    id: 1,
+const tracks = [
+  createLocalTrack({
     filePath: "/music/first.flac",
     fileName: "first.flac",
-    title: "First",
     artist: "周杰伦",
     album: "叶惠美",
     albumArtist: "周杰伦",
-    genre: "Pop",
     year: 2003,
     codec: "FLAC",
     bitrateKbps: 900,
-    sampleRateHz: 44100,
-    durationSeconds: 180,
-    trackNumber: 1,
-    discNumber: 1,
-    fileSizeBytes: 1024,
-    modifiedAt: 1,
-    indexedAt: 1,
     playCount: 4,
-  },
-  {
+  }),
+  createLocalTrack({
     id: 2,
     filePath: "/music/second.mp3",
     fileName: "second.mp3",
     title: "Second",
-    artist: "Artist",
-    album: "Album",
-    albumArtist: "Artist",
     genre: "Rock",
-    year: 2024,
-    codec: "MP3",
-    bitrateKbps: 320,
     sampleRateHz: 48000,
     durationSeconds: 181,
     trackNumber: 2,
-    discNumber: 1,
     fileSizeBytes: 2048,
-    modifiedAt: 1,
-    indexedAt: 1,
-    playCount: 0,
-  },
+  }),
 ];
 
 function queryPage(): LibraryQueryPage {

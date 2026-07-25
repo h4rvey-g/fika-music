@@ -1,22 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useLibraryScan } from "./use-library-scan";
+import { createScanStatus } from "../test/fixtures";
 
 const tauri = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: tauri.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: tauri.listen }));
 
-const status = {
-  isRunning: false,
+const status = createScanStatus({
   folderPath: "/music",
   discoveredFiles: 2,
   scannedFiles: 2,
   indexedTracks: 2,
-  skippedFiles: 0,
-  errorCount: 0,
-  lastError: null,
   startedAt: 1,
   finishedAt: 2,
-};
+});
 
 describe("library scan", () => {
   beforeEach(() => {

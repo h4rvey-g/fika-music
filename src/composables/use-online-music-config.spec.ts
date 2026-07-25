@@ -1,6 +1,7 @@
-import { QueryClient } from "@tanstack/vue-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createOnlineMusicConfig } from "./use-online-music-config";
+import { createOnlineMusicSettings } from "../test/fixtures";
+import { createTestQueryClient } from "../test/query-client";
 
 const api = vi.hoisted(() => ({
   getOnlineMusicSettings: vi.fn(),
@@ -10,19 +11,7 @@ const api = vi.hoisted(() => ({
 
 vi.mock("../lib/online-music-api", () => api);
 
-const settings = {
-  excludedChannels: [],
-  channelPriority: [],
-  audioSourcePriority: [],
-  layerTimeoutSeconds: 8,
-  playbackTimeoutSeconds: 20,
-  preferredQuality: "320k" as const,
-  searchHistoryEnabled: true,
-  downloadDirectory: null,
-  filenameTemplate: "{artist} - {title}",
-  downloadConcurrency: 2,
-  batchNotifications: true,
-};
+const settings = createOnlineMusicSettings();
 
 describe("online music config", () => {
   beforeEach(() => {
@@ -32,7 +21,7 @@ describe("online music config", () => {
   });
 
   it("reuses settings and channels across track changes", async () => {
-    const config = createOnlineMusicConfig(new QueryClient());
+    const config = createOnlineMusicConfig(createTestQueryClient());
 
     await config.load();
     await config.load();
@@ -42,7 +31,7 @@ describe("online music config", () => {
   });
 
   it("keeps updated settings and reloads derived channels", async () => {
-    const config = createOnlineMusicConfig(new QueryClient());
+    const config = createOnlineMusicConfig(createTestQueryClient());
     await config.load();
     const updated = { ...settings, excludedChannels: ["netease"] };
 

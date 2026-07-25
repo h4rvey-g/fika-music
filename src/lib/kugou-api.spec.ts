@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { RemoteTrack, SourceRequestOutcome } from "./plugin-api";
+import type { SourceRequestOutcome } from "./plugin-api";
 import {
   cancelKugouQrLogin,
   getKugouPlaylist,
@@ -7,6 +7,7 @@ import {
   pollKugouQrLogin,
   resolveKugouTrack,
 } from "./kugou-api";
+import { createKugouTrack } from "../test/fixtures";
 
 const { invokeMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
@@ -17,16 +18,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 const accountRef = "kugou-account:00000000-0000-4000-8000-000000000001";
-const track: RemoteTrack = {
-  id: "4D766DEC7A90A011D730ED939D158131",
-  source: "kg",
-  title: "Under My Skin",
-  artist: "Andrew Cui",
-  album: "Under My Skin",
-  durationSeconds: 205,
-  coverUrl: null,
-  rawInfo: { hash: "4D766DEC7A90A011D730ED939D158131" },
-};
+const track = createKugouTrack();
 
 describe("KuGou API", () => {
   beforeEach(() => {

@@ -1,9 +1,13 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ref } from "vue";
 import KugouSource from "./KugouSource.vue";
-import type { PluginRecord, RemoteTrack, SourcePlaylist } from "../lib/plugin-api";
+import type { SourcePlaylist } from "../lib/plugin-api";
+import {
+  createKugouTrack,
+  createPluginRecord,
+  createSourceAccount,
+} from "../test/fixtures";
+import { createTestQueryPlugin } from "../test/query-client";
 
 const pluginApiMocks = vi.hoisted(() => ({
   cancelSourceRequest: vi.fn(),
@@ -33,35 +37,10 @@ vi.mock("../lib/kugou-api", () => ({
   KUGOU_PLUGIN_ID: "fika.kugou",
   ...kugouApiMocks,
 }));
-vi.mock("@tanstack/vue-virtual", () => ({
-  useVirtualizer: (options: { value: { count: number; estimateSize: () => number } }) =>
-    ref({
-      getVirtualItems: () =>
-        Array.from({ length: Math.min(options.value.count, 20) }, (_, index) => ({
-          index,
-          key: index,
-          start: index * options.value.estimateSize(),
-          size: options.value.estimateSize(),
-          end: (index + 1) * options.value.estimateSize(),
-          lane: 0,
-        })),
-      getTotalSize: () => options.value.count * options.value.estimateSize(),
-      measure: vi.fn(),
-      scrollToIndex: vi.fn(),
-    }),
-}));
+vi.mock("@tanstack/vue-virtual", () => import("../test/vue-virtual.mock"));
 
 const accountRef = "kugou-account:00000000-0000-4000-8000-000000000001";
-const track: RemoteTrack = {
-  id: "4D766DEC7A90A011D730ED939D158131",
-  source: "kg",
-  title: "Under My Skin",
-  artist: "Andrew Cui",
-  album: "Under My Skin",
-  durationSeconds: 205,
-  coverUrl: "https://example.test/cover.jpg",
-  rawInfo: { hash: "4D766DEC7A90A011D730ED939D158131" },
-};
+const track = createKugouTrack({ coverUrl: "https://example.test/cover.jpg" });
 const playlist: SourcePlaylist = {
   id: "collection_3_42_1_0",
   name: "Daily",
@@ -72,18 +51,14 @@ const playlist: SourcePlaylist = {
   canMutate: false,
 };
 
-function pluginRecord(): PluginRecord {
-  return {
+function kugouPluginRecord() {
+  return createPluginRecord({
     id: "fika.kugou",
     name: "KuGou Music",
-    version: "0.1.0",
     description: null,
-    author: "Fika Music",
     path: "/plugins/kugou",
-    origin: "bundled",
     state: "enabled",
     enabled: true,
-    permissionsReviewed: true,
     declaredCapabilities: [
       "account:ref",
       "playlist:read",
@@ -96,20 +71,10 @@ function pluginRecord(): PluginRecord {
     ],
     requiredHostBridges: ["kugou-music-api"],
     providers: [],
-    diagnostics: [],
-    canRemove: false,
-    canEnable: true,
-    manifest: null,
-  };
+  });
 }
 
 function mountKugouSource() {
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      queries: { retry: false },
-      mutations: { retry: false },
-    },
-  });
   return mount(KugouSource, {
     props: {
       streamQuality: "320k",
@@ -117,7 +82,7 @@ function mountKugouSource() {
       audioSources: [{ value: "source-one", label: "Source One" }],
     },
     global: {
-      plugins: [[VueQueryPlugin, { queryClient }]],
+      plugins: [createTestQueryPlugin()],
     },
   });
 }
@@ -126,17 +91,9 @@ describe("KugouSource", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     pluginApiMocks.cancelSourceRequest.mockResolvedValue(true);
-    pluginApiMocks.listPlugins.mockResolvedValue([pluginRecord()]);
+    pluginApiMocks.listPlugins.mockResolvedValue([kugouPluginRecord()]);
     kugouApiMocks.listKugouAccounts.mockResolvedValue([
-      {
-        accountRef,
-        userId: "42",
-        displayName: "Fika",
-        avatarUrl: null,
-        status: "active",
-        connectedAt: 1,
-        lastVerifiedAt: 1,
-      },
+      createSourceAccount({ accountRef }),
     ]);
     kugouApiMocks.getKugouRecommendations.mockResolvedValue({
       data: [track],

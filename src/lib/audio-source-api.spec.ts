@@ -5,8 +5,8 @@ import {
   isAudioSourceId,
   listAudioSources,
   resolveAudioSourceTrack,
-  type AudioSourceRecord,
 } from "./audio-source-api";
+import { createAudioSourceRecord } from "../test/fixtures";
 
 const { invokeMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
@@ -16,39 +16,6 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
 }));
 
-function audioSourceRecord(
-  overrides: Partial<AudioSourceRecord> = {},
-): AudioSourceRecord {
-  return {
-    id: "imported-source",
-    name: "Imported Source",
-    version: "1.0.0",
-    description: null,
-    author: null,
-    homepage: null,
-    path: "/audio-sources/imported-source",
-    adapter: "static-templates",
-    state: "enabled",
-    enabled: true,
-    permissionsReviewed: true,
-    declaredCapabilities: ["network:any"],
-    grantedCapabilities: ["network:any"],
-    sources: [
-      {
-        id: "wy",
-        name: "NetEase",
-        type: "music",
-        actions: ["musicUrl"],
-        qualities: ["128k", "320k"],
-      },
-    ],
-    diagnostics: [],
-    canRemove: true,
-    canEnable: true,
-    ...overrides,
-  };
-}
-
 describe("audio source API", () => {
   beforeEach(() => {
     invokeMock.mockReset();
@@ -56,8 +23,8 @@ describe("audio source API", () => {
 
   it("uses dedicated list and import commands", async () => {
     invokeMock
-      .mockResolvedValueOnce([audioSourceRecord()])
-      .mockResolvedValueOnce(audioSourceRecord());
+      .mockResolvedValueOnce([createAudioSourceRecord()])
+      .mockResolvedValueOnce(createAudioSourceRecord());
 
     await listAudioSources();
     await importAudioSource("/downloads/source.js");
@@ -71,8 +38,8 @@ describe("audio source API", () => {
   it("builds playback options only from enabled audio source records", () => {
     expect(
       buildAudioSourceOptions([
-        audioSourceRecord(),
-        audioSourceRecord({ id: "disabled", name: "Disabled", enabled: false }),
+        createAudioSourceRecord(),
+        createAudioSourceRecord({ id: "disabled", name: "Disabled", enabled: false }),
       ]),
     ).toEqual([{ value: "imported-source", label: "Imported Source" }]);
   });

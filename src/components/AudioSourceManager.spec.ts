@@ -2,6 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import AudioSourceManager from "./AudioSourceManager.vue";
 import type { AudioSourceRecord } from "../lib/audio-source-api";
+import { createAudioSourceRecord } from "../test/fixtures";
 
 const apiMocks = vi.hoisted(() => ({
   clearAudioSourceDiagnostics: vi.fn(),
@@ -17,43 +18,25 @@ const apiMocks = vi.hoisted(() => ({
 
 vi.mock("../lib/audio-source-api", () => apiMocks);
 
-function audioSourceRecord(
+function managerAudioSourceRecord(
   overrides: Partial<AudioSourceRecord> = {},
 ): AudioSourceRecord {
-  return {
-    id: "imported-source",
-    name: "Imported Source",
-    version: "1.0.0",
+  return createAudioSourceRecord({
     description: "Audio source manager fixture",
     author: "Fika Tests",
-    homepage: null,
-    path: "/audio-sources/imported-source",
-    adapter: "static-templates",
     state: "needs-review",
     enabled: false,
     permissionsReviewed: false,
-    declaredCapabilities: ["network:any"],
     grantedCapabilities: [],
-    sources: [
-      {
-        id: "wy",
-        name: "NetEase",
-        type: "music",
-        actions: ["musicUrl"],
-        qualities: ["128k", "320k"],
-      },
-    ],
-    diagnostics: [],
-    canRemove: true,
     canEnable: false,
     ...overrides,
-  };
+  });
 }
 
 describe("AudioSourceManager", () => {
   beforeEach(() => {
     vi.resetAllMocks();
-    apiMocks.listAudioSources.mockResolvedValue([audioSourceRecord()]);
+    apiMocks.listAudioSources.mockResolvedValue([managerAudioSourceRecord()]);
   });
 
   it("loads standalone audio source records", async () => {
@@ -63,12 +46,12 @@ describe("AudioSourceManager", () => {
     expect(apiMocks.listAudioSources).toHaveBeenCalledOnce();
     expect(wrapper.text()).toContain("Imported Source");
     expect(wrapper.text()).toContain("Review required");
-    expect(wrapper.emitted("sourcesChanged")?.[0]).toEqual([[audioSourceRecord()]]);
+    expect(wrapper.emitted("sourcesChanged")?.[0]).toEqual([[managerAudioSourceRecord()]]);
     wrapper.unmount();
   });
 
   it("imports a local source without using Plugin APIs", async () => {
-    const imported = audioSourceRecord({ id: "new-source", name: "New Source" });
+    const imported = managerAudioSourceRecord({ id: "new-source", name: "New Source" });
     apiMocks.selectAudioSourceFile.mockResolvedValue("/downloads/source.js");
     apiMocks.importAudioSource.mockResolvedValue(imported);
     const wrapper = mount(AudioSourceManager);
@@ -84,21 +67,21 @@ describe("AudioSourceManager", () => {
     expect(apiMocks.importAudioSource).toHaveBeenCalledWith("/downloads/source.js");
     expect(wrapper.text()).toContain("New Source imported");
     const changes = wrapper.emitted("sourcesChanged") ?? [];
-    expect(changes[changes.length - 1]).toEqual([[audioSourceRecord(), imported]]);
+    expect(changes[changes.length - 1]).toEqual([[managerAudioSourceRecord(), imported]]);
     wrapper.unmount();
   });
 
   it("reviews permissions before enabling a source", async () => {
-    const selected = audioSourceRecord({
+    const selected = managerAudioSourceRecord({
       grantedCapabilities: ["network:any"],
     });
-    const reviewed = audioSourceRecord({
+    const reviewed = managerAudioSourceRecord({
       state: "disabled",
       permissionsReviewed: true,
       grantedCapabilities: ["network:any"],
       canEnable: true,
     });
-    const enabled = audioSourceRecord({
+    const enabled = managerAudioSourceRecord({
       state: "enabled",
       enabled: true,
       permissionsReviewed: true,

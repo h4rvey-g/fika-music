@@ -9,9 +9,13 @@ import {
   refreshOnlineDownloadItemCandidates,
   resolveOnlineTrack,
   selectOnlineDownloadDirectory,
-  type OnlineMusicSettings,
-  type OnlineTrack,
 } from "./online-music-api";
+import {
+  createAudioSourceRecord,
+  createOnlineMusicSettings,
+  createOnlineTrack,
+  createOnlineTrackCandidate,
+} from "../test/fixtures";
 
 const invoke = vi.hoisted(() => vi.fn());
 
@@ -19,18 +23,12 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 function audioSource(id: string, sources = ["wy", "kg"]): AudioSourceRecord {
-  return {
+  return createAudioSourceRecord({
     id,
     name: id,
     version: "1",
-    description: null,
-    author: null,
-    homepage: null,
     path: `/sources/${id}`,
     adapter: "test",
-    state: "enabled",
-    enabled: true,
-    permissionsReviewed: true,
     declaredCapabilities: [],
     grantedCapabilities: [],
     sources: sources.map((source) => ({
@@ -40,72 +38,26 @@ function audioSource(id: string, sources = ["wy", "kg"]): AudioSourceRecord {
       actions: ["musicUrl"],
       qualities: ["128k", "320k"],
     })),
-    diagnostics: [],
-    canRemove: true,
-    canEnable: true,
-  };
+  });
 }
 
-const settings: OnlineMusicSettings = {
-  excludedChannels: [],
-  channelPriority: [],
+const settings = createOnlineMusicSettings({
   audioSourcePriority: ["second", "first"],
-  layerTimeoutSeconds: 8,
-  playbackTimeoutSeconds: 20,
-  preferredQuality: "320k",
-  searchHistoryEnabled: true,
-  downloadDirectory: null,
-  filenameTemplate: "{artist} - {title}[ \\[{album}\\]]",
-  downloadConcurrency: 2,
-  batchNotifications: true,
-};
+});
 
-const track: OnlineTrack = {
-  key: "track",
-  title: "Song",
-  artist: "Artist",
-  album: "Album",
-  durationSeconds: 180,
-  coverUrl: null,
-  trackNumber: 1,
-  discNumber: 1,
+const track = createOnlineTrack({
   candidates: [
-    {
-      channelId: "netease",
-      pluginId: "fika.netease",
-      sourceId: "wy",
-      channelName: "NetEase",
-      id: "1",
-      title: "Song",
-      artist: "Artist",
-      album: "Album",
-      durationSeconds: 180,
-      coverUrl: null,
-      trackNumber: 1,
-      discNumber: 1,
-      platformIds: { id: "1" },
-      rawInfo: {},
-      rank: 1,
-    },
-    {
+    createOnlineTrackCandidate(),
+    createOnlineTrackCandidate({
       channelId: "kugou",
       pluginId: "fika.kugou",
       sourceId: "kg",
       channelName: "KuGou",
       id: "hash",
-      title: "Song",
-      artist: "Artist",
-      album: "Album",
-      durationSeconds: 180,
-      coverUrl: null,
-      trackNumber: 1,
-      discNumber: 1,
       platformIds: { hash: "hash" },
-      rawInfo: {},
-      rank: 1,
-    },
+    }),
   ],
-};
+});
 
 describe("online music playback routing", () => {
   beforeEach(() => {

@@ -2,6 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import PluginManager from "./PluginManager.vue";
 import type { PluginRecord } from "../lib/plugin-api";
+import { createPluginRecord } from "../test/fixtures";
 
 const apiMocks = vi.hoisted(() => ({
   clearPluginDiagnostics: vi.fn(),
@@ -15,38 +16,14 @@ const apiMocks = vi.hoisted(() => ({
 
 vi.mock("../lib/plugin-api", () => apiMocks);
 
-function pluginRecord(overrides: Partial<PluginRecord> = {}): PluginRecord {
-  return {
-    id: "fika.runtime-demo",
+const pluginRecord = (overrides: Partial<PluginRecord> = {}) =>
+  createPluginRecord({
     name: "Runtime Demo",
-    version: "0.1.0",
     description: "Plugin manager integration fixture",
-    author: "Fika Music",
-    path: "/plugins/runtime-demo",
-    origin: "bundled",
-    state: "disabled",
-    enabled: false,
     permissionsReviewed: false,
     declaredCapabilities: ["network:any"],
-    grantedCapabilities: [],
-    requiredHostBridges: [],
-    providers: [
-      {
-        id: "fika-runtime-demo",
-        entrypoint: "builtin:runtime-demo",
-        initialized: false,
-        sources: [],
-        runtimeReport: null,
-        diagnostics: [],
-      },
-    ],
-    diagnostics: [],
-    canRemove: false,
-    canEnable: true,
-    manifest: null,
     ...overrides,
-  };
-}
+  });
 
 describe("PluginManager", () => {
   beforeEach(() => {

@@ -2,16 +2,12 @@ import { describe, expect, it } from "vitest";
 import { normalizeError, queryError } from "./errors";
 
 describe("normalizeError", () => {
-  it("reads structured Tauri errors encoded as JSON", () => {
-    expect(normalizeError('{"message":"request failed"}')).toBe("request failed");
-  });
-
-  it("preserves plain string errors", () => {
-    expect(normalizeError("request failed")).toBe("request failed");
-  });
-
-  it("uses a caller-provided fallback for unknown values", () => {
-    expect(normalizeError(null, "Provider failed.")).toBe("Provider failed.");
+  it.each([
+    ["structured Tauri JSON", '{"message":"request failed"}', "fallback", "request failed"],
+    ["plain strings", "request failed", "fallback", "request failed"],
+    ["unknown values", null, "Provider failed.", "Provider failed."],
+  ])("normalizes %s", (_case, error, fallback, expected) => {
+    expect(normalizeError(error, fallback)).toBe(expected);
   });
 });
 

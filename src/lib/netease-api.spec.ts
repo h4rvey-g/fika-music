@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { RemoteTrack, SourceRequestOutcome } from "./plugin-api";
+import type { SourceRequestOutcome } from "./plugin-api";
 import {
   addNeteasePlaylistTrack,
   cancelNeteaseQrLogin,
@@ -7,6 +7,7 @@ import {
   pollNeteaseQrLogin,
   resolveNeteaseTrack,
 } from "./netease-api";
+import { createNeteaseTrack } from "../test/fixtures";
 
 const { invokeMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
@@ -16,16 +17,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
 }));
 
-const track: RemoteTrack = {
-  id: "347230",
-  source: "wy",
-  title: "Test Track",
-  artist: "Test Artist",
-  album: null,
-  durationSeconds: 180,
-  coverUrl: null,
-  rawInfo: { id: 347230 },
-};
+const track = createNeteaseTrack();
 const accountRef = "netease-account:00000000-0000-4000-8000-000000000001";
 
 describe("NetEase API", () => {

@@ -1,9 +1,13 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ref } from "vue";
 import NeteaseSource from "./NeteaseSource.vue";
 import type { PluginRecord, RemoteTrack, SourcePlaylist } from "../lib/plugin-api";
+import {
+  createNeteaseTrack,
+  createPluginRecord,
+  createSourceAccount,
+} from "../test/fixtures";
+import { createTestQueryPlugin } from "../test/query-client";
 
 const pluginApiMocks = vi.hoisted(() => ({
   cancelSourceRequest: vi.fn(),
@@ -38,37 +42,12 @@ vi.mock("../lib/netease-api", () => ({
   NETEASE_PLUGIN_ID: "fika.netease",
   ...neteaseApiMocks,
 }));
-vi.mock("@tanstack/vue-virtual", () => ({
-  useVirtualizer: (options: { value: { count: number; estimateSize: () => number } }) =>
-    ref({
-      getVirtualItems: () =>
-        Array.from({ length: Math.min(options.value.count, 20) }, (_, index) => ({
-          index,
-          key: index,
-          start: index * options.value.estimateSize(),
-          size: options.value.estimateSize(),
-          end: (index + 1) * options.value.estimateSize(),
-          lane: 0,
-        })),
-      getTotalSize: () => options.value.count * options.value.estimateSize(),
-      measure: vi.fn(),
-      scrollToIndex: vi.fn(),
-    }),
-}));
+vi.mock("@tanstack/vue-virtual", () => import("../test/vue-virtual.mock"));
 
 const accountRef = "netease-account:00000000-0000-4000-8000-000000000001";
 const secondAccountRef = "netease-account:00000000-0000-4000-8000-000000000002";
 
-const track: RemoteTrack = {
-  id: "347230",
-  source: "wy",
-  title: "Test Track",
-  artist: "Test Artist",
-  album: "Test Album",
-  durationSeconds: 180,
-  coverUrl: null,
-  rawInfo: { id: 347230 },
-};
+const track = createNeteaseTrack({ album: "Test Album" });
 
 const playlist: SourcePlaylist = {
   id: "playlist-1",
@@ -80,28 +59,20 @@ const playlist: SourcePlaylist = {
   canMutate: true,
 };
 
-function pluginRecord(overrides: Partial<PluginRecord> = {}): PluginRecord {
-  return {
+function neteasePluginRecord(overrides: Partial<PluginRecord> = {}): PluginRecord {
+  return createPluginRecord({
     id: "fika.netease",
     name: "NetEase Cloud Music",
-    version: "0.1.0",
     description: null,
-    author: "Fika Music",
     path: "/plugins/netease",
-    origin: "bundled",
     state: "enabled",
     enabled: true,
-    permissionsReviewed: true,
     declaredCapabilities: ["account:ref", "playlist:read", "playlist:write"],
     grantedCapabilities: ["account:ref", "playlist:read", "playlist:write"],
     requiredHostBridges: ["netease-api-enhanced"],
     providers: [],
-    diagnostics: [],
-    canRemove: false,
-    canEnable: true,
-    manifest: null,
     ...overrides,
-  };
+  });
 }
 
 function mountNeteaseSource(
@@ -110,12 +81,6 @@ function mountNeteaseSource(
     audioSources: Array<{ value: string; label: string }>;
   }> = {},
 ) {
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      queries: { retry: false, gcTime: Infinity },
-      mutations: { retry: false },
-    },
-  });
   return mount(NeteaseSource, {
     props: {
       streamQuality: "320k",
@@ -127,7 +92,7 @@ function mountNeteaseSource(
       ...props,
     },
     global: {
-      plugins: [[VueQueryPlugin, { queryClient }]],
+      plugins: [createTestQueryPlugin()],
     },
   });
 }
@@ -136,7 +101,7 @@ describe("NeteaseSource", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     pluginApiMocks.cancelSourceRequest.mockResolvedValue(true);
-    pluginApiMocks.listPlugins.mockResolvedValue([pluginRecord()]);
+    pluginApiMocks.listPlugins.mockResolvedValue([neteasePluginRecord()]);
     audioSourceApiMocks.resolveAudioSourceTrack.mockResolvedValue({
       url: "https://cdn.example.test/Test%20Track.mp3",
       diagnostics: [
@@ -144,15 +109,7 @@ describe("NeteaseSource", () => {
       ],
     });
     neteaseApiMocks.listNeteaseAccounts.mockResolvedValue([
-      {
-        accountRef,
-        userId: "42",
-        displayName: "Fika",
-        avatarUrl: null,
-        status: "active",
-        connectedAt: 1,
-        lastVerifiedAt: 1,
-      },
+      createSourceAccount({ accountRef }),
     ]);
     neteaseApiMocks.getNeteaseRecommendations.mockResolvedValue({
       data: [track],
@@ -290,15 +247,7 @@ describe("NeteaseSource", () => {
   });
 
   it("refreshes the account state after credential expiry", async () => {
-    const activeAccount = {
-      accountRef,
-      userId: "42",
-      displayName: "Fika",
-      avatarUrl: null,
-      status: "active",
-      connectedAt: 1,
-      lastVerifiedAt: 1,
-    };
+    const activeAccount = createSourceAccount({ accountRef });
     neteaseApiMocks.listNeteaseAccounts
       .mockResolvedValueOnce([activeAccount])
       .mockResolvedValue([{ ...activeAccount, status: "expired" }]);
@@ -316,7 +265,7 @@ describe("NeteaseSource", () => {
 
   it("routes disabled Plugin state to direct enablement", async () => {
     pluginApiMocks.listPlugins.mockResolvedValue([
-      pluginRecord({ state: "disabled", enabled: false }),
+      neteasePluginRecord({ state: "disabled", enabled: false }),
     ]);
     const wrapper = mountNeteaseSource();
 
@@ -364,15 +313,7 @@ describe("NeteaseSource", () => {
     });
     neteaseApiMocks.pollNeteaseQrLogin.mockResolvedValue({
       status: "succeeded",
-      account: {
-        accountRef,
-        userId: "42",
-        displayName: "Fika",
-        avatarUrl: null,
-        status: "active",
-        connectedAt: 1,
-        lastVerifiedAt: 2,
-      },
+      account: createSourceAccount({ accountRef, lastVerifiedAt: 2 }),
     });
     const wrapper = mountNeteaseSource();
     await flushPromises();
@@ -477,24 +418,14 @@ describe("NeteaseSource", () => {
       },
     );
     neteaseApiMocks.listNeteaseAccounts.mockResolvedValue([
-      {
-        accountRef,
-        userId: "42",
-        displayName: "Fika",
-        avatarUrl: null,
-        status: "active",
-        connectedAt: 1,
-        lastVerifiedAt: 1,
-      },
-      {
+      createSourceAccount({ accountRef }),
+      createSourceAccount({
         accountRef: secondAccountRef,
         userId: "84",
         displayName: "Second",
-        avatarUrl: null,
-        status: "active",
         connectedAt: 2,
         lastVerifiedAt: 2,
-      },
+      }),
     ]);
     neteaseApiMocks.getNeteaseRecommendations.mockImplementation(
       (selectedAccountRef: string) =>

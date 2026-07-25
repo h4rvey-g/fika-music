@@ -1,11 +1,21 @@
 import { config, flushPromises, mount } from "@vue/test-utils";
-import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent } from "vue";
 import App from "./App.vue";
 import type { PluginRecord } from "./lib/plugin-api";
 import type { AudioSourceRecord } from "./lib/audio-source-api";
 import { THEME_OPTIONS, UI_PREFERENCES_STORAGE_KEY } from "./lib/ui-preferences";
+import {
+  createAudioSourceRecord,
+  createLocalTrack,
+  createNeteaseTrack,
+  createOnlineMusicSettings,
+  createOnlineTrack,
+  createOnlineTrackCandidate,
+  createPluginRecord,
+  createScanStatus,
+} from "./test/fixtures";
+import { createTestQueryPlugin } from "./test/query-client";
 
 const tauriMocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -14,72 +24,6 @@ const tauriMocks = vi.hoisted(() => ({
 
 let listedPlugins: PluginRecord[] = [];
 let listedAudioSources: AudioSourceRecord[] = [];
-
-function pluginRecord(overrides: Partial<PluginRecord> = {}): PluginRecord {
-  return {
-    id: "fika.runtime-demo",
-    name: "Fika Runtime Demo",
-    version: "0.1.0",
-    description: "Plugin navigation fixture",
-    author: "Fika Music",
-    path: "/plugins/runtime-demo",
-    origin: "bundled",
-    state: "disabled",
-    enabled: false,
-    permissionsReviewed: true,
-    declaredCapabilities: [],
-    grantedCapabilities: [],
-    requiredHostBridges: [],
-    providers: [
-      {
-        id: "fika-runtime-demo",
-        entrypoint: "builtin:runtime-demo",
-        initialized: false,
-        sources: [],
-        runtimeReport: null,
-        diagnostics: [],
-      },
-    ],
-    diagnostics: [],
-    canRemove: false,
-    canEnable: true,
-    manifest: null,
-    ...overrides,
-  };
-}
-
-function audioSourceRecord(
-  overrides: Partial<AudioSourceRecord> = {},
-): AudioSourceRecord {
-  return {
-    id: "imported-source",
-    name: "Imported Source",
-    version: "1.0.0",
-    description: null,
-    author: null,
-    homepage: null,
-    path: "/audio-sources/imported-source",
-    adapter: "static-templates",
-    state: "enabled",
-    enabled: true,
-    permissionsReviewed: true,
-    declaredCapabilities: ["network:any"],
-    grantedCapabilities: ["network:any"],
-    sources: [
-      {
-        id: "wy",
-        name: "NetEase",
-        type: "music",
-        actions: ["musicUrl"],
-        qualities: ["128k", "320k"],
-      },
-    ],
-    diagnostics: [],
-    canRemove: true,
-    canEnable: true,
-    ...overrides,
-  };
-}
 
 vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => path,
@@ -118,27 +62,15 @@ vi.mock("./components/LibraryBrowser.vue", () => ({
             queueId: "library-queue",
             total: 2,
             currentIndex: 1,
-            track: {
+            track: createLocalTrack({
               id: 2,
               filePath: "/music/second.mp3",
               fileName: "second.mp3",
               title: "Second",
-              artist: "Artist",
-              album: "Album",
-              albumArtist: "Artist",
-              genre: "Pop",
-              year: 2024,
-              codec: "MP3",
-              bitrateKbps: 320,
-              sampleRateHz: 44100,
               durationSeconds: 181,
               trackNumber: 2,
-              discNumber: 1,
               fileSizeBytes: 2048,
-              modifiedAt: 1,
-              indexedAt: 1,
-              playCount: 0,
-            },
+            }),
           },
           true,
         );
@@ -183,28 +115,10 @@ describe("application shell", () => {
     vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
     vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
     tauriMocks.listen.mockResolvedValue(vi.fn());
-    config.global.plugins = [[
-      VueQueryPlugin,
-      {
-        queryClient: new QueryClient({
-          defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-        }),
-      },
-    ]];
+    config.global.plugins = [createTestQueryPlugin()];
     tauriMocks.invoke.mockImplementation((command: string) => {
       if (command === "get_scan_status") {
-        return Promise.resolve({
-          isRunning: false,
-          folderPath: null,
-          discoveredFiles: 0,
-          scannedFiles: 0,
-          indexedTracks: 0,
-          skippedFiles: 0,
-          errorCount: 0,
-          lastError: null,
-          startedAt: null,
-          finishedAt: null,
-        });
+        return Promise.resolve(createScanStatus());
       }
       if (command === "list_plugins") {
         return Promise.resolve(listedPlugins);
@@ -213,19 +127,7 @@ describe("application shell", () => {
         return Promise.resolve(listedAudioSources);
       }
       if (command === "get_online_music_settings") {
-        return Promise.resolve({
-          excludedChannels: [],
-          channelPriority: [],
-          audioSourcePriority: [],
-          layerTimeoutSeconds: 8,
-          playbackTimeoutSeconds: 20,
-          preferredQuality: "320k",
-          searchHistoryEnabled: true,
-          downloadDirectory: null,
-          filenameTemplate: "{artist} - {title}[ \\[{album}\\]]",
-          downloadConcurrency: 2,
-          batchNotifications: true,
-        });
+        return Promise.resolve(createOnlineMusicSettings());
       }
       if (command === "list_online_download_tasks") {
         return Promise.resolve([]);
@@ -292,13 +194,13 @@ describe("application shell", () => {
 
   it("adds a dedicated sidebar entry and workspace for every enabled plugin", async () => {
     listedPlugins = [
-      pluginRecord({
+      createPluginRecord({
         id: "fika.netease",
         name: "NetEase Cloud Music",
         state: "enabled",
         enabled: true,
       }),
-      pluginRecord({
+      createPluginRecord({
         state: "enabled",
         enabled: true,
         providers: [
@@ -320,7 +222,7 @@ describe("application shell", () => {
           },
         ],
       }),
-      pluginRecord({ id: "fika.disabled", name: "Disabled Plugin" }),
+      createPluginRecord({ id: "fika.disabled", name: "Disabled Plugin" }),
     ];
 
     const wrapper = mount(App);
@@ -348,7 +250,7 @@ describe("application shell", () => {
 
   it("preserves Online Music state while opening a dedicated plugin page", async () => {
     listedPlugins = [
-      pluginRecord({
+      createPluginRecord({
         id: "fika.netease",
         name: "NetEase Cloud Music",
         state: "enabled",
@@ -377,7 +279,7 @@ describe("application shell", () => {
 
   it("uses the shared audio source setting for NetEase playback", async () => {
     listedPlugins = [
-      pluginRecord({
+      createPluginRecord({
         id: "fika.netease",
         name: "NetEase Cloud Music",
         state: "enabled",
@@ -385,8 +287,8 @@ describe("application shell", () => {
       }),
     ];
     listedAudioSources = [
-      audioSourceRecord({ id: "source-one", name: "Source One" }),
-      audioSourceRecord({ id: "source-two", name: "Source Two" }),
+      createAudioSourceRecord({ id: "source-one", name: "Source One" }),
+      createAudioSourceRecord({ id: "source-two", name: "Source Two" }),
     ];
     const wrapper = mount(App);
     await flushPromises();
@@ -403,16 +305,7 @@ describe("application shell", () => {
     ).toBe("source-two");
 
     neteaseSource.vm.$emit("playbackReady", {
-      track: {
-        id: "347230",
-        source: "wy",
-        title: "Test Track",
-        artist: "Test Artist",
-        album: null,
-        durationSeconds: 180,
-        coverUrl: null,
-        rawInfo: { id: 347230 },
-      },
+      track: createNeteaseTrack(),
       url: "https://cdn.example.test/Test%20Track.mp3",
       providerName: "Source Two",
       diagnostics: [],
@@ -429,7 +322,7 @@ describe("application shell", () => {
 
   it("uses the winning online candidate identity for remote lyrics", async () => {
     listedAudioSources = [
-      audioSourceRecord({
+      createAudioSourceRecord({
         id: "source-one",
         name: "Source One",
         sources: ["wy", "kg"].map((id) => ({
@@ -441,34 +334,20 @@ describe("application shell", () => {
         })),
       }),
     ];
-    const onlineTrack = {
+    const onlineTrack = createOnlineTrack({
       key: "online-track",
       title: "Test Track",
       artist: "Test Artist",
       album: "Test Album",
-      durationSeconds: 180,
-      coverUrl: null,
-      trackNumber: 1,
-      discNumber: 1,
       candidates: [
-        {
-          channelId: "netease",
-          pluginId: "fika.netease",
-          sourceId: "wy",
-          channelName: "NetEase",
+        createOnlineTrackCandidate({
           id: "347230",
           title: "Test Track",
           artist: "Test Artist",
           album: "Test Album",
-          durationSeconds: 180,
-          coverUrl: null,
-          trackNumber: 1,
-          discNumber: 1,
           platformIds: { id: "347230" },
-          rawInfo: {},
-          rank: 1,
-        },
-        {
+        }),
+        createOnlineTrackCandidate({
           channelId: "kugou",
           pluginId: "fika.kugou",
           sourceId: "kg",
@@ -477,16 +356,11 @@ describe("application shell", () => {
           title: "Test Track",
           artist: "Test Artist",
           album: "Test Album",
-          durationSeconds: 180,
-          coverUrl: null,
-          trackNumber: 1,
-          discNumber: 1,
           platformIds: { hash: "track-hash" },
-          rawInfo: {},
           rank: 2,
-        },
+        }),
       ],
-    };
+    });
     const defaultInvoke = tauriMocks.invoke.getMockImplementation();
     tauriMocks.invoke.mockImplementation((command: string, payload?: { request?: { source?: string } }) => {
       if (command === "list_online_music_channels") {
@@ -551,14 +425,16 @@ describe("application shell", () => {
 
   it("opens the dedicated KuGou workspace for the bundled plugin", async () => {
     listedPlugins = [
-      pluginRecord({
+      createPluginRecord({
         id: "fika.kugou",
         name: "KuGou Music",
         state: "enabled",
         enabled: true,
       }),
     ];
-    listedAudioSources = [audioSourceRecord({ id: "source-one", name: "Source One" })];
+    listedAudioSources = [
+      createAudioSourceRecord({ id: "source-one", name: "Source One" }),
+    ];
     const wrapper = mount(App);
     await flushPromises();
 
@@ -575,7 +451,7 @@ describe("application shell", () => {
 
   it("offers enabled standalone audio sources without adding Plugin entries", async () => {
     listedPlugins = [
-      pluginRecord({
+      createPluginRecord({
         id: "fika.netease",
         name: "NetEase Cloud Music",
         state: "enabled",
@@ -583,7 +459,7 @@ describe("application shell", () => {
       }),
     ];
     listedAudioSources = [
-      audioSourceRecord({ id: "imported-lx-source", name: "Imported LX Source" }),
+      createAudioSourceRecord({ id: "imported-lx-source", name: "Imported LX Source" }),
     ];
     const wrapper = mount(App);
     await flushPromises();
@@ -599,7 +475,7 @@ describe("application shell", () => {
   });
 
   it("updates plugin sidebar entries when the plugin manager reports lifecycle changes", async () => {
-    const plugin = pluginRecord();
+    const plugin = createPluginRecord();
     listedPlugins = [plugin];
     const wrapper = mount(App);
     await flushPromises();
@@ -612,7 +488,7 @@ describe("application shell", () => {
     await pluginsButton?.trigger("click");
 
     wrapper.getComponent({ name: "PluginManager" }).vm.$emit("pluginsChanged", [
-      pluginRecord({ state: "enabled", enabled: true }),
+      createPluginRecord({ state: "enabled", enabled: true }),
     ]);
     await wrapper.vm.$nextTick();
 
@@ -667,18 +543,12 @@ describe("application shell", () => {
   it("navigates local tracks and wraps at the end in repeat mode", async () => {
     tauriMocks.invoke.mockImplementation((command: string, payload?: { trackId?: number; index?: number }) => {
       if (command === "get_scan_status") {
-        return Promise.resolve({
-          isRunning: false,
+        return Promise.resolve(createScanStatus({
           folderPath: "/music",
           discoveredFiles: 2,
           scannedFiles: 2,
           indexedTracks: 2,
-          skippedFiles: 0,
-          errorCount: 0,
-          lastError: null,
-          startedAt: null,
-          finishedAt: null,
-        });
+        }));
       }
       if (command === "local_track_media_source") {
         return Promise.resolve({
@@ -688,27 +558,7 @@ describe("application shell", () => {
       if (command === "local_library_queue_track") {
         return Promise.resolve({
           index: payload?.index ?? 0,
-          track: {
-            id: 1,
-            filePath: "/music/first.mp3",
-            fileName: "first.mp3",
-            title: "First",
-            artist: "Artist",
-            album: "Album",
-            albumArtist: "Artist",
-            genre: "Pop",
-            year: 2024,
-            codec: "MP3",
-            bitrateKbps: 320,
-            sampleRateHz: 44100,
-            durationSeconds: 180,
-            trackNumber: 1,
-            discNumber: 1,
-            fileSizeBytes: 1024,
-            modifiedAt: 1,
-            indexedAt: 1,
-            playCount: 0,
-          },
+          track: createLocalTrack(),
         });
       }
       if (command === "local_track_playback_details") {

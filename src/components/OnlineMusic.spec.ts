@@ -9,6 +9,11 @@ import type {
   OnlineSearchSectionEvent,
   OnlineTrack,
 } from "../lib/online-music-api";
+import {
+  createOnlineMusicSettings,
+  createOnlineTrack,
+  createOnlineTrackCandidate,
+} from "../test/fixtures";
 
 const tauriMocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -20,50 +25,25 @@ const eventListeners = new Map<string, (event: { payload: unknown }) => void>();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: tauriMocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: tauriMocks.listen }));
 
-const settings = {
-  excludedChannels: [],
-  channelPriority: [],
-  audioSourcePriority: [],
-  layerTimeoutSeconds: 8,
-  playbackTimeoutSeconds: 20,
-  preferredQuality: "320k" as const,
-  searchHistoryEnabled: true,
-  downloadDirectory: null,
-  filenameTemplate: "{artist} - {title}[ \\[{album}\\]]",
-  downloadConcurrency: 2,
-  batchNotifications: true,
-};
+const settings = createOnlineMusicSettings();
 
 function track(index: number): OnlineTrack {
-  return {
+  const title = `Song ${index}`;
+  return createOnlineTrack({
     key: `song-${index}`,
-    title: `Song ${index}`,
-    artist: "Artist",
-    album: "Album",
-    durationSeconds: 180,
-    coverUrl: null,
+    title,
     trackNumber: index,
-    discNumber: 1,
     candidates: [
-      {
+      createOnlineTrackCandidate({
         channelId: "fika.netease:wy",
-        pluginId: "fika.netease",
-        sourceId: "wy",
-        channelName: "NetEase",
         id: String(index),
-        title: `Song ${index}`,
-        artist: "Artist",
-        album: "Album",
-        durationSeconds: 180,
-        coverUrl: null,
+        title,
         trackNumber: index,
-        discNumber: 1,
         platformIds: { id: index },
-        rawInfo: {},
         rank: index,
-      },
+      }),
     ],
-  };
+  });
 }
 
 const playlist: OnlinePlaylist = {
