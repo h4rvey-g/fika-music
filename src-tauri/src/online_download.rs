@@ -552,9 +552,7 @@ pub fn refresh_task_counts(
         |row| row.get::<_, String>(0),
     )?;
     let current = OnlineDownloadState::from_db(&current)?;
-    let state = if current == OnlineDownloadState::Cancelled {
-        current
-    } else if pending > 0 {
+    let state = if current == OnlineDownloadState::Cancelled || pending > 0 {
         current
     } else if failed > 0 {
         OnlineDownloadState::CompletedWithErrors

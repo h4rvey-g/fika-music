@@ -34,6 +34,7 @@ import {
   type LibraryColumnId,
   type LibraryColumnPreference,
 } from "../lib/library-preferences";
+import { normalizeError } from "../lib/errors";
 import { TAURI_COMMANDS } from "../generated/bindings";
 import type {
   AlbumArtSettings,
@@ -1355,12 +1356,6 @@ function subtractRange(ranges: LibrarySelectionRange[], target: LibrarySelection
 function taskPercent(task: { total: number; processed: number } | null) {
   if (!task?.total) return 0;
   return Math.round((task.processed / task.total) * 100);
-}
-
-function normalizeError(error: unknown) {
-  if (typeof error === "string") return error;
-  if (error instanceof Error) return error.message;
-  return "Unexpected library error.";
 }
 
 defineExpose({ refresh: runQuery, startFirstTrack, updatePlayCount });

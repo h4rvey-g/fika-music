@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
+rust-version = "1.96.1"
 default-run = "fika-music"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -28,7 +29,6 @@ lofty = "0.24.0"
 walkdir = "2.5.0"
 thiserror = "2.0.18"
 rfd = "0.17.2"
-mime_guess = "2.0.5"
 oxc_allocator = "0.138.0"
 oxc_ast = "0.138.0"
 oxc_ast_visit = "0.138.0"

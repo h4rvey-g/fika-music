@@ -19,6 +19,8 @@ import type {
   SourceQuality,
 } from "../generated/bindings";
 import { dispatchAudioSourceRequest } from "./audio-source-api";
+import { firstSuccessfulWithTimeout } from "./async-utils";
+import { ExpiringCache } from "./expiring-cache";
 import { cancelSourceRequest } from "./plugin-api";
 
 export type {
@@ -44,10 +46,11 @@ export const ONLINE_DOWNLOAD_COMPLETED_EVENT = "online-music:download-completed"
 export type OnlinePlayback = {
   track: OnlineTrack;
   url: string;
-  mimeType: string;
   providerName: string;
-  channelId: string;
-  channelName: string;
+  candidate: Pick<
+    OnlineTrack["candidates"][number],
+    "id" | "pluginId" | "sourceId" | "channelId" | "channelName"
+  >;
   audioSourceId: string;
   quality: SourceQuality;
 };
@@ -398,28 +401,29 @@ async function raceCandidates(
         const playback = {
           track: options.track,
           url: outcome.response.data,
-          mimeType: mediaMimeType(outcome.response.data, quality),
           providerName: options.audioSource.name,
-          channelId: candidate.channelId,
-          channelName: candidate.channelName,
+          candidate: {
+            id: candidate.id,
+            pluginId: candidate.pluginId,
+            sourceId: candidate.sourceId,
+            channelId: candidate.channelId,
+            channelName: candidate.channelName,
+          },
           audioSourceId: options.audioSource.id,
           quality,
         } satisfies OnlinePlayback;
-        resolvedPlaybackCache.set(cacheKey, {
-          expiresAt: Date.now() + RESOLVED_URL_CACHE_MS,
-          playback,
-        });
+        resolvedPlaybackCache.set(cacheKey, playback);
         failedPlaybackCache.delete(failureKey);
         return playback;
       } catch (error) {
         resolvedPlaybackCache.delete(cacheKey);
         if (!isAbortError(error) && !branchAbort.signal.aborted) {
-          failedPlaybackCache.set(failureKey, Date.now() + FAILED_ATTEMPT_CACHE_MS);
+          failedPlaybackCache.set(failureKey, true);
         }
         throw error;
       }
     });
-    return await promiseAnyWithTimeout(attempts, timeoutMs, options.signal);
+    return await firstSuccessfulWithTimeout(attempts, timeoutMs, options.signal);
   } finally {
     branchAbort.abort();
     options.signal?.removeEventListener("abort", onAbort);
@@ -437,11 +441,14 @@ export function playbackAttemptKey(
 
 const RESOLVED_URL_CACHE_MS = 2 * 60_000;
 const FAILED_ATTEMPT_CACHE_MS = 5 * 60_000;
-const resolvedPlaybackCache = new Map<
-  string,
-  { expiresAt: number; playback: OnlinePlayback }
->();
-const failedPlaybackCache = new Map<string, number>();
+const resolvedPlaybackCache = new ExpiringCache<string, OnlinePlayback>(
+  RESOLVED_URL_CACHE_MS,
+  128,
+);
+const failedPlaybackCache = new ExpiringCache<string, true>(
+  FAILED_ATTEMPT_CACHE_MS,
+  256,
+);
 
 function resolvedPlaybackCacheKey(
   audioSourceId: string,
@@ -453,29 +460,15 @@ function resolvedPlaybackCacheKey(
 }
 
 function cachedPlayback(key: string) {
-  const cached = resolvedPlaybackCache.get(key);
-  if (!cached) return null;
-  if (cached.expiresAt <= Date.now()) {
-    resolvedPlaybackCache.delete(key);
-    return null;
-  }
-  return cached.playback;
+  return resolvedPlaybackCache.get(key) ?? null;
 }
 
 function isCachedFailure(key: string) {
-  const expiresAt = failedPlaybackCache.get(key);
-  if (!expiresAt) return false;
-  if (expiresAt <= Date.now()) {
-    failedPlaybackCache.delete(key);
-    return false;
-  }
-  return true;
+  return failedPlaybackCache.get(key) === true;
 }
 
 export function clearOnlinePlaybackFailures(trackKey: string) {
-  for (const key of failedPlaybackCache.keys()) {
-    if (key.startsWith(`${trackKey}::`)) failedPlaybackCache.delete(key);
-  }
+  failedPlaybackCache.deleteWhere((key) => key.startsWith(`${trackKey}::`));
 }
 
 export function invalidateOnlinePlaybackCaches() {
@@ -542,60 +535,6 @@ export function probeMediaUrl(
     audio.src = url;
     audio.load();
   });
-}
-
-async function promiseAnyWithTimeout<T>(
-  promises: Promise<T>[],
-  timeoutMs: number,
-  signal?: AbortSignal,
-) {
-  const timeout = new Promise<never>((_, reject) => {
-    const timer = window.setTimeout(() => reject(new Error("Source layer timed out.")), timeoutMs);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        window.clearTimeout(timer);
-        reject(abortError());
-      },
-      { once: true },
-    );
-  });
-  return Promise.race([firstSuccessful(promises), timeout]);
-}
-
-function firstSuccessful<T>(promises: Promise<T>[]) {
-  return new Promise<T>((resolve, reject) => {
-    if (!promises.length) {
-      reject(new Error("No playback candidates are available."));
-      return;
-    }
-    const errors: unknown[] = [];
-    promises.forEach((promise, index) => {
-      promise.then(resolve).catch((error) => {
-        errors[index] = error;
-        if (errors.filter((item) => item !== undefined).length === promises.length) {
-          reject(new Error("All playback candidates failed."));
-        }
-      });
-    });
-  });
-}
-
-function mediaMimeType(url: string, quality: SourceQuality) {
-  const pathname = url.split(/[?#]/, 1)[0]?.toLowerCase() ?? "";
-  if (pathname.endsWith(".flac") || quality === "flac" || quality === "flac24bit") {
-    return "audio/flac";
-  }
-  if (pathname.endsWith(".m4a") || pathname.endsWith(".mp4")) {
-    return "audio/mp4";
-  }
-  if (pathname.endsWith(".aac")) {
-    return "audio/aac";
-  }
-  if (pathname.endsWith(".ogg") || pathname.endsWith(".opus")) {
-    return "audio/ogg";
-  }
-  return "audio/mpeg";
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

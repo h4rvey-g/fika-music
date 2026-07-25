@@ -30,7 +30,6 @@ export type KugouOperationResult<T> = {
 export type KugouPlayback = {
   track: RemoteTrack;
   url: string;
-  mimeType: string;
   providerName: string;
   diagnostics: SourceDiagnostic[];
 };
@@ -122,30 +121,9 @@ export async function resolveKugouTrack(
   return {
     track,
     url: result.data,
-    mimeType: kugouMediaType(result.data, quality),
     providerName: "KuGou Music",
     diagnostics: result.diagnostics,
   };
-}
-
-function kugouMediaType(url: string, quality: SourceQuality) {
-  const path = url.split("?", 1)[0].toLowerCase();
-  if (path.endsWith(".m4a") || path.endsWith(".mp4")) {
-    return "audio/mp4";
-  }
-  if (path.endsWith(".aac")) {
-    return "audio/aac";
-  }
-  if (path.endsWith(".ogg") || path.endsWith(".opus")) {
-    return "audio/ogg";
-  }
-  if (path.endsWith(".mp3")) {
-    return "audio/mpeg";
-  }
-  if (path.endsWith(".flac") || quality === "flac" || quality === "flac24bit") {
-    return "audio/flac";
-  }
-  return "audio/mpeg";
 }
 
 function dispatch(request: SourceRequest, requestId?: string) {

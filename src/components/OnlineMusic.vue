@@ -18,6 +18,7 @@ import {
 import type { AudioSourceRecord } from "../generated/bindings";
 import OnlineTrackTable from "./OnlineTrackTable.vue";
 import { cancelSourceRequest } from "../lib/plugin-api";
+import { normalizeError } from "../lib/errors";
 import {
   cancelOnlineDownloadTask,
   createOnlineDownloadTask,
@@ -628,11 +629,6 @@ function dismissGlobalError() {
   detailRetryAvailable.value = false;
 }
 
-function normalizeError(error: unknown) {
-  if (typeof error === "string") return error;
-  if (error instanceof Error) return error.message;
-  return "Online Music request failed.";
-}
 </script>
 
 <template>

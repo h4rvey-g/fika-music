@@ -37,7 +37,6 @@ export type NeteaseOperationResult<T> = {
 export type NeteasePlayback = {
   track: RemoteTrack;
   url: string;
-  mimeType: string;
   providerName: string;
   diagnostics: SourceDiagnostic[];
 };
@@ -159,24 +158,9 @@ export async function resolveNeteaseTrack(
   return {
     track,
     url: result.data,
-    mimeType: neteaseMediaType(result.data, quality),
     providerName: "NetEase Cloud Music",
     diagnostics: result.diagnostics,
   };
-}
-
-function neteaseMediaType(url: string, quality: SourceQuality) {
-  const path = url.split("?", 1)[0].toLowerCase();
-  if (path.endsWith(".m4a") || path.endsWith(".mp4")) {
-    return "audio/mp4";
-  }
-  if (path.endsWith(".aac")) {
-    return "audio/aac";
-  }
-  if (path.endsWith(".flac") || quality === "flac" || quality === "flac24bit") {
-    return "audio/flac";
-  }
-  return "audio/mpeg";
 }
 
 function dispatch(request: SourceRequest, requestId?: string) {

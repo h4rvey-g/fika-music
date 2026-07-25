@@ -139,7 +139,6 @@ describe("NeteaseSource", () => {
     pluginApiMocks.listPlugins.mockResolvedValue([pluginRecord()]);
     audioSourceApiMocks.resolveAudioSourceTrack.mockResolvedValue({
       url: "https://cdn.example.test/Test%20Track.mp3",
-      mimeType: "audio/mpeg",
       diagnostics: [
         { sourceId: "source-one", level: "info", message: "resolved through audio source" },
       ],
@@ -221,7 +220,6 @@ describe("NeteaseSource", () => {
     expect(wrapper.emitted("playbackReady")?.[0]?.[0]).toMatchObject({
       track,
       url: "https://cdn.example.test/Test%20Track.mp3",
-      mimeType: "audio/mpeg",
       providerName: "Source One",
     });
     expect(wrapper.text()).toContain("resolved through audio source");
@@ -263,7 +261,6 @@ describe("NeteaseSource", () => {
         finishRequest = () =>
           resolve({
             url: "https://cdn.example.test/cancelled.mp3",
-            mimeType: "audio/mpeg",
             diagnostics: [],
           });
       }),

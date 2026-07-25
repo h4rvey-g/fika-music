@@ -72,7 +72,7 @@ export type LyricResponse = { lyric: string | null, tlyric: string | null, rlyri
 
 export type LyricsSource = "embedded" | "sidecar" | "network";
 
-export type MediaSource = { filePath: string, mimeType: string, };
+export type MediaSource = { filePath: string, };
 
 export type MetadataLookupItemResult = { trackId: number, title: string, updated: boolean, message: string, };
 

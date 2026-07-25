@@ -19,6 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use walkdir::WalkDir;
 
+mod account_commands;
 mod album_art;
 pub mod audio_source_system;
 mod database;
@@ -29,10 +30,22 @@ mod lx_js_runtime;
 pub mod lyrics;
 pub mod netease;
 pub mod online_download;
+mod online_execution;
 pub mod online_music;
+mod online_settings_commands;
+mod playback_commands;
 pub mod plugin_system;
+mod registry_support;
+mod source_request_registry;
 pub mod source_runtime;
 
+use account_commands::{
+    cancel_kugou_qr_login, cancel_netease_qr_login, disconnect_kugou_account,
+    disconnect_netease_account, list_kugou_accounts, list_netease_accounts,
+    list_netease_mutation_audit, poll_kugou_qr_login, poll_netease_qr_login, start_kugou_qr_login,
+    start_netease_qr_login,
+};
+pub use account_commands::{KugouCommandError, NeteaseCommandError};
 pub use album_art::{
     AlbumArtSettings, AlbumArtTaskStatus, AlbumCoverCandidate, AlbumCoverResult, AlbumCoverStatus,
     LibraryTaskState, MetadataLookupItemResult, MetadataLookupTaskStatus,
@@ -42,6 +55,13 @@ pub use library::{
     LibraryQueryRequest, LibraryQueueTrack, LibrarySelectionRange, LibrarySelectionRequest,
     LibrarySortDirection, LibrarySortField, LibraryTextField, LibraryViewItem, LibraryViewItemKind,
     LibraryViewRange,
+};
+use online_settings_commands::{
+    clear_online_search_history, get_online_music_settings, select_online_download_directory,
+    update_online_music_settings,
+};
+use playback_commands::{
+    local_track_media_source, local_track_playback_details, resolve_remote_track_lyrics,
 };
 
 const SCAN_PROGRESS_EVENT: &str = "library:scan-progress";
@@ -189,6 +209,8 @@ enum AppError {
     OnlineMusic(#[from] online_music::OnlineMusicError),
     #[error("online download error: {0}")]
     OnlineDownload(#[from] online_download::OnlineDownloadError),
+    #[error("online execution error: {0}")]
+    OnlineExecution(#[from] online_execution::OnlineExecutionError),
 }
 
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
@@ -241,7 +263,6 @@ struct LocalTrackDraft {
 #[ts(export_to = "bindings.ts")]
 pub struct MediaSource {
     file_path: String,
-    mime_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
@@ -290,9 +311,10 @@ struct AppState {
     library: Arc<Mutex<library::LibraryService>>,
     album_art: Arc<album_art::AlbumArtService>,
     scan_status: Mutex<ScanStatus>,
-    source_requests: Mutex<BTreeMap<String, source_runtime::SourceCancellationToken>>,
+    source_requests: source_request_registry::SourceRequestRegistry,
     online_download_requests: Mutex<BTreeMap<String, source_runtime::SourceCancellationToken>>,
     online_music_cache: Arc<online_music::OnlineMusicCache>,
+    online_executor: Arc<online_execution::OnlineExecutor>,
     audio_source_registry: Mutex<AudioSourceRegistry>,
     plugin_registry: Mutex<PluginRegistry>,
     netease_bridge: Arc<netease::NeteaseServiceBridge>,
@@ -346,6 +368,7 @@ impl AppState {
             Arc::clone(&db),
             Arc::clone(&library),
         )?);
+        let online_executor = Arc::new(online_execution::OnlineExecutor::new(4)?);
         let source_host = Arc::new(source_runtime::DefaultSourceHost::new(
             Duration::from_secs(8),
             4 * 1024 * 1024,
@@ -398,9 +421,10 @@ impl AppState {
             library,
             album_art,
             scan_status: Mutex::new(ScanStatus::default()),
-            source_requests: Mutex::new(BTreeMap::new()),
+            source_requests: source_request_registry::SourceRequestRegistry::default(),
             online_download_requests: Mutex::new(BTreeMap::new()),
             online_music_cache: Arc::new(online_music::OnlineMusicCache::default()),
+            online_executor,
             audio_source_registry: Mutex::new(audio_source_registry),
             plugin_registry: Mutex::new(plugin_registry),
             netease_bridge,
@@ -427,37 +451,14 @@ fn register_source_request(
     state: &AppState,
     request_id: Option<&str>,
 ) -> RemoteCommandResult<source_runtime::SourceCancellationToken> {
-    let cancellation = source_runtime::SourceCancellationToken::default();
-    let Some(request_id) = request_id
-        .map(str::trim)
-        .filter(|request_id| !request_id.is_empty())
-    else {
-        return Ok(cancellation);
-    };
-
-    let mut requests = state
+    state
         .source_requests
-        .lock()
-        .map_err(|_| remote_error("source request registry lock was poisoned"))?;
-    if requests.contains_key(request_id) {
-        return Err(remote_error(format!(
-            "source request id is already active: {request_id}"
-        )));
-    }
-    requests.insert(request_id.to_owned(), cancellation.clone());
-    Ok(cancellation)
+        .register(request_id)
+        .map_err(|error| remote_error(error.to_string()))
 }
 
 fn unregister_source_request(state: &AppState, request_id: Option<&str>) {
-    let Some(request_id) = request_id
-        .map(str::trim)
-        .filter(|request_id| !request_id.is_empty())
-    else {
-        return;
-    };
-    if let Ok(mut requests) = state.source_requests.lock() {
-        requests.remove(request_id);
-    }
+    state.source_requests.unregister(request_id);
 }
 
 #[cfg(test)]
@@ -483,71 +484,10 @@ where
 
 #[tauri::command]
 fn cancel_source_request(state: State<'_, AppState>, request_id: String) -> CommandResult<bool> {
-    let request_id = request_id.trim();
-    if request_id.is_empty() {
-        return Ok(false);
-    }
-    let requests = state
+    state
         .source_requests
-        .lock()
-        .map_err(|_| "source request registry lock was poisoned".to_owned())?;
-    let Some(cancellation) = requests.get(request_id) else {
-        return Ok(false);
-    };
-    cancellation.cancel();
-    Ok(true)
-}
-
-#[tauri::command]
-fn get_online_music_settings(
-    state: State<'_, AppState>,
-) -> CommandResult<online_music::OnlineMusicSettings> {
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| "database lock was poisoned".to_owned())?;
-    online_music::load_settings(&db).map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn update_online_music_settings(
-    state: State<'_, AppState>,
-    settings: online_music::OnlineMusicSettings,
-) -> CommandResult<online_music::OnlineMusicSettings> {
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| "database lock was poisoned".to_owned())?;
-    online_music::save_settings(&db, &settings, now_timestamp())
-        .map_err(|error| error.to_string())?;
-    state.online_music_cache.invalidate();
-    Ok(settings)
-}
-
-#[tauri::command]
-fn clear_online_search_history(state: State<'_, AppState>) -> CommandResult<()> {
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| "database lock was poisoned".to_owned())?;
-    online_music::clear_search_history(&db).map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-async fn select_online_download_directory(
-    initial_directory: Option<String>,
-) -> CommandResult<Option<String>> {
-    let mut dialog =
-        rfd::AsyncFileDialog::new().set_title("Choose an Online Music download folder");
-    if let Some(directory) = initial_directory
-        .as_deref()
-        .map(str::trim)
-        .filter(|directory| Path::new(directory).is_dir())
-    {
-        dialog = dialog.set_directory(directory);
-    }
-    let folder = dialog.pick_folder().await;
-    Ok(folder.map(|handle| handle.path().to_string_lossy().into_owned()))
+        .cancel(&request_id)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -976,7 +916,7 @@ fn download_online_item(
     item: &online_download::OnlineDownloadItem,
     cancellation: &source_runtime::SourceCancellationToken,
 ) -> Result<(PathBuf, u64, Option<String>), OnlineItemDownloadError> {
-    let (task, settings, channels, audio_sources) = {
+    let (task, settings, channels, audio_sources, client) = {
         let state = app.state::<AppState>();
         let db = state.db.lock().map_err(|_| {
             OnlineItemDownloadError::Message("database lock was poisoned".to_owned())
@@ -998,7 +938,8 @@ fn download_online_item(
                 OnlineItemDownloadError::Message("audio source lock was poisoned".to_owned())
             })?
             .records();
-        (task, settings, channels, audio_sources)
+        let client = state.online_executor.http_client();
+        (task, settings, channels, audio_sources, client)
     };
     let allowed_channels = channels
         .into_iter()
@@ -1035,15 +976,9 @@ fn download_online_item(
         return Err(OnlineItemDownloadError::Cancelled);
     }
 
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(15 * 60))
-        .build()
-        .map_err(|error| {
-            OnlineItemDownloadError::Message(format!("download client failed: {error}"))
-        })?;
     let mut response = client
         .get(&resolved.url)
+        .timeout(Duration::from_secs(15 * 60))
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
         .map_err(|error| {
@@ -1254,12 +1189,12 @@ fn race_download_candidates(
     deadline: Instant,
     cancellation: &source_runtime::SourceCancellationToken,
 ) -> Result<Option<ResolvedOnlineDownload>, OnlineItemDownloadError> {
-    let prepared = {
+    let (prepared, executor) = {
         let state = app.state::<AppState>();
         let registry = state.audio_source_registry.lock().map_err(|_| {
             OnlineItemDownloadError::Message("audio source lock was poisoned".to_owned())
         })?;
-        candidates
+        let prepared = candidates
             .iter()
             .filter_map(|candidate| {
                 let request = download_music_url_request(candidate, quality);
@@ -1268,47 +1203,54 @@ fn race_download_candidates(
                     .ok()
                     .map(|dispatch| (dispatch, request, candidate.channel_name.clone()))
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (prepared, Arc::clone(&state.online_executor))
     };
     if prepared.is_empty() {
         return Ok(None);
     }
     let (sender, receiver) = std::sync::mpsc::channel();
-    let mut tokens = Vec::with_capacity(prepared.len());
+    let candidate_count = prepared.len();
+    let race_cancellation = source_runtime::SourceCancellationToken::default();
+    let client = executor.http_client();
     for (dispatch, request, channel_name) in prepared {
         let sender = sender.clone();
-        let token = source_runtime::SourceCancellationToken::default();
-        tokens.push(token.clone());
-        std::thread::spawn(move || {
-            let result = dispatch
-                .execute(request, token.clone())
-                .ok()
-                .and_then(|outcome| match outcome.response {
-                    source_runtime::SourceResponse::MusicUrl(url) => Some(url),
-                    _ => None,
-                })
-                .filter(|url| probe_download_url(url, deadline));
-            let _ = sender.send(result.map(|url| ResolvedOnlineDownload {
-                url,
-                quality,
-                channel_name,
-            }));
-        });
+        let token = race_cancellation.clone();
+        let client = client.clone();
+        executor.spawn(
+            move || {
+                if token.is_cancelled() {
+                    return None;
+                }
+                dispatch
+                    .execute(request, token.clone())
+                    .ok()
+                    .and_then(|outcome| match outcome.response {
+                        source_runtime::SourceResponse::MusicUrl(url) => Some(url),
+                        _ => None,
+                    })
+                    .filter(|url| probe_download_url(&client, url, deadline, &token))
+                    .map(|url| ResolvedOnlineDownload {
+                        url,
+                        quality,
+                        channel_name,
+                    })
+            },
+            move |result| {
+                let _ = sender.send(result.ok().flatten());
+            },
+        );
     }
     drop(sender);
     let mut completed = 0;
-    while completed < tokens.len() && Instant::now() < deadline {
+    while completed < candidate_count && Instant::now() < deadline {
         if cancellation.is_cancelled() {
-            for token in &tokens {
-                token.cancel();
-            }
+            race_cancellation.cancel();
             return Err(OnlineItemDownloadError::Cancelled);
         }
         match receiver.recv_timeout(Duration::from_millis(50)) {
             Ok(Some(result)) => {
-                for token in &tokens {
-                    token.cancel();
-                }
+                race_cancellation.cancel();
                 return Ok(Some(result));
             }
             Ok(None) => completed += 1,
@@ -1316,9 +1258,7 @@ fn race_download_candidates(
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-    for token in &tokens {
-        token.cancel();
-    }
+    race_cancellation.cancel();
     Ok(None)
 }
 
@@ -1365,26 +1305,25 @@ fn download_music_url_request(
     }
 }
 
-fn probe_download_url(url: &str, deadline: Instant) -> bool {
+fn probe_download_url(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    deadline: Instant,
+    cancellation: &source_runtime::SourceCancellationToken,
+) -> bool {
     let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
+    if remaining.is_zero() || cancellation.is_cancelled() {
         return false;
     }
-    let Ok(client) = reqwest::blocking::Client::builder()
-        .connect_timeout(remaining.min(Duration::from_secs(5)))
-        .timeout(remaining)
-        .build()
-    else {
-        return false;
-    };
     let Ok(mut response) = client
         .get(url)
+        .timeout(remaining)
         .header(reqwest::header::RANGE, "bytes=0-1023")
         .send()
     else {
         return false;
     };
-    if !response.status().is_success() {
+    if !response.status().is_success() || cancellation.is_cancelled() {
         return false;
     }
     let mut byte = [0_u8; 1];
@@ -1673,39 +1612,58 @@ fn run_online_search(
         online_music::OnlineSearchSection::Albums,
         online_music::OnlineSearchSection::Playlists,
     ];
-    std::thread::scope(|scope| {
-        for section in sections {
-            let cancellation = cancellation.clone();
-            scope.spawn(move || {
-                if cancellation.is_cancelled() {
-                    return;
-                }
-                let result = online_music_section(state, keyword, section, 1, 20, cancellation)
-                    .unwrap_or_else(|message| online_music::OnlineSearchSectionResult {
-                        section,
-                        data: empty_online_search_data(section),
-                        failures: vec![online_music::OnlineChannelFailure {
-                            channel_id: "host".to_owned(),
-                            channel_name: "Fika Music".to_owned(),
-                            message,
-                        }],
-                        supported_channels: 0,
-                        completed_channels: 0,
-                        has_more: false,
-                    });
-                let mut summary = result;
-                summary.has_more |= summary.data.len() > 5;
-                summary.data.truncate(5);
-                let _ = app.emit(
-                    ONLINE_SEARCH_SECTION_EVENT,
-                    online_music::OnlineSearchSectionEvent {
-                        search_id: search_id.to_owned(),
-                        result: summary,
-                    },
-                );
-            });
+    let worker_results = state.online_executor.map(sections.to_vec(), |section| {
+        let cancellation = cancellation.clone();
+        if cancellation.is_cancelled() {
+            return;
         }
+        let result = online_music_section(state, keyword, section, 1, 20, cancellation)
+            .unwrap_or_else(|message| online_music::OnlineSearchSectionResult {
+                section,
+                data: empty_online_search_data(section),
+                failures: vec![online_music::OnlineChannelFailure {
+                    channel_id: "host".to_owned(),
+                    channel_name: "Fika Music".to_owned(),
+                    message,
+                }],
+                supported_channels: 0,
+                completed_channels: 0,
+                has_more: false,
+            });
+        let mut summary = result;
+        summary.has_more |= summary.data.len() > 5;
+        summary.data.truncate(5);
+        let _ = app.emit(
+            ONLINE_SEARCH_SECTION_EVENT,
+            online_music::OnlineSearchSectionEvent {
+                search_id: search_id.to_owned(),
+                result: summary,
+            },
+        );
     });
+    for (section, worker_result) in sections.into_iter().zip(worker_results) {
+        let Err(message) = worker_result else {
+            continue;
+        };
+        let _ = app.emit(
+            ONLINE_SEARCH_SECTION_EVENT,
+            online_music::OnlineSearchSectionEvent {
+                search_id: search_id.to_owned(),
+                result: online_music::OnlineSearchSectionResult {
+                    section,
+                    data: empty_online_search_data(section),
+                    failures: vec![online_music::OnlineChannelFailure {
+                        channel_id: "host".to_owned(),
+                        channel_name: "Fika Music".to_owned(),
+                        message,
+                    }],
+                    supported_channels: 0,
+                    completed_channels: 0,
+                    has_more: false,
+                },
+            },
+        );
+    }
 }
 
 #[tauri::command]
@@ -1976,41 +1934,28 @@ where
             })
             .collect::<Vec<_>>()
     };
-    std::thread::scope(|scope| {
-        let handles = prepared
-            .into_iter()
-            .map(|(channel, request, dispatch)| {
-                let cancellation = cancellation.clone();
-                let cache = Arc::clone(&state.online_music_cache);
-                scope.spawn(move || {
-                    let result = dispatch.and_then(|dispatch| {
-                        if cancellation.is_cancelled() {
-                            return Err("request cancelled".to_owned());
-                        }
-                        let cache_key = serde_json::to_string(&(
-                            channel.plugin_id.as_str(),
-                            channel.source_id.as_str(),
-                            &request,
-                        ))
-                        .map_err(|error| error.to_string())?;
-                        if let Some(cached) = cache.get(&cache_key) {
-                            return Ok(cached);
-                        }
-                        let outcome = dispatch
-                            .execute(request, cancellation)
-                            .map_err(|error| error.to_string())?;
-                        cache.insert(cache_key, outcome.clone());
-                        Ok(outcome)
-                    });
-                    (channel, result)
-                })
+    let worker_channels = prepared
+        .iter()
+        .map(|(channel, _, _)| channel.clone())
+        .collect::<Vec<_>>();
+    let cache = Arc::clone(&state.online_music_cache);
+    let results = state
+        .online_executor
+        .map(prepared, move |(channel, request, dispatch)| {
+            let cancellation = cancellation.clone();
+            dispatch.and_then(|dispatch| {
+                execute_cached_plugin_request(&cache, &channel, request, cancellation, dispatch)
+                    .map_err(|error| error.to_string())
             })
-            .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .filter_map(|handle| handle.join().ok())
-            .collect()
-    })
+        });
+    worker_channels
+        .into_iter()
+        .zip(results)
+        .map(|(channel, result)| match result {
+            Ok(result) => (channel, result),
+            Err(message) => (channel, Err(message)),
+        })
+        .collect()
 }
 
 fn candidate_channel(
@@ -2032,6 +1977,11 @@ fn candidate_channel(
     }
 }
 
+type CandidateCluster<Candidate, Sample> = (Vec<Candidate>, Option<Sample>);
+type AlbumCandidateSample = (Option<u32>, Vec<online_music::OnlineTrack>);
+type AlbumCandidateCluster =
+    CandidateCluster<online_music::OnlineAlbumCandidate, AlbumCandidateSample>;
+
 fn disambiguate_artist_group(
     state: &AppState,
     group: Vec<online_music::OnlineArtistCandidate>,
@@ -2041,50 +1991,44 @@ fn disambiguate_artist_group(
     if group.len() <= 1 {
         return vec![group];
     }
-    let samples = std::thread::scope(|scope| {
-        group
-            .iter()
-            .cloned()
-            .map(|candidate| {
-                scope.spawn(move || {
-                    let tracks =
-                        artist_candidate_track_page(state, &candidate, 10)
-                            .ok()
-                            .map(|response| {
-                                online_music::merge_tracks(
-                                    response
-                                        .list
-                                        .into_iter()
-                                        .enumerate()
-                                        .map(|(index, track)| {
-                                            online_music::OnlineTrackCandidate::from_source(
-                                                &candidate_channel(
-                                                    &candidate.channel_id,
-                                                    &candidate.plugin_id,
-                                                    &candidate.source_id,
-                                                    &candidate.channel_name,
-                                                    source_runtime::SourceAction::ArtistTopTracks,
-                                                ),
-                                                track,
-                                                index as u32 + 1,
-                                            )
-                                        })
-                                        .collect(),
-                                    &settings.channel_priority,
+    let original_candidates = group.clone();
+    let samples = state
+        .online_executor
+        .map(group, |candidate| {
+            let tracks = artist_candidate_track_page(state, &candidate, 10)
+                .ok()
+                .map(|response| {
+                    online_music::merge_tracks(
+                        response
+                            .list
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, track)| {
+                                online_music::OnlineTrackCandidate::from_source(
+                                    &candidate_channel(
+                                        &candidate.channel_id,
+                                        &candidate.plugin_id,
+                                        &candidate.source_id,
+                                        &candidate.channel_name,
+                                        source_runtime::SourceAction::ArtistTopTracks,
+                                    ),
+                                    track,
+                                    index as u32 + 1,
                                 )
-                            });
-                    (candidate, tracks)
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .filter_map(|handle| handle.join().ok())
-            .collect::<Vec<_>>()
-    });
-    let mut clusters: Vec<(
-        Vec<online_music::OnlineArtistCandidate>,
-        Option<Vec<online_music::OnlineTrack>>,
-    )> = Vec::new();
+                            })
+                            .collect(),
+                        &settings.channel_priority,
+                    )
+                });
+            (candidate, tracks)
+        })
+        .into_iter()
+        .zip(original_candidates)
+        .map(|(result, candidate)| result.unwrap_or((candidate, None)))
+        .collect::<Vec<_>>();
+    let mut clusters: Vec<
+        CandidateCluster<online_music::OnlineArtistCandidate, Vec<online_music::OnlineTrack>>,
+    > = Vec::new();
     for (candidate, sample) in samples {
         let matching = sample.as_ref().and_then(|sample| {
             clusters.iter().position(|(_, existing)| {
@@ -2111,49 +2055,42 @@ fn disambiguate_album_group(
     if group.len() <= 1 {
         return vec![group];
     }
-    let samples = std::thread::scope(|scope| {
-        group
-            .iter()
-            .cloned()
-            .map(|candidate| {
-                scope.spawn(move || {
-                    let tracks = album_candidate_track_page(state, &candidate, 1, 30)
-                        .ok()
-                        .map(|response| {
-                            online_music::merge_tracks(
-                                response
-                                    .list
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(index, track)| {
-                                        online_music::OnlineTrackCandidate::from_source(
-                                            &candidate_channel(
-                                                &candidate.channel_id,
-                                                &candidate.plugin_id,
-                                                &candidate.source_id,
-                                                &candidate.channel_name,
-                                                source_runtime::SourceAction::AlbumRead,
-                                            ),
-                                            track,
-                                            index as u32 + 1,
-                                        )
-                                    })
-                                    .collect(),
-                                &settings.channel_priority,
-                            )
-                        });
-                    (candidate, tracks)
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .filter_map(|handle| handle.join().ok())
-            .collect::<Vec<_>>()
-    });
-    let mut clusters: Vec<(
-        Vec<online_music::OnlineAlbumCandidate>,
-        Option<(Option<u32>, Vec<online_music::OnlineTrack>)>,
-    )> = Vec::new();
+    let original_candidates = group.clone();
+    let samples = state
+        .online_executor
+        .map(group, |candidate| {
+            let tracks = album_candidate_track_page(state, &candidate, 1, 30)
+                .ok()
+                .map(|response| {
+                    online_music::merge_tracks(
+                        response
+                            .list
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, track)| {
+                                online_music::OnlineTrackCandidate::from_source(
+                                    &candidate_channel(
+                                        &candidate.channel_id,
+                                        &candidate.plugin_id,
+                                        &candidate.source_id,
+                                        &candidate.channel_name,
+                                        source_runtime::SourceAction::AlbumRead,
+                                    ),
+                                    track,
+                                    index as u32 + 1,
+                                )
+                            })
+                            .collect(),
+                        &settings.channel_priority,
+                    )
+                });
+            (candidate, tracks)
+        })
+        .into_iter()
+        .zip(original_candidates)
+        .map(|(result, candidate)| result.unwrap_or((candidate, None)))
+        .collect::<Vec<_>>();
+    let mut clusters: Vec<AlbumCandidateCluster> = Vec::new();
     for (candidate, sample) in samples {
         let sample = sample.map(|tracks| (candidate.release_year, tracks));
         let matching = sample.as_ref().and_then(|(year, tracks)| {
@@ -2191,22 +2128,41 @@ fn dispatch_candidate_request_typed(
     request: source_runtime::SourceRequest,
     cancellation: source_runtime::SourceCancellationToken,
 ) -> Result<source_runtime::SourceRequestOutcome, PluginSystemError> {
-    let cache_key = serde_json::to_string(&(
-        channel.plugin_id.as_str(),
-        channel.source_id.as_str(),
-        &request,
-    ))?;
-    if let Some(cached) = state.online_music_cache.get(&cache_key) {
-        return Ok(cached);
-    }
     let dispatch = {
         let registry = state.plugin_registry.lock().map_err(|_| {
             PluginSystemError::Package("plugin registry lock was poisoned".to_owned())
         })?;
         registry.prepare_action(&channel.plugin_id, &channel.source_id, request.action())?
     };
+    execute_cached_plugin_request(
+        &state.online_music_cache,
+        channel,
+        request,
+        cancellation,
+        dispatch,
+    )
+}
+
+fn execute_cached_plugin_request(
+    cache: &online_music::OnlineMusicCache,
+    channel: &online_music::OnlineChannel,
+    request: source_runtime::SourceRequest,
+    cancellation: source_runtime::SourceCancellationToken,
+    dispatch: plugin_system::PreparedPluginRequest,
+) -> Result<source_runtime::SourceRequestOutcome, PluginSystemError> {
+    if cancellation.is_cancelled() {
+        return Err(PluginSystemError::Package("request cancelled".to_owned()));
+    }
+    let cache_key = serde_json::to_string(&(
+        channel.plugin_id.as_str(),
+        channel.source_id.as_str(),
+        &request,
+    ))?;
+    if let Some(cached) = cache.get(&cache_key) {
+        return Ok(cached);
+    }
     let outcome = dispatch.execute(request, cancellation)?;
-    state.online_music_cache.insert(cache_key, outcome.clone());
+    cache.insert(cache_key, outcome.clone());
     Ok(outcome)
 }
 
@@ -2585,164 +2541,6 @@ fn parse_audio_source_capabilities(
             })
         })
         .collect()
-}
-
-#[derive(Debug, Clone, Serialize, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export_to = "bindings.ts")]
-pub struct NeteaseCommandError {
-    code: String,
-    message: String,
-}
-
-impl From<netease::NeteaseBridgeError> for NeteaseCommandError {
-    fn from(error: netease::NeteaseBridgeError) -> Self {
-        Self {
-            code: error.code().to_owned(),
-            message: error.to_string(),
-        }
-    }
-}
-
-async fn run_netease_task<T, F>(task: F) -> Result<T, NeteaseCommandError>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, netease::NeteaseBridgeError> + Send + 'static,
-{
-    tauri::async_runtime::spawn_blocking(task)
-        .await
-        .map_err(|error| NeteaseCommandError {
-            code: "bridge-failure".to_owned(),
-            message: format!("NetEase bridge task failed: {error}"),
-        })?
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-async fn start_netease_qr_login(
-    state: State<'_, AppState>,
-) -> Result<netease::NeteaseQrLoginStart, NeteaseCommandError> {
-    let bridge = Arc::clone(&state.netease_bridge);
-    run_netease_task(move || bridge.start_qr_login()).await
-}
-
-#[tauri::command]
-async fn poll_netease_qr_login(
-    state: State<'_, AppState>,
-    session_id: String,
-) -> Result<netease::NeteaseQrLoginPoll, NeteaseCommandError> {
-    let bridge = Arc::clone(&state.netease_bridge);
-    run_netease_task(move || bridge.poll_qr_login(session_id.trim())).await
-}
-
-#[tauri::command]
-async fn cancel_netease_qr_login(
-    state: State<'_, AppState>,
-    session_id: String,
-) -> Result<(), NeteaseCommandError> {
-    let bridge = Arc::clone(&state.netease_bridge);
-    run_netease_task(move || bridge.cancel_qr_login(session_id.trim())).await
-}
-
-#[tauri::command]
-fn list_netease_accounts(
-    state: State<'_, AppState>,
-) -> Result<Vec<netease::NeteaseAccount>, NeteaseCommandError> {
-    state.netease_bridge.accounts().map_err(Into::into)
-}
-
-#[tauri::command]
-async fn disconnect_netease_account(
-    state: State<'_, AppState>,
-    account_ref: String,
-) -> Result<(), NeteaseCommandError> {
-    let bridge = Arc::clone(&state.netease_bridge);
-    run_netease_task(move || bridge.disconnect_account(account_ref.trim())).await
-}
-
-#[tauri::command]
-fn list_netease_mutation_audit(
-    state: State<'_, AppState>,
-    account_ref: Option<String>,
-    limit: Option<u32>,
-) -> Result<Vec<netease::NeteaseMutationAudit>, NeteaseCommandError> {
-    state
-        .netease_bridge
-        .mutation_audit(account_ref.as_deref(), limit.unwrap_or(50))
-        .map_err(Into::into)
-}
-
-#[derive(Debug, Clone, Serialize, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export_to = "bindings.ts")]
-pub struct KugouCommandError {
-    code: String,
-    message: String,
-}
-
-impl From<kugou::KugouBridgeError> for KugouCommandError {
-    fn from(error: kugou::KugouBridgeError) -> Self {
-        Self {
-            code: error.code().to_owned(),
-            message: error.to_string(),
-        }
-    }
-}
-
-async fn run_kugou_task<T, F>(task: F) -> Result<T, KugouCommandError>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, kugou::KugouBridgeError> + Send + 'static,
-{
-    tauri::async_runtime::spawn_blocking(task)
-        .await
-        .map_err(|error| KugouCommandError {
-            code: "bridge-failure".to_owned(),
-            message: format!("KuGou bridge task failed: {error}"),
-        })?
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-async fn start_kugou_qr_login(
-    state: State<'_, AppState>,
-) -> Result<kugou::KugouQrLoginStart, KugouCommandError> {
-    let bridge = Arc::clone(&state.kugou_bridge);
-    run_kugou_task(move || bridge.start_qr_login()).await
-}
-
-#[tauri::command]
-async fn poll_kugou_qr_login(
-    state: State<'_, AppState>,
-    session_id: String,
-) -> Result<kugou::KugouQrLoginPoll, KugouCommandError> {
-    let bridge = Arc::clone(&state.kugou_bridge);
-    run_kugou_task(move || bridge.poll_qr_login(session_id.trim())).await
-}
-
-#[tauri::command]
-async fn cancel_kugou_qr_login(
-    state: State<'_, AppState>,
-    session_id: String,
-) -> Result<(), KugouCommandError> {
-    let bridge = Arc::clone(&state.kugou_bridge);
-    run_kugou_task(move || bridge.cancel_qr_login(session_id.trim())).await
-}
-
-#[tauri::command]
-fn list_kugou_accounts(
-    state: State<'_, AppState>,
-) -> Result<Vec<kugou::KugouAccount>, KugouCommandError> {
-    state.kugou_bridge.accounts().map_err(Into::into)
-}
-
-#[tauri::command]
-async fn disconnect_kugou_account(
-    state: State<'_, AppState>,
-    account_ref: String,
-) -> Result<(), KugouCommandError> {
-    let bridge = Arc::clone(&state.kugou_bridge);
-    run_kugou_task(move || bridge.disconnect_account(account_ref.trim())).await
 }
 
 #[tauri::command]
@@ -3489,86 +3287,6 @@ fn increment_local_track_play_count(
     Ok(play_count)
 }
 
-#[tauri::command]
-fn local_track_media_source(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    track_id: i64,
-) -> CommandResult<MediaSource> {
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| AppError::StatePoisoned("db").to_string())?;
-
-    let file_path: String = db
-        .query_row(
-            "SELECT file_path FROM local_tracks WHERE id = ?1",
-            params![track_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| AppError::TrackNotFound(track_id).to_string())?;
-
-    if !Path::new(&file_path).is_file() {
-        return Err(AppError::TrackFileMissing(file_path).to_string());
-    }
-
-    app.asset_protocol_scope()
-        .allow_file(&file_path)
-        .map_err(|error| error.to_string())?;
-
-    let mime_type = mime_guess::from_path(&file_path)
-        .first_or_octet_stream()
-        .essence_str()
-        .to_owned();
-
-    Ok(MediaSource {
-        file_path,
-        mime_type,
-    })
-}
-
-#[tauri::command]
-async fn local_track_playback_details(
-    state: State<'_, AppState>,
-    track_id: i64,
-) -> CommandResult<lyrics::LocalTrackPlaybackDetails> {
-    let track = {
-        let db = state
-            .db
-            .lock()
-            .map_err(|_| AppError::StatePoisoned("db").to_string())?;
-        track_by_id(&db, track_id)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| AppError::TrackNotFound(track_id).to_string())?
-    };
-    let path = PathBuf::from(&track.file_path);
-    if !path.is_file() {
-        return Err(AppError::TrackFileMissing(track.file_path).to_string());
-    }
-    let query = lyrics::TrackLyricsQuery::new(
-        track.title,
-        track.artist,
-        track.album,
-        track.duration_seconds,
-    );
-
-    tauri::async_runtime::spawn_blocking(move || lyrics::resolve_local_track(&path, &query))
-        .await
-        .map_err(|error| format!("playback details task failed: {error}"))
-}
-
-#[tauri::command]
-async fn resolve_remote_track_lyrics(
-    query: lyrics::TrackLyricsQuery,
-) -> CommandResult<Option<lyrics::ResolvedLyrics>> {
-    tauri::async_runtime::spawn_blocking(move || lyrics::resolve_network_lyrics(&query))
-        .await
-        .map_err(|error| format!("remote lyrics task failed: {error}"))?
-        .map_err(|error| error.to_string())
-}
-
 fn run_library_scan(app: AppHandle, folder: PathBuf) {
     let result = {
         let state = app.state::<AppState>();
@@ -4257,22 +3975,14 @@ mod tests {
         }
         assert!(started.load(Ordering::Acquire));
 
-        let cancellation = state
+        state
             .source_requests
-            .lock()
-            .expect("request registry should not be poisoned")
-            .get("request-1")
-            .cloned()
-            .expect("in-flight request should be registered");
-        cancellation.cancel();
+            .cancel("request-1")
+            .expect("in-flight request should cancel");
 
         let result = handle.join().expect("remote request task should not panic");
         assert!(result.is_err());
-        assert!(state
-            .source_requests
-            .lock()
-            .expect("request registry should not be poisoned")
-            .is_empty());
+        assert!(state.source_requests.is_empty());
         fs::remove_dir_all(root).expect("test temp directory should be removed");
     }
 

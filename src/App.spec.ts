@@ -1,4 +1,5 @@
-import { flushPromises, mount } from "@vue/test-utils";
+import { config, flushPromises, mount } from "@vue/test-utils";
+import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent } from "vue";
 import App from "./App.vue";
@@ -182,6 +183,14 @@ describe("application shell", () => {
     vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
     vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
     tauriMocks.listen.mockResolvedValue(vi.fn());
+    config.global.plugins = [[
+      VueQueryPlugin,
+      {
+        queryClient: new QueryClient({
+          defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+        }),
+      },
+    ]];
     tauriMocks.invoke.mockImplementation((command: string) => {
       if (command === "get_scan_status") {
         return Promise.resolve({
@@ -230,6 +239,7 @@ describe("application shell", () => {
 
   afterEach(() => {
     document.documentElement.removeAttribute("data-theme");
+    config.global.plugins = [];
     vi.restoreAllMocks();
   });
 
@@ -404,7 +414,6 @@ describe("application shell", () => {
         rawInfo: { id: 347230 },
       },
       url: "https://cdn.example.test/Test%20Track.mp3",
-      mimeType: "audio/mpeg",
       providerName: "Source Two",
       diagnostics: [],
     });
@@ -415,6 +424,128 @@ describe("application shell", () => {
     );
     expect(wrapper.get('footer[aria-label="Playback bar"]').text()).toContain("Test Track");
     expect(wrapper.get('footer[aria-label="Playback bar"]').text()).toContain("Source Two");
+    wrapper.unmount();
+  });
+
+  it("uses the winning online candidate identity for remote lyrics", async () => {
+    listedAudioSources = [
+      audioSourceRecord({
+        id: "source-one",
+        name: "Source One",
+        sources: ["wy", "kg"].map((id) => ({
+          id,
+          name: id,
+          type: "music",
+          actions: ["musicUrl"],
+          qualities: ["320k"],
+        })),
+      }),
+    ];
+    const onlineTrack = {
+      key: "online-track",
+      title: "Test Track",
+      artist: "Test Artist",
+      album: "Test Album",
+      durationSeconds: 180,
+      coverUrl: null,
+      trackNumber: 1,
+      discNumber: 1,
+      candidates: [
+        {
+          channelId: "netease",
+          pluginId: "fika.netease",
+          sourceId: "wy",
+          channelName: "NetEase",
+          id: "347230",
+          title: "Test Track",
+          artist: "Test Artist",
+          album: "Test Album",
+          durationSeconds: 180,
+          coverUrl: null,
+          trackNumber: 1,
+          discNumber: 1,
+          platformIds: { id: "347230" },
+          rawInfo: {},
+          rank: 1,
+        },
+        {
+          channelId: "kugou",
+          pluginId: "fika.kugou",
+          sourceId: "kg",
+          channelName: "KuGou",
+          id: "track-hash",
+          title: "Test Track",
+          artist: "Test Artist",
+          album: "Test Album",
+          durationSeconds: 180,
+          coverUrl: null,
+          trackNumber: 1,
+          discNumber: 1,
+          platformIds: { hash: "track-hash" },
+          rawInfo: {},
+          rank: 2,
+        },
+      ],
+    };
+    const defaultInvoke = tauriMocks.invoke.getMockImplementation();
+    tauriMocks.invoke.mockImplementation((command: string, payload?: { request?: { source?: string } }) => {
+      if (command === "list_online_music_channels") {
+        return Promise.resolve([
+          {
+            id: "netease",
+            pluginId: "fika.netease",
+            pluginName: "NetEase",
+            providerId: "netease",
+            sourceId: "wy",
+            sourceName: "NetEase",
+            excluded: false,
+            actions: ["musicSearch"],
+          },
+          {
+            id: "kugou",
+            pluginId: "fika.kugou",
+            pluginName: "KuGou",
+            providerId: "kugou",
+            sourceId: "kg",
+            sourceName: "KuGou",
+            excluded: false,
+            actions: ["musicSearch"],
+          },
+        ]);
+      }
+      if (command === "dispatch_audio_source_request") {
+        return payload?.request?.source === "wy"
+          ? Promise.reject(new Error("NetEase URL failed"))
+          : Promise.resolve({
+              response: { action: "musicUrl", data: "https://cdn.example.test/track.mp3" },
+              diagnostics: [],
+            });
+      }
+      if (command === "resolve_remote_track_lyrics") return Promise.resolve(null);
+      return defaultInvoke?.(command, payload);
+    });
+    vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(function (
+      this: HTMLMediaElement,
+    ) {
+      queueMicrotask(() => this.dispatchEvent(new Event("canplay")));
+    });
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const onlineButton = wrapper
+      .get('nav[aria-label="Primary navigation"]')
+      .findAll("button")
+      .find((button) => button.text() === "Online Music");
+    await onlineButton?.trigger("click");
+    wrapper
+      .getComponent({ name: "OnlineMusic" })
+      .vm.$emit("playRequest", onlineTrack, [onlineTrack], 0, true);
+    await flushPromises();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("resolve_remote_track_lyrics", {
+      query: expect.objectContaining({ source: "kg", trackId: "track-hash" }),
+    });
+    expect(wrapper.get("audio").attributes("type")).toBeUndefined();
     wrapper.unmount();
   });
 
@@ -552,7 +683,6 @@ describe("application shell", () => {
       if (command === "local_track_media_source") {
         return Promise.resolve({
           filePath: payload?.trackId === 2 ? "/music/second.mp3" : "/music/first.mp3",
-          mimeType: "audio/mpeg",
         });
       }
       if (command === "local_library_queue_track") {

@@ -912,7 +912,7 @@ impl NeteaseProviderBridge for NeteaseServiceBridge {
                 json!({}),
             )
             .map_err(|error| bridge_failure("read album", error))
-            .and_then(|response| checked_playlist_body(response))?;
+            .and_then(checked_playlist_body)?;
         paginate_tracks(
             body.get("songs").and_then(JsonValue::as_array),
             page,
@@ -1385,7 +1385,8 @@ fn system_time_year(time: SystemTime) -> Option<u32> {
     let mut year = 1970_u32;
     let mut remaining = days;
     loop {
-        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let leap =
+            year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
         let days_in_year = if leap { 366 } else { 365 };
         if remaining < days_in_year {
             return Some(year);

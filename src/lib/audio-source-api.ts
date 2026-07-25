@@ -33,7 +33,6 @@ export type AudioSourceTrackRequest = {
 
 export type ResolvedAudioSourceTrack = {
   url: string;
-  mimeType: string;
   diagnostics: SourceDiagnostic[];
 };
 
@@ -101,7 +100,9 @@ export function dispatchAudioSourceRequest(
 export function isAudioSourceId(value: unknown): value is AudioSourceId {
   return (
     value === "" ||
-    (typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value))
+    (typeof value === "string" &&
+      value.length <= 128 &&
+      /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value))
   );
 }
 
@@ -150,30 +151,6 @@ export async function resolveAudioSourceTrack(
   }
   return {
     url: outcome.response.data,
-    mimeType: remoteMimeType(outcome.response.data, request.quality),
     diagnostics: outcome.diagnostics,
   };
-}
-
-function remoteMimeType(url: string, quality: SourceQuality) {
-  const pathname = url.split(/[?#]/, 1)[0]?.toLowerCase() ?? "";
-  if (pathname.endsWith(".flac")) {
-    return "audio/flac";
-  }
-  if (pathname.endsWith(".mp3")) {
-    return "audio/mpeg";
-  }
-  if (pathname.endsWith(".m4a") || pathname.endsWith(".mp4")) {
-    return "audio/mp4";
-  }
-  if (pathname.endsWith(".aac")) {
-    return "audio/aac";
-  }
-  if (pathname.endsWith(".ogg") || pathname.endsWith(".opus")) {
-    return "audio/ogg";
-  }
-  if (quality === "flac" || quality === "flac24bit") {
-    return "audio/flac";
-  }
-  return "audio/mpeg";
 }

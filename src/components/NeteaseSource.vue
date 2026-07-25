@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { useVirtualizer } from "@tanstack/vue-virtual";
 import {
   AlertCircle,
   CircleCheck,
@@ -18,11 +17,19 @@ import {
   X,
 } from "@lucide/vue";
 import {
-  cancelSourceRequest,
   listPlugins,
   type RemoteTrack,
   type SourceQuality,
 } from "../lib/plugin-api";
+import {
+  cancelWorkspaceQueries,
+  cancellableSourceQuery,
+  clearWorkspaceQueries,
+  useQrLoginSession,
+  useSourcePlaybackRequest,
+  useVirtualPlaylist,
+} from "../composables/source-workspace";
+import { normalizeError, queryError } from "../lib/errors";
 import {
   audioSourceLabel,
   resolveAudioSourceTrack,
@@ -43,7 +50,6 @@ import {
   removeNeteasePlaylistTrack,
   startNeteaseQrLogin,
   type NeteasePlayback,
-  type NeteaseQrLoginStart,
 } from "../lib/netease-api";
 
 const props = defineProps<{
@@ -70,7 +76,6 @@ type PlaylistMutationVariables = PendingMutation & {
 };
 
 const PLAYLIST_STALE_TIME_MS = 5 * 60 * 1_000;
-const PLAYLIST_ROW_HEIGHT = 48;
 
 const queryKeys = {
   plugins: ["plugins"] as const,
@@ -90,20 +95,13 @@ const activeAccountRef = ref("");
 const activeTab = ref<NeteaseTab>("recommendations");
 const selectedPlaylistId = ref("");
 const operationDiagnostics = ref<string[]>([]);
-const qrLogin = ref<NeteaseQrLoginStart | null>(null);
-const qrStatus = ref("");
 const pendingMutation = ref<PendingMutation | null>(null);
 const mutationPlaylistId = ref("");
 const manualError = ref<string | null>(null);
 const dismissedQueryError = ref("");
 const sourceNotice = ref<string | null>(null);
-const isConnecting = ref(false);
-const isPollingQr = ref(false);
-const isPlayingTrackId = ref<string | null>(null);
-const playlistViewport = ref<HTMLElement | null>(null);
-
-let qrPollTimer: ReturnType<typeof setTimeout> | null = null;
-let activePlaybackRequestId: string | null = null;
+const playbackRequest = useSourcePlaybackRequest();
+const isPlayingTrackId = playbackRequest.activeTrackId;
 
 const pluginsQuery = useQuery({
   queryKey: queryKeys.plugins,
@@ -180,35 +178,10 @@ const playlistMutation = useMutation({
 const recommendations = computed(() => recommendationsQuery.data.value?.data ?? []);
 const playlists = computed(() => playlistsQuery.data.value?.data ?? []);
 const selectedPlaylist = computed(() => selectedPlaylistQuery.data.value?.data ?? null);
-const playlistTrackVirtualizer = useVirtualizer(
-  computed(() => ({
-    count: selectedPlaylist.value?.tracks.length ?? 0,
-    getScrollElement: () => playlistViewport.value,
-    estimateSize: () => PLAYLIST_ROW_HEIGHT,
-    overscan: 12,
-    getItemKey: (index: number) => {
-      const detail = selectedPlaylist.value;
-      return `${detail?.playlist.id ?? "playlist"}:${index}:${detail?.tracks[index]?.id ?? "track"}`;
-    },
-  })),
-);
-const virtualPlaylistRows = computed(() => {
-  const tracks = selectedPlaylist.value?.tracks ?? [];
-  return playlistTrackVirtualizer.value
-    .getVirtualItems()
-    .map((virtual) => ({ virtual, track: tracks[virtual.index] }));
-});
-const playlistTopPadding = computed(
-  () => virtualPlaylistRows.value[0]?.virtual.start ?? 0,
-);
-const playlistBottomPadding = computed(() => {
-  const rows = virtualPlaylistRows.value;
-  const lastRow = rows[rows.length - 1];
-  return Math.max(
-    0,
-    playlistTrackVirtualizer.value.getTotalSize() - (lastRow?.virtual.end ?? 0),
-  );
-});
+const playlistVirtual = useVirtualPlaylist(selectedPlaylist);
+const virtualPlaylistRows = playlistVirtual.rows;
+const playlistTopPadding = playlistVirtual.topPadding;
+const playlistBottomPadding = playlistVirtual.bottomPadding;
 const audit = computed(() => auditQuery.data.value ?? []);
 const mutablePlaylists = computed(() => playlists.value.filter((playlist) => playlist.canMutate));
 const mutationPlaylist = computed(
@@ -273,6 +246,22 @@ const sourceError = computed<string | null>({
   },
 });
 
+const qrSession = useQrLoginSession({
+  providerName: "NetEase Cloud Music",
+  start: startNeteaseQrLogin,
+  poll: pollNeteaseQrLogin,
+  cancel: cancelNeteaseQrLogin,
+  onConnected: connectAccount,
+  onError: (error) => {
+    sourceError.value = normalizeError(error);
+  },
+});
+const qrLogin = qrSession.login;
+const qrStatus = qrSession.status;
+const isConnecting = qrSession.isConnecting;
+const isPollingQr = qrSession.isPolling;
+const cancelQrLogin = qrSession.cancel;
+
 watch(
   () => accountsQuery.data.value,
   (connectedAccounts) => {
@@ -291,7 +280,7 @@ watch(
 );
 
 watch(activeAccountRef, () => {
-  abandonPlaybackRequest();
+  playbackRequest.abandon();
   selectedPlaylistId.value = "";
   operationDiagnostics.value = [];
   pendingMutation.value = null;
@@ -310,11 +299,8 @@ watch(
 );
 
 watch(selectedPlaylist, async () => {
-  if (playlistViewport.value) {
-    playlistViewport.value.scrollTop = 0;
-  }
   await nextTick();
-  playlistTrackVirtualizer.value.measure();
+  playlistVirtual.resetAndMeasure();
 });
 
 watch(activeTab, async (tab) => {
@@ -322,7 +308,7 @@ watch(activeTab, async (tab) => {
     return;
   }
   await nextTick();
-  playlistTrackVirtualizer.value.measure();
+  playlistVirtual.resetAndMeasure();
 });
 
 watch(queryErrorMessage, (message, previousMessage) => {
@@ -349,8 +335,8 @@ watch(
 );
 
 onBeforeUnmount(() => {
-  cancelQrLogin();
-  abandonPlaybackRequest();
+  qrSession.cancel();
+  playbackRequest.abandon();
 });
 
 async function refreshWorkspace() {
@@ -378,94 +364,23 @@ async function startQrLogin() {
   if (!isPluginReady.value || isConnecting.value) {
     return;
   }
-  cancelQrLogin();
-  isConnecting.value = true;
   sourceError.value = null;
   sourceNotice.value = null;
-  qrStatus.value = "Waiting for scan";
-  try {
-    qrLogin.value = await startNeteaseQrLogin();
-    scheduleQrPoll();
-  } catch (error) {
-    sourceError.value = normalizeError(error);
-    qrLogin.value = null;
-  } finally {
-    isConnecting.value = false;
-  }
+  await qrSession.start();
 }
 
-function scheduleQrPoll() {
-  stopQrPolling();
-  qrPollTimer = setTimeout(() => void pollQrLogin(), 1600);
-}
-
-async function pollQrLogin() {
-  const sessionId = qrLogin.value?.sessionId;
-  if (!sessionId || isPollingQr.value) {
-    return;
+async function connectAccount(account: { accountRef: string; displayName: string }) {
+  await accountsQuery.refetch();
+  const isCurrentAccount = activeAccountRef.value === account.accountRef;
+  if (!isCurrentAccount) {
+    clearAccountWorkspace(account.accountRef);
   }
-  isPollingQr.value = true;
-  try {
-    const result = await pollNeteaseQrLogin(sessionId);
-    if (qrLogin.value?.sessionId !== sessionId) {
-      return;
-    }
-    if (result.status === "waitingForScan") {
-      qrStatus.value = "Waiting for scan";
-      scheduleQrPoll();
-      return;
-    }
-    if (result.status === "waitingForConfirmation") {
-      qrStatus.value = "Confirm in NetEase Cloud Music";
-      scheduleQrPoll();
-      return;
-    }
-    if (result.status === "expired") {
-      sourceError.value = "NetEase login QR code expired. Start a new connection.";
-      qrLogin.value = null;
-      qrStatus.value = "";
-      return;
-    }
-    if (result.account) {
-      qrLogin.value = null;
-      qrStatus.value = "";
-      await accountsQuery.refetch();
-      const isCurrentAccount = activeAccountRef.value === result.account.accountRef;
-      if (!isCurrentAccount) {
-        clearAccountWorkspace(result.account.accountRef);
-      }
-      activeAccountRef.value = result.account.accountRef;
-      await nextTick();
-      if (isCurrentAccount) {
-        await refreshWorkspace();
-      }
-      sourceNotice.value = `${result.account.displayName} connected.`;
-    }
-  } catch (error) {
-    if (qrLogin.value?.sessionId === sessionId) {
-      sourceError.value = normalizeError(error);
-      cancelQrLogin();
-    }
-  } finally {
-    isPollingQr.value = false;
+  activeAccountRef.value = account.accountRef;
+  await nextTick();
+  if (isCurrentAccount) {
+    await refreshWorkspace();
   }
-}
-
-function stopQrPolling() {
-  if (qrPollTimer) {
-    clearTimeout(qrPollTimer);
-    qrPollTimer = null;
-  }
-}
-
-function cancelQrLogin() {
-  const sessionId = qrLogin.value?.sessionId;
-  stopQrPolling();
-  qrLogin.value = null;
-  qrStatus.value = "";
-  if (sessionId) {
-    void cancelNeteaseQrLogin(sessionId).catch(() => undefined);
-  }
+  sourceNotice.value = `${account.displayName} connected.`;
 }
 
 async function disconnectAccount() {
@@ -491,46 +406,36 @@ async function playTrack(track: RemoteTrack) {
   if (isPlayingTrackId.value || !props.playbackSource) {
     return;
   }
-  isPlayingTrackId.value = track.id;
   manualError.value = null;
-  const requestId = crypto.randomUUID();
   const playbackSource = props.playbackSource;
-  activePlaybackRequestId = requestId;
   try {
-    const source = await resolveAudioSourceTrack({
-      audioSourceId: playbackSource,
-      source: track.source,
-      trackId: track.id,
-      musicInfo: {
-        ...track.rawInfo,
-        name: track.title,
-        singer: track.artist,
-        artist: track.artist,
-        album: track.album,
-      },
-      quality: props.streamQuality,
-      requestId,
+    const playback = await playbackRequest.run(track.id, async (requestId, isCurrent) => {
+      const source = await resolveAudioSourceTrack({
+        audioSourceId: playbackSource,
+        source: track.source,
+        trackId: track.id,
+        musicInfo: {
+          ...track.rawInfo,
+          name: track.title,
+          singer: track.artist,
+          artist: track.artist,
+          album: track.album,
+        },
+        quality: props.streamQuality,
+        requestId,
+      });
+      if (!isCurrent()) return null;
+      operationDiagnostics.value = source.diagnostics.map((diagnostic) => diagnostic.message);
+      return {
+        track,
+        url: source.url,
+        providerName: audioSourceLabel(playbackSource, props.audioSources),
+        diagnostics: source.diagnostics,
+      };
     });
-    if (activePlaybackRequestId !== requestId) {
-      return;
-    }
-    operationDiagnostics.value = source.diagnostics.map((diagnostic) => diagnostic.message);
-    emit("playbackReady", {
-      track,
-      url: source.url,
-      mimeType: source.mimeType,
-      providerName: audioSourceLabel(playbackSource, props.audioSources),
-      diagnostics: source.diagnostics,
-    });
+    if (playback) emit("playbackReady", playback);
   } catch (error) {
-    if (activePlaybackRequestId === requestId) {
-      manualError.value = normalizeError(error);
-    }
-  } finally {
-    if (activePlaybackRequestId === requestId) {
-      activePlaybackRequestId = null;
-      isPlayingTrackId.value = null;
-    }
+    manualError.value = normalizeError(error);
   }
 }
 
@@ -604,46 +509,21 @@ async function refreshAccountStatuses() {
   }
 }
 
-async function cancellableSourceQuery<T>(
-  signal: AbortSignal,
-  query: (requestId: string) => Promise<T>,
-) {
-  const requestId = crypto.randomUUID();
-  const cancel = () => {
-    void cancelSourceRequest(requestId).catch(() => undefined);
-  };
-  if (signal.aborted) {
-    cancel();
-    throw new DOMException("Source request cancelled", "AbortError");
-  }
-  signal.addEventListener("abort", cancel, { once: true });
-  try {
-    return await query(requestId);
-  } finally {
-    signal.removeEventListener("abort", cancel);
-  }
-}
-
 async function cancelAccountQueries(accountRef: string) {
-  await Promise.all([
-    queryClient.cancelQueries({
-      queryKey: queryKeys.recommendations(accountRef),
-      exact: true,
-    }),
-    queryClient.cancelQueries({
-      queryKey: queryKeys.playlists(accountRef),
-      exact: true,
-    }),
-    queryClient.cancelQueries({ queryKey: queryKeys.audit(accountRef), exact: true }),
-    queryClient.cancelQueries({ queryKey: queryKeys.playlistsForAccount(accountRef) }),
-  ]);
+  await cancelWorkspaceQueries(queryClient, accountQueryScopes(accountRef));
 }
 
 function clearAccountWorkspace(accountRef: string) {
-  queryClient.removeQueries({ queryKey: queryKeys.recommendations(accountRef), exact: true });
-  queryClient.removeQueries({ queryKey: queryKeys.playlists(accountRef), exact: true });
-  queryClient.removeQueries({ queryKey: queryKeys.audit(accountRef), exact: true });
-  queryClient.removeQueries({ queryKey: queryKeys.playlistsForAccount(accountRef) });
+  clearWorkspaceQueries(queryClient, accountQueryScopes(accountRef));
+}
+
+function accountQueryScopes(accountRef: string) {
+  return [
+    { queryKey: queryKeys.recommendations(accountRef), exact: true },
+    { queryKey: queryKeys.playlists(accountRef), exact: true },
+    { queryKey: queryKeys.audit(accountRef), exact: true },
+    { queryKey: queryKeys.playlistsForAccount(accountRef) },
+  ];
 }
 
 async function invalidateMutationQueries(accountRef: string, playlistId: string) {
@@ -663,19 +543,6 @@ async function invalidateMutationQueries(accountRef: string, playlistId: string)
   ]);
 }
 
-function abandonPlaybackRequest() {
-  const requestId = activePlaybackRequestId;
-  activePlaybackRequestId = null;
-  isPlayingTrackId.value = null;
-  if (requestId) {
-    void cancelSourceRequest(requestId).catch(() => undefined);
-  }
-}
-
-function queryError(label: string, isError: boolean, error: unknown) {
-  return isError ? `${label}: ${normalizeError(error)}` : null;
-}
-
 function formatDuration(seconds: number | null) {
   if (!seconds) {
     return "--:--";
@@ -688,26 +555,6 @@ function formatTimestamp(timestamp: number) {
   return new Date(timestamp * 1000).toLocaleString();
 }
 
-function normalizeError(error: unknown): string {
-  let candidate: unknown = error;
-  if (typeof candidate === "string") {
-    try {
-      candidate = JSON.parse(candidate);
-    } catch {
-      return error as string;
-    }
-  }
-  if (candidate instanceof Error) {
-    return candidate.message;
-  }
-  if (candidate && typeof candidate === "object" && "message" in candidate) {
-    const message = (candidate as { message?: unknown }).message;
-    if (typeof message === "string") {
-      return message;
-    }
-  }
-  return "Unexpected NetEase error.";
-}
 </script>
 
 <template>
@@ -961,7 +808,7 @@ function normalizeError(error: unknown): string {
           </div>
           <div
             v-if="selectedPlaylist?.tracks.length"
-            ref="playlistViewport"
+            :ref="playlistVirtual.setViewport"
             class="h-[clamp(20rem,60vh,36rem)] overflow-auto"
           >
             <table

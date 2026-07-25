@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   AlertCircle,
   AudioLines,
@@ -36,6 +35,8 @@ import NeteaseSource from "./components/NeteaseSource.vue";
 import NowPlayingPanel from "./components/NowPlayingPanel.vue";
 import OnlineMusic from "./components/OnlineMusic.vue";
 import OnlineMusicSettingsPanel from "./components/OnlineMusicSettings.vue";
+import { useLibraryScan } from "./composables/use-library-scan";
+import { useOnlineMusicConfig } from "./composables/use-online-music-config";
 import { NETEASE_PLUGIN_ID, type NeteasePlayback } from "./lib/netease-api";
 import { KUGOU_PLUGIN_ID } from "./lib/kugou-api";
 import {
@@ -45,14 +46,13 @@ import {
 } from "./lib/audio-source-api";
 import { listPlugins, type PluginRecord } from "./lib/plugin-api";
 import { PlayCountTracker } from "./lib/play-count-tracker";
+import { normalizeError } from "./lib/errors";
+import { ExpiringCache } from "./lib/expiring-cache";
 import {
-  getOnlineMusicSettings,
   clearOnlinePlaybackFailures,
   invalidateOnlinePlaybackCaches,
-  listOnlineMusicChannels,
   playbackAttemptKey,
   resolveOnlineTrack,
-  type OnlineMusicSettings,
   type OnlinePlayback,
   type OnlineTrack,
 } from "./lib/online-music-api";
@@ -64,8 +64,6 @@ import type {
   LocalTrackPlaybackDetails,
   MediaSource,
   ResolvedLyrics,
-  ScanProgressEvent,
-  ScanStatus,
   SourceSearchResult,
   TrackLyricsQuery,
 } from "./generated/bindings";
@@ -78,29 +76,10 @@ import {
   type ThemePreference,
 } from "./lib/ui-preferences";
 
-type PlaybackSource = {
-  filePath?: string;
-  url?: string;
-  mimeType: string;
-};
-
 type LibraryBrowserInstance = {
   refresh: () => Promise<void>;
   startFirstTrack: () => Promise<void>;
   updatePlayCount: (trackId: number, playCount: number) => void;
-};
-
-const emptyScanStatus: ScanStatus = {
-  isRunning: false,
-  folderPath: null,
-  discoveredFiles: 0,
-  scannedFiles: 0,
-  indexedTracks: 0,
-  skippedFiles: 0,
-  errorCount: 0,
-  lastError: null,
-  startedAt: null,
-  finishedAt: null,
 };
 
 const mainSections = [
@@ -142,8 +121,20 @@ type AppSection = (typeof sections)[number]["id"];
 type ActiveSection = AppSection | "plugin";
 
 const savedUiPreferences = loadUiPreferences();
-const scanStatus = ref<ScanStatus>({ ...emptyScanStatus });
-const selectedFolder = ref<string | null>(null);
+const appError = ref<string | null>(null);
+const libraryScan = useLibraryScan((message) => {
+  appError.value = message;
+});
+const {
+  scanStatus,
+  selectedFolder,
+  scanMessage,
+  isChoosingFolder,
+  canScan,
+  chooseFolder,
+  startScan,
+  handleDownloadCompleted: handleOnlineDownloadCompleted,
+} = libraryScan;
 const activeSection = ref<ActiveSection>("local");
 const activePluginId = ref<string | null>(null);
 const pluginRecords = ref<PluginRecord[]>([]);
@@ -159,7 +150,6 @@ const activeOnlineChannelId = ref<string | null>(null);
 const activeOnlineAttemptKey = ref<string | null>(null);
 const activeOnlineUrl = ref<string | null>(null);
 const sourceChangeMessage = ref<string | null>(null);
-const activeSource = ref<PlaybackSource | null>(null);
 const audioUrl = ref<string | null>(null);
 const isPlaying = ref(false);
 const playbackPosition = ref(0);
@@ -173,11 +163,7 @@ const activeLyrics = ref<ResolvedLyrics | null>(null);
 const activeRemoteLyricsQuery = ref<TrackLyricsQuery | null>(null);
 const isLoadingLyrics = ref(false);
 const lyricsError = ref<string | null>(null);
-const isChoosingFolder = ref(false);
-const isStartingScan = ref(false);
 const isPreparingPlayback = ref(false);
-const appError = ref<string | null>(null);
-const scanMessage = ref<string | null>(null);
 const audioElement = ref<HTMLAudioElement | null>(null);
 const libraryBrowser = ref<LibraryBrowserInstance | null>(null);
 const libraryTrackCount = ref(0);
@@ -193,13 +179,13 @@ const remoteQueueActive = ref(false);
 const resolvingOnlineTrackKey = ref<string | null>(null);
 const playbackAudioSourceId = ref(savedUiPreferences.audioSourceId);
 const remoteQuality = ref(savedUiPreferences.streamQuality);
-const onlineMusicSettings = ref<OnlineMusicSettings | null>(null);
+const onlineMusicConfig = useOnlineMusicConfig();
 
-let unlistenScanProgress: UnlistenFn | null = null;
 let playbackDetailsGeneration = 0;
 let onlinePlaybackController: AbortController | null = null;
-const failedOnlineAttempts = new Map<string, number>();
-const failedOnlineUrls = new Map<string, number>();
+let sourceChangeMessageTimer: ReturnType<typeof setTimeout> | null = null;
+const failedOnlineAttempts = new ExpiringCache<string, true>(5 * 60_000, 256);
+const failedOnlineUrls = new ExpiringCache<string, true>(5 * 60_000, 256);
 const playCountTracker = new PlayCountTracker();
 
 const enabledPlugins = computed(() => pluginRecords.value.filter((plugin) => plugin.enabled));
@@ -218,9 +204,6 @@ const currentSection = computed(() => {
 
   return sections.find((section) => section.id === activeSection.value) ?? mainSections[0];
 });
-const canScan = computed(
-  () => Boolean(selectedFolder.value) && !scanStatus.value.isRunning && !isStartingScan.value,
-);
 const nowPlayingTitle = computed(() => activeTrack.value?.title || activeRemoteTitle.value || "Nothing playing");
 const nowPlayingSubtitle = computed(() => {
   if (activeTrack.value) {
@@ -313,18 +296,16 @@ watch(
 );
 
 onMounted(async () => {
-  const [, , , , settings] = await Promise.all([
-    loadScanStatus(),
-    bindScanProgress(),
+  await Promise.all([
+    libraryScan.initialize(),
     loadPluginNavigation(),
     loadAudioSourceNavigation(),
-    getOnlineMusicSettings().catch(() => null),
   ]);
-  onlineMusicSettings.value = settings;
 });
 
 onBeforeUnmount(() => {
-  unlistenScanProgress?.();
+  libraryScan.dispose();
+  if (sourceChangeMessageTimer) clearTimeout(sourceChangeMessageTimer);
   playbackDetailsGeneration += 1;
   onlinePlaybackController?.abort();
   sampleListeningTime();
@@ -360,6 +341,7 @@ async function loadAudioSourceNavigation() {
 
 function updatePluginRecords(records: PluginRecord[]) {
   pluginRecords.value = records;
+  onlineMusicConfig.invalidateChannels();
   if (
     activeSection.value === "plugin" &&
     !records.some((plugin) => plugin.id === activePluginId.value && plugin.enabled)
@@ -375,16 +357,6 @@ function updateAudioSourceRecords(records: AudioSourceRecord[]) {
   const sourceOptions = buildAudioSourceOptions(records);
   if (!sourceOptions.some((source) => source.value === playbackAudioSourceId.value)) {
     playbackAudioSourceId.value = sourceOptions[0]?.value ?? "";
-  }
-}
-
-function handleOnlineDownloadCompleted(destination: string) {
-  if (!selectedFolder.value || scanStatus.value.isRunning) return;
-  const normalize = (path: string) => path.replace(/[\\/]+$/, "");
-  const library = normalize(selectedFolder.value);
-  const downloaded = normalize(destination);
-  if (downloaded === library || downloaded.startsWith(`${library}/`) || downloaded.startsWith(`${library}\\`)) {
-    void startScan();
   }
 }
 
@@ -408,60 +380,6 @@ function resetUiPreferences() {
   playbackAudioSourceId.value = DEFAULT_UI_PREFERENCES.audioSourceId;
   volume.value = DEFAULT_UI_PREFERENCES.volume;
   playbackMode.value = DEFAULT_UI_PREFERENCES.playbackMode;
-}
-
-async function bindScanProgress() {
-  unlistenScanProgress = await listen<ScanProgressEvent>("library:scan-progress", (event) => {
-    scanStatus.value = event.payload.status;
-    scanMessage.value = event.payload.message;
-    if (
-      !event.payload.status.isRunning &&
-      event.payload.message?.startsWith("Indexing failed:")
-    ) {
-      appError.value = event.payload.message;
-    }
-  });
-}
-
-async function loadScanStatus() {
-  scanStatus.value = await invoke<ScanStatus>(TAURI_COMMANDS.getScanStatus);
-  selectedFolder.value = scanStatus.value.folderPath;
-}
-
-async function chooseFolder() {
-  isChoosingFolder.value = true;
-  appError.value = null;
-
-  try {
-    const folder = await invoke<string | null>(TAURI_COMMANDS.selectMusicFolder);
-    if (folder) {
-      selectedFolder.value = folder;
-    }
-  } catch (error) {
-    appError.value = normalizeError(error);
-  } finally {
-    isChoosingFolder.value = false;
-  }
-}
-
-async function startScan() {
-  if (!selectedFolder.value) {
-    return;
-  }
-
-  isStartingScan.value = true;
-  appError.value = null;
-  scanMessage.value = null;
-
-  try {
-    scanStatus.value = await invoke<ScanStatus>(TAURI_COMMANDS.startLibraryScan, {
-      folderPath: selectedFolder.value,
-    });
-  } catch (error) {
-    appError.value = normalizeError(error);
-  } finally {
-    isStartingScan.value = false;
-  }
 }
 
 function resetPlaybackDetails(
@@ -575,7 +493,6 @@ async function playTrack(track: LocalTrack) {
     activeRemoteTitle.value = null;
     activeRemoteProvider.value = null;
     activeRemoteQuality.value = null;
-    activeSource.value = source;
     audioUrl.value = convertFileSrc(source.filePath);
     queuedLocalTrack.value = track;
     resetListeningSession();
@@ -628,6 +545,10 @@ function clearRemotePlaybackQueue() {
   activeOnlineAttemptKey.value = null;
   activeOnlineUrl.value = null;
   sourceChangeMessage.value = null;
+  if (sourceChangeMessageTimer) {
+    clearTimeout(sourceChangeMessageTimer);
+    sourceChangeMessageTimer = null;
+  }
 }
 
 function updateLibrarySummary(summary: { libraryTotal: number; filteredTotal: number }) {
@@ -650,7 +571,6 @@ async function playRemotePlayback(playback: NeteasePlayback) {
     activeRemoteTitle.value = `${playback.track.title} - ${playback.track.artist}`;
     activeRemoteProvider.value = playback.providerName;
     activeRemoteQuality.value = null;
-    activeSource.value = { url: playback.url, mimeType: playback.mimeType };
     audioUrl.value = playback.url;
     void loadRemoteTrackLyrics(
       lyricsQueryForRemoteTrack(playback.track),
@@ -697,10 +617,7 @@ async function playOnlineQueueTrack(index: number) {
   appError.value = null;
 
   try {
-    const [settings, channels] = await Promise.all([
-      getOnlineMusicSettings(),
-      listOnlineMusicChannels(),
-    ]);
+    const { settings, channels } = await onlineMusicConfig.load();
     const enabledChannels = new Set(channels.map((channel) => channel.id));
     const track = {
       ...snapshotTrack,
@@ -711,7 +628,6 @@ async function playOnlineQueueTrack(index: number) {
     if (!track.candidates.length) {
       throw new Error("Playback is unavailable from the configured Audio Sources.");
     }
-    onlineMusicSettings.value = settings;
     const playback = await resolveOnlineTrack({
       track,
       audioSources: audioSourceRecords.value,
@@ -742,15 +658,14 @@ async function applyOnlinePlayback(playback: OnlinePlayback) {
   activeTrack.value = null;
   activeOnlineTrack.value = playback.track;
   activeRemoteTitle.value = playback.track.title;
-  activeRemoteProvider.value = `${playback.providerName} · ${playback.channelName}`;
+  activeRemoteProvider.value = `${playback.providerName} · ${playback.candidate.channelName}`;
   activeRemoteQuality.value = playback.quality;
   activeOnlineAudioSourceId.value = playback.audioSourceId;
-  activeOnlineChannelId.value = playback.channelId;
+  activeOnlineChannelId.value = playback.candidate.channelId;
   activeOnlineAttemptKey.value = activeOnlineChannelId.value
     ? playbackAttemptKey(playback.audioSourceId, activeOnlineChannelId.value, playback.quality)
     : null;
   activeOnlineUrl.value = playback.url;
-  activeSource.value = { url: playback.url, mimeType: playback.mimeType };
   audioUrl.value = playback.url;
   void loadRemoteTrackLyrics(
     {
@@ -758,8 +673,8 @@ async function applyOnlinePlayback(playback: OnlinePlayback) {
       artist: playback.track.artist || null,
       album: playback.track.album,
       durationSeconds: playback.track.durationSeconds,
-      source: playback.track.candidates[0]?.sourceId ?? null,
-      trackId: playback.track.candidates[0]?.id ?? null,
+      source: playback.candidate.sourceId,
+      trackId: playback.candidate.id,
     },
     playback.track.coverUrl,
   );
@@ -1065,11 +980,11 @@ async function recoverOnlinePlayback() {
   if (activeOnlineAttemptKey.value) {
     failedOnlineAttempts.set(
       `${track.key}::${activeOnlineAttemptKey.value}`,
-      Date.now() + 5 * 60_000,
+      true,
     );
   }
   if (activeOnlineUrl.value) {
-    failedOnlineUrls.set(`${track.key}::${activeOnlineUrl.value}`, Date.now() + 5 * 60_000);
+    failedOnlineUrls.set(`${track.key}::${activeOnlineUrl.value}`, true);
   }
   sourceChangeMessage.value = "Changing playback source";
   await playOnlineQueueTrack(remoteQueueIndex.value);
@@ -1077,46 +992,32 @@ async function recoverOnlinePlayback() {
   if (audioElement.value && Math.abs(nextDuration - priorDuration) <= 3) {
     audioElement.value.currentTime = Math.min(priorPosition, Math.max(0, nextDuration - 0.25));
   }
-  window.setTimeout(() => {
+  if (sourceChangeMessageTimer) clearTimeout(sourceChangeMessageTimer);
+  sourceChangeMessageTimer = window.setTimeout(() => {
     sourceChangeMessage.value = null;
+    sourceChangeMessageTimer = null;
   }, 2_500);
 }
 
 function activeFailedAttempts(trackKey: string) {
-  pruneFailedOnlinePlayback();
   return new Set(
-    [...failedOnlineAttempts.keys()]
-      .filter((key) => key.startsWith(`${trackKey}::`))
+    failedOnlineAttempts
+      .keysWhere((key) => key.startsWith(`${trackKey}::`))
       .map((key) => key.slice(trackKey.length + 2)),
   );
 }
 
 function activeFailedUrls(trackKey: string) {
-  pruneFailedOnlinePlayback();
   return new Set(
-    [...failedOnlineUrls.keys()]
-      .filter((key) => key.startsWith(`${trackKey}::`))
+    failedOnlineUrls
+      .keysWhere((key) => key.startsWith(`${trackKey}::`))
       .map((key) => key.slice(trackKey.length + 2)),
   );
 }
 
 function clearFailedOnlinePlayback(trackKey: string) {
-  for (const key of [...failedOnlineAttempts.keys()]) {
-    if (key.startsWith(`${trackKey}::`)) failedOnlineAttempts.delete(key);
-  }
-  for (const key of [...failedOnlineUrls.keys()]) {
-    if (key.startsWith(`${trackKey}::`)) failedOnlineUrls.delete(key);
-  }
-}
-
-function pruneFailedOnlinePlayback() {
-  const now = Date.now();
-  for (const [key, expiresAt] of failedOnlineAttempts) {
-    if (expiresAt <= now) failedOnlineAttempts.delete(key);
-  }
-  for (const [key, expiresAt] of failedOnlineUrls) {
-    if (expiresAt <= now) failedOnlineUrls.delete(key);
-  }
+  failedOnlineAttempts.deleteWhere((key) => key.startsWith(`${trackKey}::`));
+  failedOnlineUrls.deleteWhere((key) => key.startsWith(`${trackKey}::`));
 }
 
 function formatPlaybackTime(seconds: number) {
@@ -1131,18 +1032,6 @@ function formatPlaybackTime(seconds: number) {
 
 function trackSubtitle(track: LocalTrack) {
   return [track.artist, track.album].filter(Boolean).join(" - ") || track.fileName;
-}
-
-function normalizeError(error: unknown) {
-  if (typeof error === "string") {
-    return error;
-  }
-
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return "Unexpected application error.";
 }
 
 </script>
@@ -1412,9 +1301,9 @@ function normalizeError(error: unknown) {
             </div>
           </section>
 
-          <OnlineMusicSettingsPanel
-            :audio-sources="audioSourceRecords"
-            @settings-changed="onlineMusicSettings = $event"
+      <OnlineMusicSettingsPanel
+        :audio-sources="audioSourceRecords"
+        @settings-changed="onlineMusicConfig.updateSettings($event)"
           />
 
           <section class="overflow-hidden rounded border border-base-300 bg-base-100">
@@ -1618,8 +1507,7 @@ function normalizeError(error: unknown) {
             v-if="audioUrl"
             ref="audioElement"
             class="hidden"
-            :src="audioUrl"
-            :type="activeSource?.mimeType"
+    :src="audioUrl"
             @durationchange="onAudioLoadedMetadata"
             @ended="onAudioEnded"
             @loadedmetadata="onAudioLoadedMetadata"

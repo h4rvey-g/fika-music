@@ -26,6 +26,7 @@ import {
   type AudioSourceRecord,
 } from "../lib/audio-source-api";
 import type { SourceCapability } from "../generated/bindings";
+import { normalizeError } from "../lib/errors";
 
 const emit = defineEmits<{
   sourcesChanged: [sources: AudioSourceRecord[]];
@@ -295,26 +296,6 @@ function formatTimestamp(timestamp: number) {
   return timestamp ? new Date(timestamp * 1000).toLocaleString() : "-";
 }
 
-function normalizeError(error: unknown): string {
-  let candidate = error;
-  if (typeof candidate === "string") {
-    try {
-      candidate = JSON.parse(candidate) as unknown;
-    } catch {
-      return String(error);
-    }
-  }
-  if (candidate instanceof Error) {
-    return candidate.message;
-  }
-  if (candidate && typeof candidate === "object" && "message" in candidate) {
-    const message = (candidate as { message?: unknown }).message;
-    if (typeof message === "string") {
-      return message;
-    }
-  }
-  return "Unexpected Audio Sources error.";
-}
 </script>
 
 <template>

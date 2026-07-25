@@ -443,6 +443,10 @@ impl OnlineSearchData {
             Self::Playlists(items) => items.len(),
         }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]

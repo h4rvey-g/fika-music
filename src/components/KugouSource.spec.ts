@@ -154,13 +154,11 @@ describe("KugouSource", () => {
     audioSourceApiMocks.audioSourceLabel.mockReturnValue("Source One");
     audioSourceApiMocks.resolveAudioSourceTrack.mockResolvedValue({
       url: "https://cdn.example.test/track.mp3",
-      mimeType: "audio/mpeg",
       diagnostics: [],
     });
     kugouApiMocks.resolveKugouTrack.mockResolvedValue({
       track,
       url: "https://fsandroid.kugou.com/track.mp3",
-      mimeType: "audio/mpeg",
       providerName: "KuGou Music",
       diagnostics: [],
     });

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildAudioSourceOptions,
   importAudioSource,
+  isAudioSourceId,
   listAudioSources,
   resolveAudioSourceTrack,
   type AudioSourceRecord,
@@ -98,7 +99,6 @@ describe("audio source API", () => {
       }),
     ).resolves.toMatchObject({
       url: "https://cdn.example.test/track.mp3",
-      mimeType: "audio/mpeg",
     });
     expect(invokeMock).toHaveBeenCalledWith("dispatch_audio_source_request", {
       audioSourceId: "imported-source",
@@ -122,5 +122,9 @@ describe("audio source API", () => {
       }),
     ).rejects.toThrow("No audio source is configured");
     expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects identifiers that cannot fit a managed package path", () => {
+    expect(isAudioSourceId("a".repeat(129))).toBe(false);
   });
 });

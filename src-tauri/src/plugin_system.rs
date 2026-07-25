@@ -2,6 +2,9 @@ use crate::kugou::{KugouProviderBridge, KugouSourceProvider, KUGOU_PLUGIN_ID, KU
 use crate::netease::{
     NeteaseProviderBridge, NeteaseSourceProvider, NETEASE_PLUGIN_ID, NETEASE_PROVIDER_ID,
 };
+use crate::registry_support::{
+    manifest_fingerprint, now_timestamp, operation_nonce, remove_path, valid_identifier,
+};
 use crate::source_runtime::{
     self, DiagnosticLevel, SourceAction, SourceCapability, SourceInfo, SourceProvider,
     SourceRequest, SourceRequestOutcome, SourceRuntime, SourceRuntimeApiVersion,
@@ -15,13 +18,11 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const PLUGIN_MANIFEST_FILE: &str = "plugin.json";
 pub const PLUGIN_MANIFEST_VERSION: u32 = 1;
@@ -2567,10 +2568,7 @@ fn copy_package_tree(source: &Path, destination: &Path) -> Result<(), PluginSyst
 }
 
 fn install_staging_paths(staging_root: &Path, plugin_id: &str) -> (PathBuf, PathBuf) {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
+    let nonce = operation_nonce();
     let suffix = format!("{}-{nonce}", std::process::id());
     (
         staging_root.join(format!("{plugin_id}.install-{suffix}")),
@@ -2579,24 +2577,8 @@ fn install_staging_paths(staging_root: &Path, plugin_id: &str) -> (PathBuf, Path
 }
 
 fn removal_staging_path(staging_root: &Path, plugin_id: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
+    let nonce = operation_nonce();
     staging_root.join(format!("{plugin_id}.remove-{}-{nonce}", std::process::id()))
-}
-
-fn remove_path(path: &Path) -> Result<(), std::io::Error> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    }
 }
 
 fn remove_dir_if_empty(path: &Path) -> Result<(), std::io::Error> {
@@ -2622,11 +2604,6 @@ fn invalid_record_id(path: &Path, origin: PluginOrigin) -> String {
     format!("invalid-{:x}", hasher.finish())
 }
 
-fn manifest_fingerprint(manifest: &PluginManifest) -> Result<String, PluginSystemError> {
-    let bytes = serde_json::to_vec(manifest)?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
-}
-
 fn append_diagnostic(diagnostics: &mut Vec<PluginDiagnostic>, diagnostic: PluginDiagnostic) {
     diagnostics.push(diagnostic);
     trim_diagnostics(diagnostics);
@@ -2638,17 +2615,6 @@ fn trim_diagnostics(diagnostics: &mut Vec<PluginDiagnostic>) {
         let remove_count = diagnostics.len() - MAX_PLUGIN_DIAGNOSTICS;
         diagnostics.drain(0..remove_count);
     }
-}
-
-fn valid_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphanumeric)
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn is_legacy_lx_audio_source(manifest: &PluginManifest) -> bool {
@@ -2702,14 +2668,6 @@ fn diagnostic_level_as_str(level: DiagnosticLevel) -> &'static str {
         DiagnosticLevel::Error => "error",
         DiagnosticLevel::Security => "security",
     }
-}
-
-fn now_timestamp() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

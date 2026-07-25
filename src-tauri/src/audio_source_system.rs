@@ -1,6 +1,9 @@
 use crate::lx_js_importer::{self, LxJsImportAdapter, LxJsImportReport};
 use crate::lx_js_runtime::ImportedLxJsProvider;
 use crate::plugin_system::PluginManifest;
+use crate::registry_support::{
+    manifest_fingerprint, now_timestamp, operation_nonce, remove_path, sha256_hex, valid_identifier,
+};
 use crate::source_runtime::{
     self, DiagnosticLevel, SourceAction, SourceCapability, SourceInfo, SourceProvider,
     SourceRequest, SourceRequestOutcome, SourceRuntime, SourceRuntimeApiVersion,
@@ -11,13 +14,12 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE, USER_AGENT};
 use reqwest::redirect::Policy;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use url::Url;
 
 pub const AUDIO_SOURCE_MANIFEST_FILE: &str = "audio-source.json";
@@ -2178,10 +2180,6 @@ fn runtime_error(
     }
 }
 
-fn manifest_fingerprint(manifest: &AudioSourceManifest) -> Result<String, AudioSourceSystemError> {
-    Ok(sha256_hex(&serde_json::to_vec(manifest)?))
-}
-
 fn append_diagnostic(
     diagnostics: &mut Vec<AudioSourceDiagnostic>,
     diagnostic: AudioSourceDiagnostic,
@@ -2244,52 +2242,11 @@ fn truncate_text(value: &str, max_chars: usize) -> String {
     value.trim().chars().take(max_chars).collect()
 }
 
-fn valid_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphanumeric())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-}
-
-fn sha256_hex(value: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(value))
-}
-
 fn source_too_large_error() -> AudioSourceSystemError {
     AudioSourceSystemError::Package(format!(
         "audio source exceeds the {} MiB import limit",
         MAX_SOURCE_BYTES / (1024 * 1024)
     ))
-}
-
-fn operation_nonce() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default()
-}
-
-fn now_timestamp() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or_default()
-}
-
-fn remove_path(path: &Path) -> Result<(), std::io::Error> {
-    if !path.exists() {
-        return Ok(());
-    }
-    if path.is_dir() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    }
 }
 
 #[cfg(test)]

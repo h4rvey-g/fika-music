@@ -11,6 +11,7 @@ import {
   Trash2,
 } from "@lucide/vue";
 import type { AudioSourceRecord, OnlineChannel } from "../generated/bindings";
+import { normalizeError } from "../lib/errors";
 import {
   clearOnlineSearchHistory,
   getOnlineMusicSettings,
@@ -220,11 +221,6 @@ function previewTemplate(template: string, values: Record<string, string>) {
   return output;
 }
 
-function normalizeError(reason: unknown) {
-  if (typeof reason === "string") return reason;
-  if (reason instanceof Error) return reason.message;
-  return "Online Music settings could not be updated.";
-}
 </script>
 
 <template>

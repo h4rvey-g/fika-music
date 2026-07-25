@@ -111,11 +111,10 @@ describe("KuGou API", () => {
 
     await expect(
       resolveKugouTrack(track, "flac", accountRef, "request-3"),
-    ).resolves.toMatchObject({
-      track,
-      mimeType: "audio/mpeg",
-      providerName: "KuGou Music",
-    });
+  ).resolves.toMatchObject({
+    track,
+    providerName: "KuGou Music",
+  });
     expect(invokeMock).toHaveBeenCalledWith("dispatch_plugin_request", {
       pluginId: "fika.kugou",
       request: {

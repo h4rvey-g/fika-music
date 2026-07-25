@@ -232,7 +232,11 @@ describe("online music playback routing", () => {
       probe,
     });
 
-    expect(playback.channelName).toBe("KuGou");
+    expect(playback.candidate).toMatchObject({
+      id: "hash",
+      sourceId: "kg",
+      channelName: "KuGou",
+    });
     expect(playback.url).toBe("https://cdn.test/kg.mp3");
   });
 
@@ -278,6 +282,6 @@ describe("online music playback routing", () => {
       probe: async () => undefined,
     });
 
-    expect(playback.channelName).toBe("KuGou");
+    expect(playback.candidate.channelName).toBe("KuGou");
   });
 });

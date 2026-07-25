@@ -21,6 +21,7 @@ import {
   setPluginEnabled,
 } from "../lib/plugin-api";
 import type { PluginDiagnostic, PluginRecord } from "../lib/plugin-api";
+import { normalizeError } from "../lib/errors";
 
 const emit = defineEmits<{
   pluginsChanged: [plugins: PluginRecord[]];
@@ -223,29 +224,6 @@ function sourceCount(plugin: PluginRecord) {
   return plugin.providers.reduce((count, provider) => count + provider.sources.length, 0);
 }
 
-function normalizeError(error: unknown) {
-  if (typeof error === "string") {
-    try {
-      const parsed = JSON.parse(error) as { message?: unknown };
-      if (typeof parsed.message === "string") {
-        return parsed.message;
-      }
-    } catch {
-      return error;
-    }
-    return error;
-  }
-  if (error instanceof Error) {
-    return error.message;
-  }
-  if (error && typeof error === "object" && "message" in error) {
-    const message = (error as { message?: unknown }).message;
-    if (typeof message === "string") {
-      return message;
-    }
-  }
-  return "Unexpected Plugin System error.";
-}
 </script>
 
 <template>
