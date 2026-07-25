@@ -128,6 +128,47 @@ describe("online music playback routing", () => {
     expect(qualityFallback("320k")).toEqual(["320k", "128k"]);
   });
 
+  it("preserves time for lower-quality fallback when the preferred URL probe stalls", async () => {
+    invoke.mockImplementation((command: string, payload: { request?: { quality?: string } }) => {
+      if (command === "dispatch_audio_source_request") {
+        return Promise.resolve({
+          response: {
+            action: "musicUrl",
+            data: `https://cdn.test/${payload.request?.quality}.mp3`,
+          },
+          diagnostics: [],
+        });
+      }
+      return Promise.resolve(true);
+    });
+    const probe = vi.fn(
+      (url: string, options: { signal?: AbortSignal }) => {
+        if (!url.includes("/320k.")) return Promise.resolve();
+        return new Promise<void>((_resolve, reject) => {
+          options.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("The operation was cancelled.", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    );
+
+    const playback = await resolveOnlineTrack({
+      track,
+      audioSources: [audioSource("first", ["kg"])],
+      settings: {
+        ...settings,
+        layerTimeoutSeconds: 0.08,
+        playbackTimeoutSeconds: 1,
+        preferredQuality: "320k",
+      },
+      probe,
+    });
+
+    expect(playback.quality).toBe("128k");
+  });
+
   it("forwards the Local Music folder as the download picker starting directory", async () => {
     invoke.mockResolvedValue("/music/downloads");
 

@@ -766,6 +766,12 @@ pub fn merge_tracks(
     candidates: Vec<OnlineTrackCandidate>,
     channel_priority: &[String],
 ) -> Vec<OnlineTrack> {
+    let effective_channel_priority = effective_channel_priority(
+        channel_priority,
+        candidates
+            .iter()
+            .map(|candidate| candidate.channel_id.as_str()),
+    );
     let mut groups: Vec<Vec<OnlineTrackCandidate>> = Vec::new();
     for candidate in candidates {
         if let Some(group) = groups.iter_mut().find(|group| {
@@ -782,7 +788,9 @@ pub fn merge_tracks(
     let mut ranked = groups
         .into_iter()
         .filter_map(|mut group| {
-            sort_by_channel_priority(&mut group, channel_priority, |item| &item.channel_id);
+            sort_by_channel_priority(&mut group, &effective_channel_priority, |item| {
+                &item.channel_id
+            });
             let primary = group.first()?.clone();
             let score = rrf_score(
                 group
@@ -806,15 +814,16 @@ pub fn merge_tracks(
                 candidates: group,
             };
             Some((
+                channel_rank(&primary.channel_id, &effective_channel_priority),
                 score,
-                channel_rank(&primary.channel_id, channel_priority),
                 track,
             ))
         })
         .collect::<Vec<_>>();
     ranked.sort_by(|left, right| {
-        compare_score(right.0, left.0)
-            .then_with(|| left.1.cmp(&right.1))
+        left.0
+            .cmp(&right.0)
+            .then_with(|| compare_score(right.1, left.1))
             .then_with(|| left.2.key.cmp(&right.2.key))
     });
     ranked.into_iter().map(|(_, _, track)| track).collect()
@@ -824,10 +833,18 @@ pub fn merge_artists(
     groups: Vec<Vec<OnlineArtistCandidate>>,
     channel_priority: &[String],
 ) -> Vec<OnlineArtist> {
+    let effective_channel_priority = effective_channel_priority(
+        channel_priority,
+        groups
+            .iter()
+            .flat_map(|group| group.iter().map(|candidate| candidate.channel_id.as_str())),
+    );
     let mut ranked = groups
         .into_iter()
         .filter_map(|mut group| {
-            sort_by_channel_priority(&mut group, channel_priority, |item| &item.channel_id);
+            sort_by_channel_priority(&mut group, &effective_channel_priority, |item| {
+                &item.channel_id
+            });
             let primary = group.first()?.clone();
             let score = rrf_score(
                 group
@@ -849,15 +866,16 @@ pub fn merge_artists(
                 candidates: group,
             };
             Some((
+                channel_rank(&primary.channel_id, &effective_channel_priority),
                 score,
-                channel_rank(&primary.channel_id, channel_priority),
                 artist,
             ))
         })
         .collect::<Vec<_>>();
     ranked.sort_by(|left, right| {
-        compare_score(right.0, left.0)
-            .then_with(|| left.1.cmp(&right.1))
+        left.0
+            .cmp(&right.0)
+            .then_with(|| compare_score(right.1, left.1))
             .then_with(|| left.2.key.cmp(&right.2.key))
     });
     ranked.into_iter().map(|(_, _, artist)| artist).collect()
@@ -867,10 +885,18 @@ pub fn merge_albums(
     groups: Vec<Vec<OnlineAlbumCandidate>>,
     channel_priority: &[String],
 ) -> Vec<OnlineAlbum> {
+    let effective_channel_priority = effective_channel_priority(
+        channel_priority,
+        groups
+            .iter()
+            .flat_map(|group| group.iter().map(|candidate| candidate.channel_id.as_str())),
+    );
     let mut ranked = groups
         .into_iter()
         .filter_map(|mut group| {
-            sort_by_channel_priority(&mut group, channel_priority, |item| &item.channel_id);
+            sort_by_channel_priority(&mut group, &effective_channel_priority, |item| {
+                &item.channel_id
+            });
             let primary = group.first()?.clone();
             let score = rrf_score(
                 group
@@ -896,29 +922,37 @@ pub fn merge_albums(
                 candidates: group,
             };
             Some((
+                channel_rank(&primary.channel_id, &effective_channel_priority),
                 score,
-                channel_rank(&primary.channel_id, channel_priority),
                 album,
             ))
         })
         .collect::<Vec<_>>();
     ranked.sort_by(|left, right| {
-        compare_score(right.0, left.0)
-            .then_with(|| left.1.cmp(&right.1))
+        left.0
+            .cmp(&right.0)
+            .then_with(|| compare_score(right.1, left.1))
             .then_with(|| left.2.key.cmp(&right.2.key))
     });
     ranked.into_iter().map(|(_, _, album)| album).collect()
 }
 
 pub fn sort_playlists(playlists: &mut [OnlinePlaylist], channel_priority: &[String]) {
+    let effective_channel_priority = effective_channel_priority(
+        channel_priority,
+        playlists
+            .iter()
+            .map(|playlist| playlist.channel_id.as_str()),
+    );
     playlists.sort_by(|left, right| {
         let left_score = 1.0 / (RRF_K + f64::from(left.rank));
         let right_score = 1.0 / (RRF_K + f64::from(right.rank));
-        compare_score(right_score, left_score)
-            .then_with(|| {
-                channel_rank(&left.channel_id, channel_priority)
-                    .cmp(&channel_rank(&right.channel_id, channel_priority))
-            })
+        channel_rank(&left.channel_id, &effective_channel_priority)
+            .cmp(&channel_rank(
+                &right.channel_id,
+                &effective_channel_priority,
+            ))
+            .then_with(|| compare_score(right_score, left_score))
             .then_with(|| left.key.cmp(&right.key))
     });
 }
@@ -1107,6 +1141,26 @@ where
     });
 }
 
+fn effective_channel_priority<'a>(
+    configured: &[String],
+    channel_ids: impl Iterator<Item = &'a str>,
+) -> Vec<String> {
+    let available = channel_ids.map(str::to_owned).collect::<BTreeSet<_>>();
+    let configured_ids = configured
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    configured
+        .iter()
+        .cloned()
+        .chain(
+            available
+                .into_iter()
+                .filter(|channel_id| !configured_ids.contains(channel_id.as_str())),
+        )
+        .collect()
+}
+
 fn channel_rank(channel_id: &str, priority: &[String]) -> usize {
     priority
         .iter()
@@ -1152,6 +1206,70 @@ mod tests {
             raw_info: JsonValue::Object(Default::default()),
             rank,
         }
+    }
+
+    #[test]
+    fn merge_tracks_should_prioritize_configured_channel_over_provider_rank() {
+        let merged = merge_tracks(
+            vec![
+                candidate(
+                    "netease",
+                    "wy",
+                    "NetEase result",
+                    "Jay Chou",
+                    Some("NetEase album"),
+                    Some(180),
+                    1,
+                ),
+                candidate(
+                    "kugou",
+                    "kg",
+                    "KuGou result",
+                    "Jay Chou",
+                    Some("KuGou album"),
+                    Some(180),
+                    20,
+                ),
+            ],
+            &["kugou".to_owned(), "netease".to_owned()],
+        );
+
+        assert_eq!(
+            merged.first().map(|track| track.title.as_str()),
+            Some("KuGou result")
+        );
+    }
+
+    #[test]
+    fn merge_tracks_should_use_default_channel_order_before_provider_rank() {
+        let merged = merge_tracks(
+            vec![
+                candidate(
+                    "fika.netease::wy",
+                    "wy",
+                    "NetEase result",
+                    "Jay Chou",
+                    Some("NetEase album"),
+                    Some(180),
+                    1,
+                ),
+                candidate(
+                    "fika.kugou::kg",
+                    "kg",
+                    "KuGou result",
+                    "Jay Chou",
+                    Some("KuGou album"),
+                    Some(180),
+                    20,
+                ),
+            ],
+            &[],
+        );
+
+        assert_eq!(
+            merged.first().map(|track| track.title.as_str()),
+            Some("KuGou result")
+        );
     }
 
     #[test]

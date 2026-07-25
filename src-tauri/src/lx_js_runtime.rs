@@ -2,8 +2,8 @@
 
 use crate::lx_js_importer::LxJsMetadata;
 use crate::source_runtime::{
-    SourceCapability, SourceHttpMethod, SourceHttpRequest, SourceInfo, SourceProvider,
-    SourceRequest, SourceResponse, SourceRuntimeContext, SourceRuntimeError,
+    SourceCapability, SourceHttpMethod, SourceHttpRequest, SourceHttpResponse, SourceInfo,
+    SourceProvider, SourceRequest, SourceResponse, SourceRuntimeContext, SourceRuntimeError,
 };
 use aes::Aes128;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -559,8 +559,9 @@ impl SourceProvider for ImportedLxJsProvider {
         if !is_http_url(url) {
             return Err(context.provider_error("LX musicUrl handler returned an invalid URL"));
         }
+        let url = resolve_webview_media_url(context, url);
         context.info("resolved musicUrl through imported LX JavaScript");
-        Ok(SourceResponse::MusicUrl(url.to_owned()))
+        Ok(SourceResponse::MusicUrl(url))
     }
 }
 
@@ -1042,6 +1043,72 @@ fn is_http_url(value: &str) -> bool {
         .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
 }
 
+fn resolve_webview_media_url(context: &mut SourceRuntimeContext, value: &str) -> String {
+    let Ok(mut candidate) = url::Url::parse(value) else {
+        return value.to_owned();
+    };
+    if candidate.scheme() == "https" && has_media_extension(&candidate) {
+        return value.to_owned();
+    }
+    if candidate.scheme() == "http" && candidate.set_scheme("https").is_err() {
+        return value.to_owned();
+    }
+
+    let Some(response) = probe_media_redirect(context, candidate.as_str()) else {
+        return value.to_owned();
+    };
+    let Ok(mut final_url) = url::Url::parse(&response.final_url) else {
+        return value.to_owned();
+    };
+    if response.is_success() && final_url.scheme() == "https" {
+        return final_url.to_string();
+    }
+    if final_url.scheme() != "http" || final_url.set_scheme("https").is_err() {
+        return value.to_owned();
+    }
+
+    let Some(secure_response) = probe_media_redirect(context, final_url.as_str()) else {
+        context.warn("imported LX musicUrl resolves to HTTP media that could not be upgraded");
+        return value.to_owned();
+    };
+    let Ok(secure_final_url) = url::Url::parse(&secure_response.final_url) else {
+        return value.to_owned();
+    };
+    if secure_response.is_success() && secure_final_url.scheme() == "https" {
+        context.info("upgraded imported LX media redirect to HTTPS for WebView playback");
+        return secure_final_url.to_string();
+    }
+
+    context.warn("imported LX musicUrl resolves to HTTP media that could not be upgraded");
+    value.to_owned()
+}
+
+fn probe_media_redirect(
+    context: &mut SourceRuntimeContext,
+    value: &str,
+) -> Option<SourceHttpResponse> {
+    context
+        .http_request(
+            SourceHttpRequest {
+                method: SourceHttpMethod::Head,
+                url: value.to_owned(),
+                headers: BTreeMap::new(),
+                body: None,
+                json_body: None,
+                timeout: Some(Duration::from_secs(8)),
+            },
+            "resolve imported LX media redirect",
+        )
+        .ok()
+}
+
+fn has_media_extension(value: &url::Url) -> bool {
+    let path = value.path().to_ascii_lowercase();
+    ["mp3", "flac", "m4a", "mp4", "aac", "ogg", "opus", "wav"]
+        .iter()
+        .any(|extension| path.ends_with(&format!(".{extension}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1049,6 +1116,7 @@ mod tests {
         lx_music_source, SourceAction, SourceCancellationToken, SourceHost, SourceHostError,
         SourceHttpResponse, SourceQuality, SourceRequestOutcome, SourceRuntime, LX_SOURCE_KG,
     };
+    use std::io::Read;
     use std::sync::{Arc, Mutex};
 
     const TEST_SOURCE: &str = r#"
@@ -1071,6 +1139,11 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct RecordingHost {
+        requests: Mutex<Vec<SourceHttpRequest>>,
+    }
+
+    #[derive(Debug, Default)]
+    struct RedirectingMediaHost {
         requests: Mutex<Vec<SourceHttpRequest>>,
     }
 
@@ -1097,6 +1170,40 @@ mod tests {
                 )]),
                 content_type: Some("application/json".to_owned()),
                 body: br#"{"url":"https://cdn.example.test/song.mp3"}"#.to_vec(),
+            })
+        }
+    }
+
+    impl SourceHost for RedirectingMediaHost {
+        fn http_request(
+            &self,
+            _source_id: &str,
+            request: &SourceHttpRequest,
+            cancellation: &SourceCancellationToken,
+        ) -> Result<SourceHttpResponse, SourceHostError> {
+            if cancellation.is_cancelled() {
+                return Err(SourceHostError::Cancelled);
+            }
+            self.requests
+                .lock()
+                .expect("request log should lock")
+                .push(request.clone());
+            let final_url = match request.url.as_str() {
+                "https://resolver.example.test/play" => "http://media.example.test/song.flac",
+                "https://media.example.test/song.flac" => "https://media.example.test/song.flac",
+                _ => {
+                    return Err(SourceHostError::Network {
+                        url: request.url.clone(),
+                        message: "unexpected test URL".to_owned(),
+                    });
+                }
+            };
+            Ok(SourceHttpResponse {
+                status: 200,
+                final_url: final_url.to_owned(),
+                headers: BTreeMap::from([("content-type".to_owned(), "audio/flac".to_owned())]),
+                content_type: Some("audio/flac".to_owned()),
+                body: Vec::new(),
             })
         }
     }
@@ -1159,6 +1266,29 @@ mod tests {
             json!({ "id": "track-hash", "quality": "128k" })
         );
         assert_eq!(requests[0].timeout, Some(Duration::from_millis(2500)));
+    }
+
+    #[test]
+    fn imported_script_should_upgrade_http_media_redirects_for_webview_playback() {
+        let source = r#"
+            const { EVENT_NAMES, on, send } = globalThis.lx;
+            on(EVENT_NAMES.request, () => Promise.resolve('http://resolver.example.test/play'));
+            send(EVENT_NAMES.inited, { sources: { kg: { type: 'music', actions: ['musicUrl'], qualitys: ['128k'] } } });
+        "#;
+        let host = Arc::new(RedirectingMediaHost::default());
+        let runtime = SourceRuntime::with_host(host.clone(), [SourceCapability::NetworkAny]);
+        let outcome = dispatch(&runtime, &provider(source))
+            .expect("HTTP media redirect should be upgraded through the source host");
+
+        assert_eq!(
+            outcome.response,
+            SourceResponse::MusicUrl("https://media.example.test/song.flac".to_owned())
+        );
+        let requests = host.requests.lock().expect("request log should lock");
+        assert_eq!(requests.len(), 2);
+        assert!(requests
+            .iter()
+            .all(|request| request.method == SourceHttpMethod::Head));
     }
 
     #[test]
@@ -1374,6 +1504,12 @@ mod tests {
     fn live_external_lx_script_should_resolve_a_playable_kugou_url() {
         let source_path = std::env::var("FIKA_LX_JS_LIVE_SOURCE")
             .expect("FIKA_LX_JS_LIVE_SOURCE should point to an LX JavaScript file");
+        let track_hash = std::env::var("FIKA_LX_JS_LIVE_HASH")
+            .unwrap_or_else(|_| "04DE99837D367481C2CD07C107003E1D".to_owned());
+        let quality = std::env::var("FIKA_LX_JS_LIVE_QUALITY")
+            .ok()
+            .and_then(|quality| SourceQuality::from_lx_str(&quality))
+            .unwrap_or(SourceQuality::K128);
         let source = std::fs::read_to_string(&source_path)
             .expect("live LX JavaScript source should be readable");
         let report = crate::lx_js_importer::analyze_lx_js_source(&source_path, &source)
@@ -1396,21 +1532,28 @@ mod tests {
                 SourceRequest::MusicUrl {
                     source: LX_SOURCE_KG.to_owned(),
                     music_info: json!({
-                        "id": "04DE99837D367481C2CD07C107003E1D",
-                        "hash": "04DE99837D367481C2CD07C107003E1D",
-                        "songmid": "04DE99837D367481C2CD07C107003E1D",
+                        "id": track_hash,
+                        "hash": track_hash,
+                        "songmid": track_hash,
                         "name": "无烟区",
                         "singer": "陈粒",
                         "interval": 322,
                     }),
-                    quality: SourceQuality::K128,
+                    quality,
                 },
             )
             .expect("live LX JavaScript source should resolve KuGou playback");
         let SourceResponse::MusicUrl(url) = outcome.response else {
             panic!("live LX source should return musicUrl");
         };
-        let response = reqwest::blocking::Client::new()
+        assert_eq!(
+            url::Url::parse(&url)
+                .expect("resolved musicUrl should remain valid")
+                .scheme(),
+            "https",
+            "resolved musicUrl must be secure for WebView playback"
+        );
+        let mut response = reqwest::blocking::Client::new()
             .get(&url)
             .header(reqwest::header::RANGE, "bytes=0-1023")
             .timeout(Duration::from_secs(15))
@@ -1418,10 +1561,24 @@ mod tests {
             .expect("resolved URL should accept a range request");
 
         assert!(response.status().is_success());
-        assert!(response
+        let has_audio_content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.starts_with("audio/")));
+            .is_some_and(|value| value.starts_with("audio/"));
+        let mut prefix = [0_u8; 12];
+        let prefix_len = response
+            .read(&mut prefix)
+            .expect("resolved response should expose audio bytes");
+        let prefix = &prefix[..prefix_len];
+        let has_audio_signature = prefix.starts_with(b"fLaC")
+            || prefix.starts_with(b"ID3")
+            || prefix.starts_with(b"OggS")
+            || (prefix.starts_with(b"RIFF") && prefix.get(8..12) == Some(b"WAVE"))
+            || prefix.get(4..8) == Some(b"ftyp")
+            || prefix
+                .get(..2)
+                .is_some_and(|bytes| bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0);
+        assert!(has_audio_content_type || has_audio_signature);
     }
 }

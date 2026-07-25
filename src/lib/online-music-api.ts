@@ -302,14 +302,16 @@ async function resolveFromAudioSourceLayer(options: LayerOptions): Promise<Onlin
     throw new Error("Audio Source does not support any candidate channel.");
   }
 
-  for (const quality of options.qualities) {
+  for (const [index, quality] of options.qualities.entries()) {
     throwIfAborted(options.signal);
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
       break;
     }
+    const remainingQualityCount = options.qualities.length - index;
+    const qualityBudget = Math.max(1, Math.floor(remaining / remainingQualityCount));
     try {
-      return await raceCandidates(options, supportedCandidates, quality, remaining);
+      return await raceCandidates(options, supportedCandidates, quality, qualityBudget);
     } catch (error) {
       if (isAbortError(error)) {
         throw error;
