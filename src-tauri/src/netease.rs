@@ -1340,7 +1340,8 @@ fn netease_artist_from_json(value: &JsonValue) -> Option<SourceArtistSearchResul
         id: id.clone(),
         source: source_runtime::LX_SOURCE_WY.to_owned(),
         name: json_string(value.get("name"))?,
-        cover_url: json_string(value.get("picUrl")).or_else(|| json_string(value.get("img1v1Url"))),
+        cover_url: netease_image_url(value.get("picUrl"))
+            .or_else(|| netease_image_url(value.get("img1v1Url"))),
         platform_ids: platform_id(&id),
         raw_info: json!({ "id": id }),
     })
@@ -1371,7 +1372,7 @@ fn netease_album_from_json(value: &JsonValue) -> Option<SourceAlbumSearchResult>
         release_year: publish_time
             .and_then(|millis| UNIX_EPOCH.checked_add(Duration::from_millis(millis)))
             .and_then(system_time_year),
-        cover_url: json_string(value.get("picUrl")),
+        cover_url: netease_image_url(value.get("picUrl")),
         track_count: value.get("size").and_then(JsonValue::as_u64),
         platform_ids: platform_id(&id),
         raw_info: json!({ "id": id }),
@@ -1401,7 +1402,7 @@ fn netease_playlist_search_from_json(value: &JsonValue) -> Option<SourcePlaylist
         source: source_runtime::LX_SOURCE_WY.to_owned(),
         name: json_string(value.get("name"))?,
         description: json_string(value.get("description")),
-        cover_url: json_string(value.get("coverImgUrl")),
+        cover_url: netease_image_url(value.get("coverImgUrl")),
         track_count: value.get("trackCount").and_then(JsonValue::as_u64),
         owner_name: value
             .get("creator")
@@ -1841,6 +1842,18 @@ fn json_string(value: Option<&JsonValue>) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn netease_image_url(value: Option<&JsonValue>) -> Option<String> {
+    let value = json_string(value)?;
+    let value = value.trim();
+    if let Some(path) = value.strip_prefix("http://") {
+        Some(format!("https://{path}"))
+    } else if value.starts_with("https://") {
+        Some(value.to_owned())
+    } else {
+        None
+    }
+}
+
 fn playlist_track_ids(playlist: &JsonValue) -> Vec<String> {
     playlist
         .get("trackIds")
@@ -1970,8 +1983,8 @@ fn remote_track_from_json(value: &JsonValue) -> Option<RemoteTrack> {
         album: album.and_then(|album| json_string(album.get("name"))),
         duration_seconds: duration_millis.map(|duration| duration / 1000),
         cover_url: album
-            .and_then(|album| json_string(album.get("picUrl")))
-            .or_else(|| json_string(value.get("picUrl"))),
+            .and_then(|album| netease_image_url(album.get("picUrl")))
+            .or_else(|| netease_image_url(value.get("picUrl"))),
         track_number: value
             .get("no")
             .and_then(JsonValue::as_u64)
@@ -1993,7 +2006,7 @@ fn playlist_from_json(value: &JsonValue, account_user_id: &str) -> Option<Source
         id: json_id(value.get("id"))?,
         name: json_string(value.get("name"))?,
         description: json_string(value.get("description")),
-        cover_url: json_string(value.get("coverImgUrl")),
+        cover_url: netease_image_url(value.get("coverImgUrl")),
         track_count: value
             .get("trackCount")
             .and_then(JsonValue::as_u64)
@@ -2391,12 +2404,16 @@ mod tests {
             "id": 347230,
             "name": "海阔天空",
             "ar": [{ "name": "Beyond" }],
-            "al": { "name": "乐与怒", "picUrl": "https://example.test/cover.jpg" },
+            "al": { "name": "乐与怒", "picUrl": "http://example.test/cover.jpg" },
             "dt": 326000
         }))
         .expect("track should normalize");
 
         assert_eq!(track.duration_seconds, Some(326));
+        assert_eq!(
+            track.cover_url.as_deref(),
+            Some("https://example.test/cover.jpg")
+        );
     }
 
     #[test]
