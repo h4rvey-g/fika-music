@@ -2005,7 +2005,7 @@ fn playlist_from_json(value: &JsonValue, fallback_owner: &str) -> Option<SourceP
     let name = first_json_string(value, &["name", "listname", "specialname"])?;
     let description = first_json_string(value, &["intro", "description", "desc"])
         .filter(|description| !description.trim().is_empty());
-    let cover_url = first_json_string(value, &["pic", "img", "sizable_cover", "cover"])
+    let cover_url = first_json_string(value, &["pic", "img", "imgurl", "sizable_cover", "cover"])
         .and_then(|url| normalize_image_url(&url));
     let track_count = ["count", "songcount", "track_count", "total"]
         .into_iter()
@@ -2831,7 +2831,8 @@ mod tests {
                 "global_collection_id": "collection_3_1863870844_4_0",
                 "name": "Daily",
                 "count": 47,
-                "list_create_username": "Fika"
+                "list_create_username": "Fika",
+                "imgurl": "http://imge.kugou.com/stdmusic/{size}/playlist.jpg"
             }),
             "Fallback",
         )
@@ -2840,10 +2841,16 @@ mod tests {
         assert_eq!(
             (
                 playlist.id.as_str(),
+                playlist.cover_url.as_deref(),
                 playlist.track_count,
                 playlist.can_mutate
             ),
-            ("collection_3_1863870844_4_0", 47, false)
+            (
+                "collection_3_1863870844_4_0",
+                Some("https://imge.kugou.com/stdmusic/400/playlist.jpg"),
+                47,
+                false
+            )
         );
     }
 

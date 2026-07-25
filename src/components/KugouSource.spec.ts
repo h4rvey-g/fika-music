@@ -41,11 +41,12 @@ vi.mock("@tanstack/vue-virtual", () => import("../test/vue-virtual.mock"));
 
 const accountRef = "kugou-account:00000000-0000-4000-8000-000000000001";
 const track = createKugouTrack({ coverUrl: "https://example.test/cover.jpg" });
+const playlistCoverUrl = "https://example.test/playlist.jpg";
 const playlist: SourcePlaylist = {
   id: "collection_3_42_1_0",
   name: "Daily",
   description: null,
-  coverUrl: null,
+  coverUrl: playlistCoverUrl,
   trackCount: 1,
   ownerName: "Fika",
   canMutate: false,
@@ -199,6 +200,20 @@ describe("KugouSource", () => {
     );
     expect(wrapper.text()).toContain("Read only");
     expect(wrapper.find('button[aria-label="Play Under My Skin"]').exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("renders the Playlist cover in the KuGou Playlist navigation", async () => {
+    const wrapper = mountKugouSource();
+    await flushPromises();
+
+    const playlistsTab = wrapper
+      .findAll('[role="tab"]')
+      .find((tab) => tab.text().trim() === "Playlists");
+    await playlistsTab?.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find("aside img").attributes("src")).toBe(playlistCoverUrl);
     wrapper.unmount();
   });
 

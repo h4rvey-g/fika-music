@@ -653,6 +653,17 @@ function formatDuration(seconds: number | null) {
           <ul class="menu w-full gap-1 p-2">
             <li v-for="playlist in playlists" :key="playlist.id">
               <button type="button" :class="{ 'menu-active': selectedPlaylistId === playlist.id }" @click="selectedPlaylistId = playlist.id">
+                <span class="flex size-10 shrink-0 items-center justify-center overflow-hidden rounded bg-base-200">
+                  <img
+                    v-if="playlist.coverUrl"
+                    class="size-full object-cover"
+                    :src="playlist.coverUrl"
+                    alt=""
+                    loading="lazy"
+                    decoding="async"
+                  />
+                  <ListMusic v-else :size="18" aria-hidden="true" />
+                </span>
                 <span class="min-w-0 flex-1 truncate text-left">{{ playlist.name }}</span>
                 <span class="text-xs tabular-nums opacity-60">{{ playlist.trackCount }}</span>
               </button>
