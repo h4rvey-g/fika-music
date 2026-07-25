@@ -53,6 +53,7 @@ const playlist: OnlinePlaylist = {
   pluginId: "fika.netease",
   sourceId: "wy",
   channelName: "NetEase",
+  accountRef: null,
   id: "playlist-1",
   name: "Private Mix",
   description: null,
@@ -62,6 +63,29 @@ const playlist: OnlinePlaylist = {
   platformIds: { id: "playlist-1" },
   rawInfo: {},
   rank: 1,
+};
+
+const libraryPlaylist: OnlinePlaylist = {
+  ...playlist,
+  key: "fika.netease:wy:netease-account:1:playlist-1",
+  accountRef: "netease-account:1",
+  coverUrl: "https://cdn.test/private-mix.jpg",
+};
+
+const kugouLibraryPlaylist: OnlinePlaylist = {
+  ...playlist,
+  key: "fika.kugou:kg:kugou-account:1:playlist-2",
+  channelId: "fika.kugou:kg",
+  pluginId: "fika.kugou",
+  sourceId: "kg",
+  channelName: "KuGou",
+  accountRef: "kugou-account:1",
+  id: "playlist-2",
+  name: "KuGou Favorites",
+  coverUrl: "https://cdn.test/kugou-favorites.jpg",
+  trackCount: 24,
+  platformIds: { id: "playlist-2" },
+  rank: 2,
 };
 
 function failedDownloadTask(): OnlineDownloadTask {
@@ -147,6 +171,14 @@ describe("Online Music workspace", () => {
       if (command === "get_online_music_settings") return Promise.resolve(settings);
       if (command === "list_online_download_tasks") return Promise.resolve([]);
       if (command === "start_online_music_search") return Promise.resolve("search-1");
+      if (command === "online_music_playlists") {
+        return Promise.resolve({
+          items: [],
+          failures: [],
+          supportedChannels: 2,
+          completedChannels: 2,
+        });
+      }
       return Promise.resolve(null);
     });
   });
@@ -156,7 +188,7 @@ describe("Online Music workspace", () => {
     await flushPromises();
 
     expect(
-      wrapper.findAll("[data-online-home] button[aria-label]").map((button) =>
+      wrapper.findAll("[data-online-recommendation-entry]").map((button) =>
         button.attributes("aria-label")
       ),
     ).toEqual(["每日推荐", "私人漫游", "私人雷达"]);
@@ -176,6 +208,83 @@ describe("Online Music workspace", () => {
     expect(
       tauriMocks.invoke.mock.calls.filter(([command]) => command === "online_music_recommendations"),
     ).toHaveLength(3);
+    expect(
+      tauriMocks.invoke.mock.calls.filter(([command]) => command === "online_music_playlists"),
+    ).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("renders account playlists on For You and opens authenticated playlist details", async () => {
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "get_online_music_settings") return Promise.resolve(settings);
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "online_music_playlists") {
+        return Promise.resolve({
+          items: [kugouLibraryPlaylist, libraryPlaylist],
+          failures: [],
+          supportedChannels: 2,
+          completedChannels: 2,
+        });
+      }
+      if (command === "online_music_playlist_tracks") {
+        return Promise.resolve({ items: [track(1)], hasMore: false, total: 1 });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+
+    const providerSections = wrapper.findAll("[data-online-playlist-provider]");
+    expect(providerSections.map((section) =>
+      section.attributes("data-online-playlist-provider")
+    )).toEqual(["fika.netease", "fika.kugou"]);
+    expect(providerSections[0].text()).toContain("Private Mix");
+    expect(providerSections[0].text()).not.toContain("KuGou Favorites");
+    expect(providerSections[1].text()).toContain("KuGou Favorites");
+    expect(providerSections[1].text()).not.toContain("Private Mix");
+
+    const card = wrapper.get('button[aria-label="Open playlist Private Mix"]');
+    expect(card.text()).toContain("NetEase");
+    expect(card.text()).toContain("12 tracks");
+    await card.trigger("click");
+    await flushPromises();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("online_music_playlist_tracks", {
+      playlist: libraryPlaylist,
+      page: 1,
+      pageSize: 100,
+      requestId: expect.stringMatching(/^online-detail-/),
+    });
+    expect(wrapper.find('button[aria-label="Play Song 1"]').exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("keeps playlists visible when one provider fails and offers its channel action", async () => {
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "get_online_music_settings") return Promise.resolve(settings);
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "online_music_playlists") {
+        return Promise.resolve({
+          items: [libraryPlaylist],
+          failures: [{
+            channelId: "fika.kugou:kg",
+            channelName: "KuGou Music",
+            message: "Connect an active KuGou Music account to load playlists.",
+          }],
+          supportedChannels: 2,
+          completedChannels: 1,
+        });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+
+    expect(wrapper.find('button[aria-label="Open playlist Private Mix"]').exists()).toBe(true);
+    const status = wrapper.get('[data-online-playlists] [role="status"]');
+    expect(status.text()).toContain("KuGou Music unavailable");
+    await status.get("button").trigger("click");
+    expect(wrapper.emitted("openPlugin")?.[0]).toEqual(["fika.kugou"]);
     wrapper.unmount();
   });
 
@@ -202,7 +311,7 @@ describe("Online Music workspace", () => {
     const wrapper = mountOnlineMusic();
     await flushPromises();
 
-    const cards = wrapper.findAll("[data-online-home] button[aria-label]");
+    const cards = wrapper.findAll("[data-online-recommendation-entry]");
     expect(cards.map((card) => card.get("img").attributes("src"))).toEqual([
       covers.daily,
       covers.roaming,

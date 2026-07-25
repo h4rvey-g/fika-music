@@ -11,6 +11,7 @@ import type {
   OnlineMusicSettings,
   OnlinePlaylist,
   OnlinePlaylistDetailError,
+  OnlinePlaylistsResult,
   OnlineRecommendationsResult,
   OnlineSearchSection,
   OnlineSearchSectionEvent,
@@ -34,6 +35,7 @@ export type {
   OnlineMusicSettings,
   OnlinePlaylist,
   OnlinePlaylistDetailError,
+  OnlinePlaylistsResult,
   OnlineRecommendationsResult,
   OnlineSearchSection,
   OnlineSearchSectionEvent,
@@ -93,6 +95,12 @@ export function getOnlineMusicRecommendations(
 ) {
   return invoke<OnlineRecommendationsResult>(TAURI_COMMANDS.onlineMusicRecommendations, {
     kind,
+    requestId,
+  });
+}
+
+export function getOnlineMusicPlaylists(requestId?: string) {
+  return invoke<OnlinePlaylistsResult>(TAURI_COMMANDS.onlineMusicPlaylists, {
     requestId,
   });
 }

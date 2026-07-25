@@ -102,6 +102,7 @@ macro_rules! with_tauri_commands {
             update_online_music_settings,
             list_online_music_channels,
             online_music_recommendations,
+            online_music_playlists,
             online_music_suggestions,
             start_online_music_search,
             online_music_search_page,
@@ -1660,6 +1661,162 @@ fn recommendation_request_limit(kind: source_runtime::MusicRecommendationKind) -
 }
 
 #[tauri::command]
+async fn online_music_playlists(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request_id: Option<String>,
+) -> CommandResult<online_music::OnlinePlaylistsResult> {
+    let cancellation = register_source_request(state.inner(), request_id.as_deref())
+        .map_err(|error| error.message)?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        online_music_playlists_inner(&state, cancellation)
+    })
+    .await;
+    unregister_source_request(state.inner(), request_id.as_deref());
+    result.map_err(|error| format!("online music playlist task failed: {error}"))?
+}
+
+fn online_music_playlists_inner(
+    state: &AppState,
+    cancellation: source_runtime::SourceCancellationToken,
+) -> CommandResult<online_music::OnlinePlaylistsResult> {
+    let eligible = online_music_channels(state)?
+        .into_iter()
+        .filter(|channel| {
+            channel
+                .actions
+                .contains(&source_runtime::SourceAction::PlaylistList)
+                && channel
+                    .actions
+                    .contains(&source_runtime::SourceAction::PlaylistRead)
+                && matches!(
+                    channel.plugin_id.as_str(),
+                    netease::NETEASE_PLUGIN_ID | kugou::KUGOU_PLUGIN_ID
+                )
+        })
+        .collect::<Vec<_>>();
+    let supported_channels = eligible.len() as u32;
+    let netease_account_ref = if eligible
+        .iter()
+        .any(|channel| channel.plugin_id == netease::NETEASE_PLUGIN_ID)
+    {
+        state
+            .netease_bridge
+            .accounts()
+            .map(|accounts| {
+                accounts
+                    .into_iter()
+                    .find(|account| account.status == netease::NeteaseAccountStatus::Active)
+                    .map(|account| account.account_ref)
+            })
+            .map_err(|error| error.to_string())
+    } else {
+        Ok(None)
+    };
+    let kugou_account_ref = if eligible
+        .iter()
+        .any(|channel| channel.plugin_id == kugou::KUGOU_PLUGIN_ID)
+    {
+        state
+            .kugou_bridge
+            .accounts()
+            .map(|accounts| {
+                accounts
+                    .into_iter()
+                    .find(|account| account.status == kugou::KugouAccountStatus::Active)
+                    .map(|account| account.account_ref)
+            })
+            .map_err(|error| error.to_string())
+    } else {
+        Ok(None)
+    };
+
+    let account_ref = |channel: &online_music::OnlineChannel| -> Result<Option<&str>, &str> {
+        match channel.plugin_id.as_str() {
+            netease::NETEASE_PLUGIN_ID => netease_account_ref
+                .as_ref()
+                .map(Option::as_deref)
+                .map_err(String::as_str),
+            kugou::KUGOU_PLUGIN_ID => kugou_account_ref
+                .as_ref()
+                .map(Option::as_deref)
+                .map_err(String::as_str),
+            _ => Ok(None),
+        }
+    };
+    let mut failures = Vec::new();
+    let mut ready = Vec::new();
+    for channel in eligible {
+        match account_ref(&channel) {
+            Ok(Some(_)) => ready.push(channel),
+            Ok(None) => failures.push(online_music::OnlineChannelFailure {
+                channel_id: channel.id,
+                channel_name: channel.source_name.clone(),
+                message: format!(
+                    "Connect an active {} account to load playlists.",
+                    channel.source_name
+                ),
+            }),
+            Err(message) => failures.push(online_music::OnlineChannelFailure {
+                channel_id: channel.id,
+                channel_name: channel.source_name.clone(),
+                message: format!("Could not load {} accounts: {message}", channel.source_name),
+            }),
+        }
+    }
+    let outcomes = dispatch_channels(state, &ready, cancellation, |channel| {
+        source_runtime::SourceRequest::PlaylistList {
+            source: channel.source_id.clone(),
+            account_ref: account_ref(channel)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+                .to_owned(),
+        }
+    });
+    let completed_channels = outcomes.len() as u32;
+    let mut items = Vec::new();
+    for (channel, outcome) in outcomes {
+        match outcome.and_then(|outcome| match outcome.response {
+            source_runtime::SourceResponse::PlaylistList(playlists) => Ok(playlists),
+            _ => Err("provider returned an unexpected response".to_owned()),
+        }) {
+            Ok(playlists) => {
+                let channel_account_ref = account_ref(&channel).ok().flatten().unwrap_or_default();
+                items.extend(playlists.into_iter().enumerate().map(|(index, playlist)| {
+                    online_music::OnlinePlaylist::from_account(
+                        &channel,
+                        channel_account_ref,
+                        playlist,
+                        index as u32 + 1,
+                    )
+                }));
+            }
+            Err(message) => failures.push(online_music::OnlineChannelFailure {
+                channel_id: channel.id,
+                channel_name: channel.source_name,
+                message,
+            }),
+        }
+    }
+    let settings = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| "database lock was poisoned".to_owned())?;
+        online_music::load_settings(&db).map_err(|error| error.to_string())?
+    };
+    online_music::sort_playlists(&mut items, &settings.channel_priority);
+    Ok(online_music::OnlinePlaylistsResult {
+        items,
+        failures,
+        supported_channels,
+        completed_channels,
+    })
+}
+
+#[tauri::command]
 async fn online_music_suggestions(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -2313,7 +2470,7 @@ fn should_cache_online_request(request: &source_runtime::SourceRequest) -> bool 
         source_runtime::SourceRequest::MusicRecommendations {
             kind: source_runtime::MusicRecommendationKind::Roaming,
             ..
-        }
+        } | source_runtime::SourceRequest::PlaylistList { .. }
     )
 }
 
@@ -2578,33 +2735,59 @@ async fn online_music_playlist_tracks(
             &playlist.plugin_id,
             &playlist.source_id,
             &playlist.channel_name,
-            source_runtime::SourceAction::PlaylistReadPublic,
-        );
-        let outcome = dispatch_candidate_request_typed(
-            &state,
-            &channel,
-            source_runtime::SourceRequest::PlaylistReadPublic {
-                source: playlist.source_id.clone(),
-                playlist: source_runtime::SourceEntityRef {
-                    id: playlist.id,
-                    platform_ids: playlist.platform_ids,
-                    raw_info: playlist.raw_info,
-                },
-                page,
-                page_size,
+            if playlist.account_ref.is_some() {
+                source_runtime::SourceAction::PlaylistRead
+            } else {
+                source_runtime::SourceAction::PlaylistReadPublic
             },
-            cancellation,
-        )?;
-        let source_runtime::SourceResponse::PlaylistReadPublic(response) = outcome.response else {
-            return Err(online_music_plugin_error(
-                &channel.plugin_id,
-                "unexpected-response",
-                "provider returned an unexpected playlist response",
-            ));
+        );
+        let (tracks, has_more, total) = if let Some(account_ref) = playlist.account_ref {
+            let outcome = dispatch_candidate_request_typed(
+                &state,
+                &channel,
+                source_runtime::SourceRequest::PlaylistRead {
+                    source: playlist.source_id.clone(),
+                    account_ref: account_ref.clone(),
+                    playlist_id: playlist.id,
+                },
+                cancellation,
+            )?;
+            let source_runtime::SourceResponse::PlaylistRead(response) = outcome.response else {
+                return Err(online_music_plugin_error(
+                    &channel.plugin_id,
+                    "unexpected-response",
+                    "provider returned an unexpected playlist response",
+                ));
+            };
+            account_playlist_track_page(response.tracks, &account_ref, page, page_size)
+        } else {
+            let outcome = dispatch_candidate_request_typed(
+                &state,
+                &channel,
+                source_runtime::SourceRequest::PlaylistReadPublic {
+                    source: playlist.source_id.clone(),
+                    playlist: source_runtime::SourceEntityRef {
+                        id: playlist.id,
+                        platform_ids: playlist.platform_ids,
+                        raw_info: playlist.raw_info,
+                    },
+                    page,
+                    page_size,
+                },
+                cancellation,
+            )?;
+            let source_runtime::SourceResponse::PlaylistReadPublic(response) = outcome.response
+            else {
+                return Err(online_music_plugin_error(
+                    &channel.plugin_id,
+                    "unexpected-response",
+                    "provider returned an unexpected playlist response",
+                ));
+            };
+            (response.list, !response.is_end, response.total)
         };
         let items = online_music::merge_tracks(
-            response
-                .list
+            tracks
                 .into_iter()
                 .enumerate()
                 .map(|(index, track)| {
@@ -2619,8 +2802,8 @@ async fn online_music_playlist_tracks(
         );
         Ok(online_music::OnlineTrackPage {
             items,
-            has_more: !response.is_end,
-            total: response.total,
+            has_more,
+            total,
         })
     })
     .await;
@@ -2642,6 +2825,31 @@ async fn online_music_playlist_tracks(
             channel_name: error_channel_name,
         }),
     }
+}
+
+fn account_playlist_track_page(
+    tracks: Vec<source_runtime::SourceSearchResult>,
+    account_ref: &str,
+    page: u64,
+    page_size: u64,
+) -> (Vec<source_runtime::SourceSearchResult>, bool, Option<u64>) {
+    let total = tracks.len() as u64;
+    let start =
+        usize::try_from(page.saturating_sub(1).saturating_mul(page_size)).unwrap_or(usize::MAX);
+    let limit = usize::try_from(page_size).unwrap_or(usize::MAX);
+    let items = tracks
+        .into_iter()
+        .skip(start)
+        .take(limit)
+        .map(|mut track| {
+            track.platform_ids.insert(
+                "accountRef".to_owned(),
+                source_runtime::JsonScalar::String(account_ref.to_owned()),
+            );
+            track
+        })
+        .collect();
+    (items, page.saturating_mul(page_size) < total, Some(total))
 }
 
 fn plugin_error_code(error: &PluginSystemError) -> Option<&str> {
@@ -4074,6 +4282,56 @@ mod tests {
         };
 
         assert!(!should_cache_online_request(&request));
+    }
+
+    #[test]
+    fn account_playlist_lists_should_not_use_response_cache() {
+        let request = source_runtime::SourceRequest::PlaylistList {
+            source: source_runtime::LX_SOURCE_WY.to_owned(),
+            account_ref: "account".to_owned(),
+        };
+
+        assert!(!should_cache_online_request(&request));
+    }
+
+    #[test]
+    fn account_playlist_track_page_should_paginate_and_attach_account_context() {
+        let tracks = (1..=3)
+            .map(|index| source_runtime::SourceSearchResult {
+                id: index.to_string(),
+                source: source_runtime::LX_SOURCE_KG.to_owned(),
+                title: format!("Track {index}"),
+                artist: "Artist".to_owned(),
+                album: None,
+                duration_seconds: None,
+                cover_url: None,
+                track_number: None,
+                disc_number: None,
+                platform_ids: BTreeMap::new(),
+                raw_info: JsonValue::Object(Default::default()),
+            })
+            .collect();
+
+        let (page, has_more, total) = account_playlist_track_page(tracks, "kugou-account:1", 2, 2);
+
+        assert_eq!(
+            (
+                page.iter()
+                    .map(|track| track.id.as_str())
+                    .collect::<Vec<_>>(),
+                page[0].platform_ids.get("accountRef"),
+                has_more,
+                total,
+            ),
+            (
+                vec!["3"],
+                Some(&source_runtime::JsonScalar::String(
+                    "kugou-account:1".to_owned()
+                )),
+                false,
+                Some(3),
+            )
+        );
     }
 
     #[test]

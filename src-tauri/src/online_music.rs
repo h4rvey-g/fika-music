@@ -1,6 +1,6 @@
 use crate::source_runtime::{
     JsonScalar, MusicRecommendationKind, SourceAlbumSearchResult, SourceArtistSearchResult,
-    SourcePlaylistSearchResult, SourceQuality, SourceSearchResult,
+    SourcePlaylist, SourcePlaylistSearchResult, SourceQuality, SourceSearchResult,
 };
 use moka::sync::Cache;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -497,6 +497,16 @@ pub struct OnlineRecommendationsResult {
     pub completed_channels: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct OnlinePlaylistsResult {
+    pub items: Vec<OnlinePlaylist>,
+    pub failures: Vec<OnlineChannelFailure>,
+    pub supported_channels: u32,
+    pub completed_channels: u32,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "bindings.ts")]
@@ -739,6 +749,8 @@ pub struct OnlinePlaylist {
     pub plugin_id: String,
     pub source_id: String,
     pub channel_name: String,
+    #[serde(default)]
+    pub account_ref: Option<String>,
     pub id: String,
     pub name: String,
     pub description: Option<String>,
@@ -764,6 +776,7 @@ impl OnlinePlaylist {
             plugin_id: channel.plugin_id.clone(),
             source_id: channel.source_id.clone(),
             channel_name: channel.source_name.clone(),
+            account_ref: None,
             id: playlist.id,
             name: playlist.name,
             description: playlist.description,
@@ -772,6 +785,32 @@ impl OnlinePlaylist {
             owner_name: playlist.owner_name,
             platform_ids: playlist.platform_ids,
             raw_info: playlist.raw_info,
+            rank,
+        }
+    }
+
+    pub fn from_account(
+        channel: &OnlineChannel,
+        account_ref: &str,
+        playlist: SourcePlaylist,
+        rank: u32,
+    ) -> Self {
+        let id = playlist.id;
+        Self {
+            key: format!("{}:{account_ref}:{id}", channel.id),
+            channel_id: channel.id.clone(),
+            plugin_id: channel.plugin_id.clone(),
+            source_id: channel.source_id.clone(),
+            channel_name: channel.source_name.clone(),
+            account_ref: Some(account_ref.to_owned()),
+            platform_ids: BTreeMap::from([("id".to_owned(), JsonScalar::String(id.clone()))]),
+            raw_info: JsonValue::Object(Default::default()),
+            id,
+            name: playlist.name,
+            description: playlist.description,
+            cover_url: playlist.cover_url,
+            track_count: Some(playlist.track_count),
+            owner_name: Some(playlist.owner_name),
             rank,
         }
     }

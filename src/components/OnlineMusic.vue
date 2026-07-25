@@ -30,6 +30,7 @@ import {
   createOnlineDownloadTask,
   getOnlineAlbumTracks,
   getOnlineArtistTracks,
+  getOnlineMusicPlaylists,
   getOnlineMusicRecommendations,
   getOnlineMusicSearchPage,
   getOnlineMusicSettings,
@@ -55,6 +56,7 @@ import {
   type MusicRecommendationKind,
   type OnlineRecommendationsResult,
   type OnlinePlaylist,
+  type OnlinePlaylistsResult,
   type OnlineSearchSection,
   type OnlineSearchSectionEvent,
   type OnlineSearchSectionResult,
@@ -180,6 +182,9 @@ const privateRoamingBatchLoading = ref(false);
 const recommendationPreviews = ref<Record<MusicRecommendationKind, RecommendationPreviewState>>(
   newRecommendationPreviewStates(),
 );
+const playlistLibraryResult = ref<OnlinePlaylistsResult | null>(null);
+const playlistLibraryLoading = ref(false);
+const playlistLibraryError = ref<string | null>(null);
 
 let unlistenSearch: (() => void) | null = null;
 let unlistenDownloads: (() => void) | null = null;
@@ -194,6 +199,9 @@ let recommendationGeneration = 0;
 let privateRoamingBatchGeneration = 0;
 let privateRoamingBatchRequestId: string | null = null;
 let pendingPrivateRoamingBatch: Promise<OnlineRecommendationsResult | null> | null = null;
+let playlistLibraryGeneration = 0;
+let playlistLibraryRequestId: string | null = null;
+let pendingPlaylistLibraryLoad: Promise<OnlinePlaylistsResult | null> | null = null;
 let pendingSearchEvents: OnlineSearchSectionEvent[] = [];
 const pendingRecommendationLoads = new Map<
   MusicRecommendationKind,
@@ -215,6 +223,27 @@ const visibleDetailTitle = computed(() => {
 const activeRecommendationEntry = computed(() =>
   recommendationEntries.find((entry) => entry.id === activeRecommendation.value) ?? null,
 );
+const playlistLibraryItems = computed(() => playlistLibraryResult.value?.items ?? []);
+const playlistLibraryFailures = computed(() => playlistLibraryResult.value?.failures ?? []);
+const playlistProviders = [
+  { label: "NetEase", pluginId: NETEASE_PLUGIN_ID },
+  { label: "KuGou", pluginId: KUGOU_PLUGIN_ID },
+];
+const playlistProviderSections = computed(() => playlistProviders
+  .map((provider) => ({
+    ...provider,
+    items: playlistLibraryItems.value.filter((playlist) =>
+      playlist.pluginId === provider.pluginId
+    ),
+  }))
+  .filter((provider) => provider.items.length > 0));
+const failedPlaylistProviders = computed(() => playlistProviders.filter((provider) =>
+  playlistLibraryFailures.value.some((failure) =>
+    failure.channelId === provider.pluginId
+    || failure.channelId.startsWith(`${provider.pluginId}:`)
+    || failure.channelName.toLowerCase().includes(provider.label.toLowerCase())
+  )
+));
 
 onMounted(async () => {
   [unlistenSearch, unlistenDownloads, unlistenDownloadCompletions] = await Promise.all([
@@ -237,13 +266,17 @@ onMounted(async () => {
   } catch (error) {
     globalError.value = normalizeError(error);
   }
-  if (props.isActive) void preloadRecommendationEntries();
+  if (props.isActive) void preloadForYou();
 });
 
 watch(
   () => props.isActive,
   (isActive) => {
-    if (isActive) void preloadRecommendationEntries();
+    if (isActive) {
+      void preloadForYou(true);
+    } else if (playlistLibraryRequestId) {
+      cancelPlaylistLibraryLoad();
+    }
   },
 );
 
@@ -255,6 +288,7 @@ onBeforeUnmount(() => {
   if (suggestionRequestId) void cancelSourceRequest(suggestionRequestId);
   if (detailRequestId) void cancelSourceRequest(detailRequestId);
   cancelRecommendationLoads();
+  cancelPlaylistLibraryLoad();
   cancelPrivateRoamingBatchLoad();
   if (searchId.value) void cancelSourceRequest(searchId.value);
 });
@@ -375,7 +409,51 @@ async function loadRecommendation(
   return load;
 }
 
-async function preloadRecommendationEntries() {
+async function loadPlaylistLibrary(force = false): Promise<OnlinePlaylistsResult | null> {
+  if (!force && pendingPlaylistLibraryLoad) return pendingPlaylistLibraryLoad;
+  if (!force && playlistLibraryResult.value) return playlistLibraryResult.value;
+
+  if (playlistLibraryRequestId) void cancelSourceRequest(playlistLibraryRequestId);
+  const generation = ++playlistLibraryGeneration;
+  const requestId = `online-playlists-${Date.now()}-${generation}`;
+  playlistLibraryRequestId = requestId;
+  playlistLibraryLoading.value = true;
+  playlistLibraryError.value = null;
+
+  const load = (async () => {
+    try {
+      const result = await getOnlineMusicPlaylists(requestId);
+      if (generation !== playlistLibraryGeneration) return null;
+      playlistLibraryResult.value = result;
+      return result;
+    } catch (error) {
+      if (generation === playlistLibraryGeneration) {
+        playlistLibraryError.value = normalizeError(error);
+      }
+      return null;
+    } finally {
+      if (generation === playlistLibraryGeneration) {
+        playlistLibraryLoading.value = false;
+        playlistLibraryRequestId = null;
+      }
+    }
+  })();
+  pendingPlaylistLibraryLoad = load;
+  void load.finally(() => {
+    if (pendingPlaylistLibraryLoad === load) pendingPlaylistLibraryLoad = null;
+  });
+  return load;
+}
+
+function cancelPlaylistLibraryLoad() {
+  playlistLibraryGeneration += 1;
+  if (playlistLibraryRequestId) void cancelSourceRequest(playlistLibraryRequestId);
+  playlistLibraryRequestId = null;
+  playlistLibraryLoading.value = false;
+  pendingPlaylistLibraryLoad = null;
+}
+
+async function preloadForYou(refreshPlaylists = false) {
   if (
     !props.isActive
     || activeTab.value !== "search"
@@ -385,7 +463,10 @@ async function preloadRecommendationEntries() {
   ) {
     return;
   }
-  await Promise.all(recommendationEntries.map((entry) => loadRecommendation(entry.id)));
+  await Promise.all([
+    ...recommendationEntries.map((entry) => loadRecommendation(entry.id)),
+    loadPlaylistLibrary(refreshPlaylists),
+  ]);
 }
 
 function cancelRecommendationLoad(kind: MusicRecommendationKind) {
@@ -506,7 +587,7 @@ function closeRecommendation() {
   recommendationTracks.value = [];
   recommendationFailures.value = [];
   recommendationError.value = null;
-  void preloadRecommendationEntries();
+  void preloadForYou();
   void nextTick(() => {
     const main = document.querySelector("main");
     if (main) main.scrollTop = 0;
@@ -986,7 +1067,7 @@ function showHome() {
   globalError.value = null;
   loginRequiredPluginId.value = null;
   detailRetryAvailable.value = false;
-  void preloadRecommendationEntries();
+  void preloadForYou();
   void nextTick(() => {
     const main = document.querySelector("main");
     if (main) main.scrollTop = 0;
@@ -1362,6 +1443,7 @@ defineExpose({ showHome });
         <button
           v-for="entry in recommendationEntries"
           :key="entry.id"
+          data-online-recommendation-entry
           class="card card-border card-sm group relative isolate h-36 w-full overflow-hidden bg-base-100 text-left transition-colors hover:bg-base-200/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
           type="button"
           :aria-label="entry.label"
@@ -1419,6 +1501,202 @@ defineExpose({ showHome });
           </div>
         </button>
       </div>
+
+      <section data-online-playlists class="mt-6 min-w-0 border-t border-base-300 pt-4">
+        <div class="mb-3 flex min-w-0 flex-wrap items-center gap-2">
+          <ListMusic :size="17" aria-hidden="true" />
+          <h2 class="text-sm font-semibold">Playlists</h2>
+          <span v-if="playlistLibraryItems.length" class="text-xs tabular-nums text-base-content/50">
+            {{ playlistLibraryItems.length }} loaded
+          </span>
+          <span
+            v-if="playlistLibraryFailures.length && playlistLibraryItems.length"
+            class="badge badge-warning badge-sm ml-auto"
+          >
+            Partial
+          </span>
+          <button
+            class="btn btn-square btn-ghost btn-xs"
+            :class="{ 'ml-auto': !playlistLibraryFailures.length || !playlistLibraryItems.length }"
+            type="button"
+            :disabled="playlistLibraryLoading"
+            aria-label="Refresh playlists"
+            title="Refresh playlists"
+            @click="loadPlaylistLibrary(true)"
+          >
+            <RefreshCw
+              :class="{ 'animate-spin': playlistLibraryLoading }"
+              :size="14"
+              aria-hidden="true"
+            />
+          </button>
+        </div>
+
+        <div v-if="playlistLibraryLoading && !playlistLibraryItems.length" class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div v-for="index in 6" :key="index" class="card card-border card-sm h-24">
+            <div class="card-body flex-row items-center gap-3">
+              <div class="skeleton size-14 shrink-0"></div>
+              <div class="min-w-0 flex-1 space-y-2">
+                <div class="skeleton h-4 w-3/4"></div>
+                <div class="skeleton h-3 w-1/2"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div
+          v-else-if="playlistLibraryError && !playlistLibraryItems.length"
+          role="alert"
+          class="alert alert-error py-2"
+        >
+          <AlertCircle :size="17" aria-hidden="true" />
+          <span class="min-w-0 flex-1 text-sm">{{ playlistLibraryError }}</span>
+          <button class="btn btn-sm" type="button" @click="loadPlaylistLibrary(true)">
+            <RefreshCw :size="14" aria-hidden="true" />
+            Retry
+          </button>
+        </div>
+
+        <div
+          v-else-if="playlistLibraryFailures.length && !playlistLibraryItems.length"
+          role="status"
+          class="alert py-2"
+        >
+          <AlertCircle :size="17" aria-hidden="true" />
+          <span class="min-w-0 flex-1 text-sm">
+            Connect NetEase or KuGou to load your playlists.
+          </span>
+          <div class="flex shrink-0 flex-wrap gap-1">
+            <button
+              v-for="provider in failedPlaylistProviders"
+              :key="provider.pluginId"
+              class="btn btn-sm"
+              type="button"
+              @click="emit('openPlugin', provider.pluginId)"
+            >
+              Open {{ provider.label }}
+            </button>
+          </div>
+        </div>
+
+        <div
+          v-else-if="playlistLibraryResult?.supportedChannels === 0"
+          role="status"
+          class="alert py-2"
+        >
+          <AlertCircle :size="17" aria-hidden="true" />
+          <span class="min-w-0 flex-1 text-sm">
+            Enable NetEase or KuGou to load your playlists.
+          </span>
+          <div class="flex shrink-0 flex-wrap gap-1">
+            <button
+              v-for="provider in playlistProviders"
+              :key="provider.pluginId"
+              class="btn btn-sm"
+              type="button"
+              @click="emit('openPlugin', provider.pluginId)"
+            >
+              Open {{ provider.label }}
+            </button>
+          </div>
+        </div>
+
+        <div
+          v-else-if="!playlistLibraryItems.length"
+          class="flex min-h-24 items-center text-sm text-base-content/50"
+        >
+          No playlists found
+        </div>
+
+        <div v-else class="space-y-5">
+          <section
+            v-for="provider in playlistProviderSections"
+            :key="provider.pluginId"
+            :data-online-playlist-provider="provider.pluginId"
+            class="min-w-0"
+          >
+            <div class="mb-2 flex items-center gap-2 border-b border-base-300 pb-2">
+              <h3 class="text-sm font-medium">{{ provider.label }}</h3>
+              <span class="text-xs tabular-nums text-base-content/50">
+                {{ provider.items.length }}
+                {{ provider.items.length === 1 ? "playlist" : "playlists" }}
+              </span>
+            </div>
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              <button
+                v-for="playlist in provider.items"
+                :key="playlist.key"
+                class="card card-border card-sm min-h-24 w-full bg-base-100 text-left transition-colors hover:bg-base-200/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                type="button"
+                :aria-label="`Open playlist ${playlist.name}`"
+                @click="openDetail({ kind: 'playlist', entity: playlist })"
+              >
+                <div class="card-body flex-row items-center gap-3">
+                  <div class="flex size-14 shrink-0 items-center justify-center overflow-hidden rounded bg-base-200">
+                    <img
+                      v-if="playlist.coverUrl"
+                      :src="playlist.coverUrl"
+                      class="size-full object-cover"
+                      alt=""
+                      decoding="async"
+                    />
+                    <ListMusic v-else :size="22" aria-hidden="true" />
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <h4 class="truncate text-sm font-medium">{{ playlist.name }}</h4>
+                    <p class="mt-1 truncate text-xs text-base-content/55">
+                      {{ playlist.ownerName || playlist.channelName }}
+                    </p>
+                    <div class="mt-2 flex min-w-0 items-center gap-2">
+                      <span class="badge badge-sm shrink-0">{{ playlist.channelName }}</span>
+                      <span
+                        v-if="playlist.trackCount !== null"
+                        class="truncate text-xs tabular-nums text-base-content/45"
+                      >
+                        {{ playlist.trackCount }} tracks
+                      </span>
+                    </div>
+                  </div>
+                  <ChevronRight :size="17" class="shrink-0 text-base-content/40" aria-hidden="true" />
+                </div>
+              </button>
+            </div>
+          </section>
+        </div>
+
+        <div
+          v-if="playlistLibraryError && playlistLibraryItems.length"
+          role="alert"
+          class="alert alert-error mt-3 py-2 text-sm"
+        >
+          <AlertCircle :size="17" aria-hidden="true" />
+          <span class="min-w-0 flex-1">{{ playlistLibraryError }}</span>
+          <button class="btn btn-sm" type="button" @click="loadPlaylistLibrary(true)">
+            <RefreshCw :size="14" aria-hidden="true" />
+            Retry
+          </button>
+        </div>
+
+        <div
+          v-if="playlistLibraryFailures.length && playlistLibraryItems.length"
+          role="status"
+          class="alert alert-warning mt-3 py-2 text-sm"
+        >
+          <AlertCircle :size="17" aria-hidden="true" />
+          <span class="min-w-0 flex-1">
+            {{ playlistLibraryFailures.map((failure) => failure.channelName).join(', ') }} unavailable
+          </span>
+          <button
+            v-for="provider in failedPlaylistProviders"
+            :key="provider.pluginId"
+            class="btn btn-sm"
+            type="button"
+            @click="emit('openPlugin', provider.pluginId)"
+          >
+            Open {{ provider.label }}
+          </button>
+        </div>
+      </section>
     </div>
 
     <div v-else data-online-results class="flex flex-col gap-5">

@@ -116,9 +116,11 @@ export type OnlineDownloadTask = { taskId: string, kind: string, title: string, 
 
 export type OnlineMusicSettings = { excludedChannels: Array<string>, channelPriority: Array<string>, audioSourcePriority: Array<string>, layerTimeoutSeconds: number, playbackTimeoutSeconds: number, preferredQuality: SourceQuality, searchHistoryEnabled: boolean, downloadDirectory: string | null, filenameTemplate: string, downloadConcurrency: number, batchNotifications: boolean, };
 
-export type OnlinePlaylist = { key: string, channelId: string, pluginId: string, sourceId: string, channelName: string, id: string, name: string, description: string | null, coverUrl: string | null, trackCount: number | null, ownerName: string | null, platformIds: Record<string, string | number>, rawInfo: Record<string, unknown>, rank: number, };
+export type OnlinePlaylist = { key: string, channelId: string, pluginId: string, sourceId: string, channelName: string, accountRef: string | null, id: string, name: string, description: string | null, coverUrl: string | null, trackCount: number | null, ownerName: string | null, platformIds: Record<string, string | number>, rawInfo: Record<string, unknown>, rank: number, };
 
 export type OnlinePlaylistDetailError = { code: string, message: string, pluginId: string, channelName: string, };
+
+export type OnlinePlaylistsResult = { items: Array<OnlinePlaylist>, failures: Array<OnlineChannelFailure>, supportedChannels: number, completedChannels: number, };
 
 export type OnlineRecommendationsResult = { kind: MusicRecommendationKind, items: Array<OnlineTrack>, failures: Array<OnlineChannelFailure>, supportedChannels: number, completedChannels: number, };
 
@@ -248,6 +250,7 @@ export const TAURI_COMMANDS = {
   updateOnlineMusicSettings: "update_online_music_settings",
   listOnlineMusicChannels: "list_online_music_channels",
   onlineMusicRecommendations: "online_music_recommendations",
+  onlineMusicPlaylists: "online_music_playlists",
   onlineMusicSuggestions: "online_music_suggestions",
   startOnlineMusicSearch: "start_online_music_search",
   onlineMusicSearchPage: "online_music_search_page",
