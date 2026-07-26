@@ -45,7 +45,7 @@ import OnlineMusic from "./components/OnlineMusic.vue";
 import OnlineMusicSettingsPanel from "./components/OnlineMusicSettings.vue";
 import { useLibraryScan } from "./composables/use-library-scan";
 import { useOnlineMusicConfig } from "./composables/use-online-music-config";
-import { NETEASE_PLUGIN_ID, type NeteasePlayback } from "./lib/netease-api";
+import { NETEASE_PLUGIN_ID } from "./lib/netease-api";
 import { KUGOU_PLUGIN_ID } from "./lib/kugou-api";
 import {
   buildAudioSourceOptions,
@@ -72,7 +72,6 @@ import type {
   LocalTrackPlaybackDetails,
   MediaSource,
   ResolvedLyrics,
-  SourceSearchResult,
   TrackLyricsQuery,
 } from "./generated/bindings";
 import {
@@ -634,17 +633,6 @@ async function loadRemoteTrackLyrics(
   }
 }
 
-function lyricsQueryForRemoteTrack(track: SourceSearchResult): TrackLyricsQuery {
-  return {
-    title: track.title,
-    artist: track.artist || null,
-    album: track.album,
-    durationSeconds: track.durationSeconds,
-    source: track.source,
-    trackId: track.id,
-  };
-}
-
 function retryLyrics() {
   if (activeTrack.value) {
     void loadLocalTrackPlaybackDetails(activeTrack.value, false);
@@ -739,75 +727,6 @@ function updateLibrarySummary(summary: { libraryTotal: number; filteredTotal: nu
 
 function showLibraryError(message: string) {
   appError.value = message;
-}
-
-async function playRemotePlayback(playback: NeteasePlayback) {
-  sampleListeningTime();
-  clearLocalPlaybackQueue();
-  clearRemotePlaybackQueue();
-  isPreparingPlayback.value = true;
-  appError.value = null;
-  try {
-    activeTrack.value = null;
-    activeOnlineTrack.value = onlineTrackFromRemotePlayback(playback);
-    activeRemoteTitle.value = playback.track.title;
-    activeRemoteQuality.value = remoteQuality.value;
-    activeOnlineAudioSourceId.value = playbackAudioSourceId.value;
-    audioUrl.value = playback.url;
-    void loadRemoteTrackLyrics(
-      lyricsQueryForRemoteTrack(playback.track),
-      playback.track.coverUrl,
-    );
-
-    await nextTick();
-    if (audioElement.value) {
-      audioElement.value.volume = volume.value;
-      await audioElement.value.play();
-      isPlaying.value = true;
-    }
-  } catch (error) {
-    appError.value = normalizeError(error);
-    isPlaying.value = false;
-  } finally {
-    isPreparingPlayback.value = false;
-  }
-}
-
-function onlineTrackFromRemotePlayback(playback: NeteasePlayback): OnlineTrack {
-  const source = playback.track.source;
-  const pluginId = source === "wy"
-    ? NETEASE_PLUGIN_ID
-    : source === "kg"
-      ? KUGOU_PLUGIN_ID
-      : "";
-  const candidate = {
-    channelId: `${pluginId}:${source}`,
-    pluginId,
-    sourceId: source,
-    channelName: playback.providerName,
-    id: playback.track.id,
-    title: playback.track.title,
-    artist: playback.track.artist,
-    album: playback.track.album,
-    durationSeconds: playback.track.durationSeconds,
-    coverUrl: playback.track.coverUrl,
-    trackNumber: playback.track.trackNumber ?? null,
-    discNumber: playback.track.discNumber ?? null,
-    platformIds: playback.track.platformIds ?? {},
-    rawInfo: playback.track.rawInfo,
-    rank: 0,
-  };
-  return {
-    key: `direct:${source}:${playback.track.id}`,
-    title: playback.track.title,
-    artist: playback.track.artist,
-    album: playback.track.album,
-    durationSeconds: playback.track.durationSeconds,
-    coverUrl: playback.track.coverUrl,
-    trackNumber: playback.track.trackNumber ?? null,
-    discNumber: playback.track.discNumber ?? null,
-    candidates: pluginId ? [candidate] : [],
-  };
 }
 
 function favoriteActiveOnlineTrack() {
@@ -1587,26 +1506,27 @@ function trackSubtitle(track: LocalTrack) {
 
         <section
           v-if="activeSection === 'plugin' && activePlugin"
-          class="mx-auto grid w-full max-w-7xl gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]"
-          :class="layoutDensity === 'compact' ? 'px-3 py-3 lg:px-4' : 'px-4 py-4 lg:px-6'"
+          class="mx-auto grid w-full max-w-7xl gap-4"
+          :class="[
+            layoutDensity === 'compact' ? 'px-3 py-3 lg:px-4' : 'px-4 py-4 lg:px-6',
+            activePlugin.id === NETEASE_PLUGIN_ID || activePlugin.id === KUGOU_PLUGIN_ID
+              ? ''
+              : 'xl:grid-cols-[minmax(0,1fr)_20rem]',
+          ]"
         >
           <NeteaseSource
             v-if="activePlugin.id === NETEASE_PLUGIN_ID"
             class="min-w-0 xl:col-start-1 xl:row-start-1"
-            :stream-quality="remoteQuality"
             v-model:playback-source="playbackAudioSourceId"
             :audio-sources="availableAudioSources"
-            @playback-ready="playRemotePlayback"
             @open-plugins="selectSection('plugins')"
             @open-audio-sources="selectSection('sources')"
           />
           <KugouSource
             v-else-if="activePlugin.id === KUGOU_PLUGIN_ID"
             class="min-w-0 xl:col-start-1 xl:row-start-1"
-            :stream-quality="remoteQuality"
             v-model:playback-source="playbackAudioSourceId"
             :audio-sources="availableAudioSources"
-            @playback-ready="playRemotePlayback"
             @open-plugins="selectSection('plugins')"
             @open-audio-sources="selectSection('sources')"
           />
@@ -1617,6 +1537,7 @@ function trackSubtitle(track: LocalTrack) {
             @open-plugins="selectSection('plugins')"
           />
           <NowPlayingPanel
+            v-if="activePlugin.id !== NETEASE_PLUGIN_ID && activePlugin.id !== KUGOU_PLUGIN_ID"
             class="xl:col-start-2 xl:row-start-1"
             :title="nowPlayingTitle"
             :subtitle="nowPlayingSubtitle"

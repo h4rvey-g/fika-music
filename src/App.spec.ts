@@ -10,7 +10,6 @@ import { DESKTOP_LYRICS_STORAGE_KEY } from "./lib/desktop-lyrics";
 import {
   createAudioSourceRecord,
   createLocalTrack,
-  createNeteaseTrack,
   createOnlineMusicSettings,
   createOnlineTrack,
   createOnlineTrackCandidate,
@@ -97,7 +96,7 @@ vi.mock("./components/NeteaseSource.vue", () => ({
       playbackSource: { type: String, required: true },
       audioSources: { type: Array, required: true },
     },
-    emits: ["playbackReady", "update:playbackSource", "openPlugins", "openAudioSources"],
+    emits: ["update:playbackSource", "openPlugins", "openAudioSources"],
     template: '<div data-testid="netease-source">NetEase source</div>',
   }),
 }));
@@ -109,7 +108,7 @@ vi.mock("./components/KugouSource.vue", () => ({
       playbackSource: { type: String, required: true },
       audioSources: { type: Array, required: true },
     },
-    emits: ["playbackReady", "update:playbackSource", "openPlugins", "openAudioSources"],
+    emits: ["update:playbackSource", "openPlugins", "openAudioSources"],
     template: '<div data-testid="kugou-source">KuGou source</div>',
   }),
 }));
@@ -312,7 +311,7 @@ describe("application shell", () => {
     wrapper.unmount();
   });
 
-  it("uses the shared audio source setting for NetEase playback", async () => {
+  it("uses the shared audio source setting for NetEase", async () => {
     listedPlugins = [
       createPluginRecord({
         id: "fika.netease",
@@ -331,6 +330,7 @@ describe("application shell", () => {
     await wrapper.get('button[data-plugin-id="fika.netease"]').trigger("click");
     const neteaseSource = wrapper.getComponent({ name: "NeteaseSource" });
     expect(neteaseSource.props("playbackSource")).toBe("source-one");
+    expect(wrapper.findComponent({ name: "NowPlayingPanel" }).exists()).toBe(false);
 
     neteaseSource.vm.$emit("update:playbackSource", "source-two");
     await wrapper.vm.$nextTick();
@@ -339,36 +339,6 @@ describe("application shell", () => {
       JSON.parse(localStorage.getItem(UI_PREFERENCES_STORAGE_KEY) ?? "{}").audioSourceId,
     ).toBe("source-two");
 
-    neteaseSource.vm.$emit("playbackReady", {
-      track: createNeteaseTrack({ album: "Test Album" }),
-      url: "https://cdn.example.test/Test%20Track.mp3",
-      providerName: "Source Two",
-      diagnostics: [],
-    });
-    await flushPromises();
-
-    expect(wrapper.get("audio").attributes("src")).toBe(
-      "https://cdn.example.test/Test%20Track.mp3",
-    );
-    const playbackBar = wrapper.get('footer[aria-label="Playback bar"]');
-    const trackInfo = playbackBar.get('[data-testid="playback-track-info"]');
-    const actions = playbackBar.get('[data-testid="playback-actions"]');
-    expect(trackInfo.text()).toContain("Test Track");
-    expect(trackInfo.text()).toContain("Test Artist - Test Album");
-    expect(trackInfo.text()).not.toContain("Source Two");
-    expect(trackInfo.find("button").exists()).toBe(false);
-    expect(actions.find('[data-testid="desktop-lyrics-toggle"]').exists()).toBe(true);
-    expect(actions.find('button[aria-label="Add Test Track to My Favorite Music"]').exists()).toBe(true);
-    expect(actions.find('button[aria-label="Add Test Track to a Playlist"]').exists()).toBe(true);
-    expect(actions.find('button[aria-label="Download Test Track"]').exists()).toBe(true);
-    expect(actions.get('button[data-audio-source-id="source-two"]').attributes("aria-checked"))
-      .toBe("true");
-    expect(actions.get('button[data-audio-source-id="source-one"]').attributes("aria-checked"))
-      .toBe("false");
-    expect(actions.get('input[aria-label="Volume"]').classes()).toContain("range-vertical");
-    expect(actions.get('[data-testid="volume-popover"]').classes()).toEqual(
-      expect.arrayContaining(["left-1/2", "-translate-x-1/2"]),
-    );
     wrapper.unmount();
   });
 
