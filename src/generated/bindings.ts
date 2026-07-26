@@ -248,6 +248,7 @@ export const TAURI_COMMANDS = {
   localTrackMediaSource: "local_track_media_source",
   localTrackPlaybackDetails: "local_track_playback_details",
   resolveRemoteTrackLyrics: "resolve_remote_track_lyrics",
+  setMenuBarLyrics: "set_menu_bar_lyrics",
   getOnlineMusicSettings: "get_online_music_settings",
   updateOnlineMusicSettings: "update_online_music_settings",
   listOnlineMusicChannels: "list_online_music_channels",

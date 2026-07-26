@@ -1292,6 +1292,8 @@ dependencies = [
  "thiserror 2.0.18",
  "ts-rs",
  "unicode-normalization",
+ "unicode-segmentation",
+ "unicode-width",
  "url",
  "uuid",
  "walkdir",

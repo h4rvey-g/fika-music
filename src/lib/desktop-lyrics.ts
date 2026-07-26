@@ -40,6 +40,8 @@ export type DesktopLyricLines = {
 
 export type DesktopLyricsPreferences = {
   enabled: boolean;
+  menuBarEnabled: boolean;
+  menuBarMaxWidth: number;
   locked: boolean;
   alwaysOnTop: boolean;
   showNextLine: boolean;
@@ -78,6 +80,8 @@ const HEX_COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
 
 export const DEFAULT_DESKTOP_LYRICS_PREFERENCES: DesktopLyricsPreferences = {
   enabled: false,
+  menuBarEnabled: false,
+  menuBarMaxWidth: 40,
   locked: false,
   alwaysOnTop: true,
   showNextLine: true,
@@ -130,6 +134,16 @@ export function parseDesktopLyricsPreferences(value: unknown): DesktopLyricsPref
 
   return {
     enabled: booleanValue(candidate.enabled, DEFAULT_DESKTOP_LYRICS_PREFERENCES.enabled),
+    menuBarEnabled: booleanValue(
+      candidate.menuBarEnabled,
+      DEFAULT_DESKTOP_LYRICS_PREFERENCES.menuBarEnabled,
+    ),
+    menuBarMaxWidth: clampNumber(
+      candidate.menuBarMaxWidth,
+      24,
+      56,
+      DEFAULT_DESKTOP_LYRICS_PREFERENCES.menuBarMaxWidth,
+    ),
     locked: booleanValue(candidate.locked, DEFAULT_DESKTOP_LYRICS_PREFERENCES.locked),
     alwaysOnTop: booleanValue(
       candidate.alwaysOnTop,

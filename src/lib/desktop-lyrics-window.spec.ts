@@ -5,13 +5,15 @@ import {
   DESKTOP_LYRICS_WINDOW_LABEL,
   type DesktopLyricsState,
 } from "./desktop-lyrics";
-import { syncDesktopLyricsWindow } from "./desktop-lyrics-window";
+import { syncDesktopLyricsWindow, syncMenuBarLyrics } from "./desktop-lyrics-window";
 
 const tauriMocks = vi.hoisted(() => ({
   emitTo: vi.fn().mockResolvedValue(undefined),
   getByLabel: vi.fn(),
+  invoke: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock("@tauri-apps/api/core", () => ({ invoke: tauriMocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ emitTo: tauriMocks.emitTo }));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   WebviewWindow: { getByLabel: tauriMocks.getByLabel },
@@ -82,5 +84,33 @@ describe("desktop lyrics window coordination", () => {
     expect(nativeWindow.hide).toHaveBeenCalledOnce();
     expect(nativeWindow.show).not.toHaveBeenCalled();
     expect(tauriMocks.emitTo).not.toHaveBeenCalled();
+  });
+
+  it("syncs an active lyric line to the native menu bar item", async () => {
+    const payload = state(false);
+    payload.preferences.menuBarEnabled = true;
+
+    await syncMenuBarLyrics(payload);
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("set_menu_bar_lyrics", {
+      enabled: true,
+      line: "Current line",
+      title: "Track",
+      subtitle: "Artist",
+      maxWidth: 40,
+    });
+  });
+
+  it("hides the menu bar item for playback status messages", async () => {
+    const payload = state(false);
+    payload.preferences.menuBarEnabled = true;
+    payload.currentLineKey = "message:Lyrics unavailable";
+
+    await syncMenuBarLyrics(payload);
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith(
+      "set_menu_bar_lyrics",
+      expect.objectContaining({ enabled: false }),
+    );
   });
 });

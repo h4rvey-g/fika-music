@@ -4,6 +4,7 @@ import {
   Lock,
   MonitorUp,
   MousePointer2Off,
+  PanelTop,
   RotateCcw,
   TextAlignCenter,
   TextAlignEnd,
@@ -51,14 +52,7 @@ function setAlignment(alignment: DesktopLyricsAlignment) {
   <section class="overflow-hidden rounded border border-base-300 bg-base-100">
     <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
       <Captions :size="18" aria-hidden="true" />
-      <h2 class="min-w-0 flex-1 text-base font-semibold">Desktop lyrics</h2>
-      <input
-        class="toggle toggle-sm"
-        type="checkbox"
-        :checked="preferences.enabled"
-        aria-label="Show desktop lyrics"
-        @change="update({ enabled: checkboxValue($event) })"
-      />
+      <h2 class="min-w-0 flex-1 text-base font-semibold">Lyrics display</h2>
     </div>
 
     <div class="border-b border-base-300 bg-neutral p-5 text-neutral-content">
@@ -110,6 +104,34 @@ function setAlignment(alignment: DesktopLyricsAlignment) {
 
     <div class="divide-y divide-base-300">
       <div class="grid gap-4 px-4 py-4 sm:grid-cols-2">
+        <label class="flex items-center justify-between gap-3">
+          <span class="flex min-w-0 items-center gap-3 text-sm font-medium">
+            <Captions class="shrink-0 text-base-content/60" :size="17" aria-hidden="true" />
+            Desktop overlay
+          </span>
+          <input
+            class="toggle toggle-sm"
+            type="checkbox"
+            :checked="preferences.enabled"
+            aria-label="Show desktop lyrics"
+            @change="update({ enabled: checkboxValue($event) })"
+          />
+        </label>
+
+        <label class="flex items-center justify-between gap-3">
+          <span class="flex min-w-0 items-center gap-3 text-sm font-medium">
+            <PanelTop class="shrink-0 text-base-content/60" :size="17" aria-hidden="true" />
+            Menu bar lyrics <span class="text-xs font-normal text-base-content/55">macOS</span>
+          </span>
+          <input
+            class="toggle toggle-sm"
+            type="checkbox"
+            :checked="preferences.menuBarEnabled"
+            aria-label="Show lyrics in macOS menu bar"
+            @change="update({ menuBarEnabled: checkboxValue($event) })"
+          />
+        </label>
+
         <label class="flex items-center justify-between gap-3">
           <span class="flex min-w-0 items-center gap-3 text-sm font-medium">
             <MonitorUp class="shrink-0 text-base-content/60" :size="17" aria-hidden="true" />
@@ -190,6 +212,23 @@ function setAlignment(alignment: DesktopLyricsAlignment) {
           />
         </label>
       </div>
+
+      <label
+        v-if="preferences.menuBarEnabled"
+        class="flex items-center justify-between gap-3 px-4 py-4"
+      >
+        <span class="text-sm font-medium">Menu bar width</span>
+        <select
+          class="select select-sm w-36"
+          :value="preferences.menuBarMaxWidth"
+          aria-label="Menu bar lyric width"
+          @change="update({ menuBarMaxWidth: Number(stringValue($event)) })"
+        >
+          <option :value="24">Compact</option>
+          <option :value="40">Standard</option>
+          <option :value="56">Wide</option>
+        </select>
+      </label>
 
       <div class="grid gap-4 px-4 py-4 sm:grid-cols-2">
         <label class="flex items-center justify-between gap-3">
@@ -320,7 +359,7 @@ function setAlignment(alignment: DesktopLyricsAlignment) {
       <div class="flex justify-end px-4 py-3">
         <button class="btn btn-ghost btn-sm" type="button" @click="emit('reset')">
           <RotateCcw :size="16" aria-hidden="true" />
-          Reset desktop lyrics
+          Reset lyrics display
         </button>
       </div>
     </div>

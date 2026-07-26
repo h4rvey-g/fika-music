@@ -20,7 +20,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset", "macos-private-api"] }
+tauri = { version = "2", features = ["protocol-asset", "macos-private-api", "tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -65,4 +65,6 @@ unicode-normalization = "0.1.25"
 image = { version = "0.25.9", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 tempfile = "3.27.0"
 smallvec = "1.15.2"
+unicode-segmentation = "1.13.3"
+unicode-width = "0.2.2"
 

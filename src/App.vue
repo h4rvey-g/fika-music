@@ -97,6 +97,7 @@ import {
 import {
   broadcastDesktopLyricsState,
   syncDesktopLyricsWindow,
+  syncMenuBarLyrics,
 } from "./lib/desktop-lyrics-window";
 
 type LibraryBrowserInstance = {
@@ -388,6 +389,7 @@ watch(
   (preferences) => {
     saveDesktopLyricsPreferences(preferences);
     void syncDesktopLyricsWindow(desktopLyricsState.value);
+    void syncMenuBarLyrics(desktopLyricsState.value);
   },
   { deep: true },
 );
@@ -402,6 +404,15 @@ watch(
   ],
   () => void broadcastDesktopLyricsState(desktopLyricsState.value),
 );
+watch(
+  [
+    nowPlayingTitle,
+    nowPlayingSubtitle,
+    () => desktopLyricLines.value.currentLine,
+    () => desktopLyricLines.value.currentLineKey,
+  ],
+  () => void syncMenuBarLyrics(desktopLyricsState.value),
+);
 
 onMounted(async () => {
   await setupDesktopLyricsEvents();
@@ -411,6 +422,7 @@ onMounted(async () => {
     loadAudioSourceNavigation(),
   ]);
   await syncDesktopLyricsWindow(desktopLyricsState.value);
+  await syncMenuBarLyrics(desktopLyricsState.value);
 });
 
 onBeforeUnmount(() => {

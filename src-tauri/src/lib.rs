@@ -28,6 +28,7 @@ mod library;
 pub mod lx_js_importer;
 mod lx_js_runtime;
 pub mod lyrics;
+mod menu_bar_lyrics;
 pub mod netease;
 pub mod online_download;
 mod online_execution;
@@ -98,6 +99,7 @@ macro_rules! with_tauri_commands {
             local_track_media_source,
             local_track_playback_details,
             resolve_remote_track_lyrics,
+            set_menu_bar_lyrics,
             get_online_music_settings,
             update_online_music_settings,
             list_online_music_channels,
@@ -489,6 +491,19 @@ fn cancel_source_request(state: State<'_, AppState>, request_id: String) -> Comm
     state
         .source_requests
         .cancel(&request_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_menu_bar_lyrics(
+    app: AppHandle,
+    enabled: bool,
+    line: String,
+    title: String,
+    subtitle: String,
+    max_width: u16,
+) -> CommandResult<()> {
+    menu_bar_lyrics::update(&app, enabled, &line, &title, &subtitle, max_width)
         .map_err(|error| error.to_string())
 }
 
@@ -4179,7 +4194,8 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if window.label() == "main" && matches!(event, tauri::WindowEvent::CloseRequested { .. })
+            if window.label() == "main"
+                && matches!(event, tauri::WindowEvent::CloseRequested { .. })
             {
                 window.app_handle().exit(0);
             }

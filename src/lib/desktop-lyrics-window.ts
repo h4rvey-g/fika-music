@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { emitTo } from "@tauri-apps/api/event";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -7,6 +8,7 @@ import {
   desktopLyricsMinimumHeight,
   type DesktopLyricsState,
 } from "./desktop-lyrics";
+import { TAURI_COMMANDS } from "../generated/bindings";
 
 export function hasDesktopWindowRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -40,6 +42,22 @@ export async function broadcastDesktopLyricsState(state: DesktopLyricsState) {
   await ignoreUnsupported(() =>
     emitTo(DESKTOP_LYRICS_WINDOW_LABEL, DESKTOP_LYRICS_STATE_EVENT, state),
   );
+}
+
+export async function syncMenuBarLyrics(state: DesktopLyricsState) {
+  if (!hasDesktopWindowRuntime()) return;
+
+  const enabled = state.preferences.menuBarEnabled
+    && !state.currentLineKey.startsWith("message:")
+    && state.currentLine.trim().length > 0;
+
+  await ignoreUnsupported(() => invoke(TAURI_COMMANDS.setMenuBarLyrics, {
+    enabled,
+    line: state.currentLine,
+    title: state.title,
+    subtitle: state.subtitle,
+    maxWidth: state.preferences.menuBarMaxWidth,
+  }));
 }
 
 async function ignoreUnsupported(action: () => Promise<unknown>) {

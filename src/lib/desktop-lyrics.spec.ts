@@ -24,6 +24,8 @@ describe("desktop lyrics", () => {
   it("validates colors and enums while clamping numeric style values", () => {
     expect(parseDesktopLyricsPreferences({
       enabled: true,
+      menuBarEnabled: true,
+      menuBarMaxWidth: 100,
       locked: "yes",
       activeColor: "skyblue",
       inactiveColor: "#abcDEF",
@@ -36,6 +38,8 @@ describe("desktop lyrics", () => {
     })).toEqual({
       ...DEFAULT_DESKTOP_LYRICS_PREFERENCES,
       enabled: true,
+      menuBarEnabled: true,
+      menuBarMaxWidth: 56,
       inactiveColor: "#abcDEF",
       backgroundOpacity: 1,
       fontSize: 18,

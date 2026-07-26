@@ -10,11 +10,21 @@ describe("DesktopLyricsSettings", () => {
     });
 
     await wrapper.get('input[aria-label="Show desktop lyrics"]').setValue(true);
+    await wrapper.get('input[aria-label="Show lyrics in macOS menu bar"]').setValue(true);
+    await wrapper.setProps({
+      preferences: {
+        ...DEFAULT_DESKTOP_LYRICS_PREFERENCES,
+        menuBarEnabled: true,
+      },
+    });
+    await wrapper.get('select[aria-label="Menu bar lyric width"]').setValue("56");
     await wrapper.get('input[aria-label="Current lyric color"]').setValue("#22cc88");
     await wrapper.get('button[aria-label="Align desktop lyrics right"]').trigger("click");
 
     expect(wrapper.emitted("update")).toEqual([
       [{ enabled: true }],
+      [{ menuBarEnabled: true }],
+      [{ menuBarMaxWidth: 56 }],
       [{ activeColor: "#22cc88" }],
       [{ alignment: "right" }],
     ]);
