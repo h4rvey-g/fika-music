@@ -1317,7 +1317,7 @@ function trackSubtitle(track: LocalTrack) {
 
 <template>
   <div
-    class="drawer h-screen overflow-hidden bg-base-200 text-base-content md:drawer-open"
+    class="drawer h-screen overflow-hidden bg-base-200 text-base-content min-[1200px]:drawer-open"
     :data-density="layoutDensity"
   >
     <input id="app-sidebar" v-model="sidebarOpen" type="checkbox" class="drawer-toggle" />
@@ -1327,7 +1327,7 @@ function trackSubtitle(track: LocalTrack) {
         <div class="navbar-start min-w-0 flex-1 gap-2 sm:gap-3">
           <label
             for="app-sidebar"
-            class="btn btn-square btn-ghost btn-sm drawer-button md:hidden"
+            class="btn btn-square btn-ghost btn-sm drawer-button min-[1200px]:hidden"
             role="button"
             tabindex="0"
             aria-label="Open navigation"
@@ -1470,12 +1470,12 @@ function trackSubtitle(track: LocalTrack) {
             </button>
           </div>
           <div
-            class="grid min-w-0 items-start xl:grid-cols-[minmax(0,1fr)_20rem]"
+            class="grid min-w-0 items-start min-[1000px]:grid-cols-[minmax(0,1fr)_20rem]"
             :class="layoutDensity === 'compact' ? 'gap-3' : 'gap-4'"
           >
             <OnlineMusic
               ref="onlineMusic"
-              class="min-w-0 xl:col-start-1 xl:row-start-1"
+              class="min-w-0 min-[1000px]:col-start-1 min-[1000px]:row-start-1"
               :is-active="activeSection === 'online'"
               :audio-sources="audioSourceRecords"
               :selected-audio-source-id="playbackAudioSourceId"
@@ -1491,7 +1491,7 @@ function trackSubtitle(track: LocalTrack) {
             />
             <NowPlayingPanel
               v-if="activeSection === 'online'"
-              class="min-w-0 xl:sticky xl:top-4 xl:col-start-2 xl:row-start-1"
+              class="min-w-0 min-[1000px]:sticky min-[1000px]:top-4 min-[1000px]:col-start-2 min-[1000px]:row-start-1"
               :title="nowPlayingTitle"
               :subtitle="nowPlayingSubtitle"
               :cover-url="nowPlayingCoverUrl"

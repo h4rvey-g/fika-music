@@ -203,6 +203,45 @@ describe("application shell", () => {
     wrapper.unmount();
   });
 
+  it("prioritizes the Online Music workspace before pinning the navigation drawer", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(wrapper.get(".drawer").classes()).toContain("min-[1200px]:drawer-open");
+    expect(wrapper.get('label[aria-label="Open navigation"]').classes()).toContain(
+      "min-[1200px]:hidden",
+    );
+
+    const navigation = wrapper.get('nav[aria-label="Primary navigation"]');
+    const onlineButton = navigation
+      .findAll("button")
+      .find((button) => button.text() === "Online Music");
+    await onlineButton?.trigger("click");
+
+    const onlineMusic = wrapper.getComponent({ name: "OnlineMusic" });
+    const onlineGrid = onlineMusic.element.parentElement;
+    expect(onlineGrid).not.toBeNull();
+    expect(onlineGrid?.classList).toContain(
+      "min-[1000px]:grid-cols-[minmax(0,1fr)_20rem]",
+    );
+    expect(onlineMusic.classes()).toEqual(
+      expect.arrayContaining([
+        "min-[1000px]:col-start-1",
+        "min-[1000px]:row-start-1",
+      ]),
+    );
+    expect(wrapper.getComponent({ name: "NowPlayingPanel" }).classes()).toEqual(
+      expect.arrayContaining([
+        "min-[1000px]:sticky",
+        "min-[1000px]:top-4",
+        "min-[1000px]:col-start-2",
+        "min-[1000px]:row-start-1",
+      ]),
+    );
+
+    wrapper.unmount();
+  });
+
   it("adds a dedicated sidebar entry and workspace for every enabled plugin", async () => {
     listedPlugins = [
       createPluginRecord({

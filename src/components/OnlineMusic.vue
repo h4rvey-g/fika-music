@@ -1921,18 +1921,15 @@ defineExpose({
                   </div>
                   <div class="min-w-0 flex-1">
                     <h4 class="truncate text-sm font-medium">{{ playlist.name }}</h4>
-                    <p class="mt-1 truncate text-xs text-base-content/55">
-                      {{ playlist.ownerName || playlist.channelName }}
+                    <p v-if="playlist.ownerName" class="mt-1 truncate text-xs text-base-content/55">
+                      {{ playlist.ownerName }}
                     </p>
-                    <div class="mt-2 flex min-w-0 items-center gap-2">
-                      <span class="badge badge-sm shrink-0">{{ playlist.channelName }}</span>
-                      <span
-                        v-if="playlist.trackCount !== null"
-                        class="truncate text-xs tabular-nums text-base-content/45"
-                      >
-                        {{ playlist.trackCount }} tracks
-                      </span>
-                    </div>
+                    <p
+                      v-if="playlist.trackCount !== null"
+                      class="mt-2 truncate text-xs tabular-nums text-base-content/45"
+                    >
+                      {{ playlist.trackCount }} tracks
+                    </p>
                   </div>
                   <ChevronRight :size="17" class="shrink-0 text-base-content/40" aria-hidden="true" />
                 </div>

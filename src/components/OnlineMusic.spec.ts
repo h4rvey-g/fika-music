@@ -250,7 +250,9 @@ describe("Online Music workspace", () => {
     expect(providerSections[1].text()).not.toContain("Private Mix");
 
     const card = wrapper.get('button[aria-label="Open playlist Private Mix"]');
-    expect(card.text()).toContain("NetEase");
+    expect(card.text()).toContain("Listener");
+    expect(card.text()).not.toContain("NetEase");
+    expect(card.find(".badge").exists()).toBe(false);
     expect(card.text()).toContain("12 tracks");
     await card.trigger("click");
     await flushPromises();
