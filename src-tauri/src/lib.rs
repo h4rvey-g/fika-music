@@ -4178,6 +4178,12 @@ pub fn run() {
             app.manage(state);
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::CloseRequested { .. })
+            {
+                window.app_handle().exit(0);
+            }
+        })
         .invoke_handler(with_tauri_commands!(generate_command_handler))
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

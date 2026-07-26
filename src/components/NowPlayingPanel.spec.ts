@@ -19,7 +19,7 @@ describe("NowPlayingPanel", () => {
           isSynced: true,
           savedPath: null,
           matchScore: 100,
-          lines: [{ startMs: 0, text: "Lyric" }],
+          lines: [{ startMs: 0, endMs: null, text: "Lyric", words: [] }],
         },
       },
     });
@@ -45,8 +45,8 @@ describe("NowPlayingPanel", () => {
           savedPath: null,
           matchScore: 95,
           lines: [
-            { startMs: 1_000, text: "First line" },
-            { startMs: 3_000, text: "Second line" },
+            { startMs: 1_000, endMs: 3_000, text: "First line", words: [] },
+            { startMs: 3_000, endMs: null, text: "Second line", words: [] },
           ],
         },
       },
@@ -95,8 +95,8 @@ describe("NowPlayingPanel", () => {
           savedPath: null,
           matchScore: null,
           lines: [
-            { startMs: 1_000, text: "First line" },
-            { startMs: 3_000, text: "Second line" },
+            { startMs: 1_000, endMs: 3_000, text: "First line", words: [] },
+            { startMs: 3_000, endMs: null, text: "Second line", words: [] },
           ],
         },
       },

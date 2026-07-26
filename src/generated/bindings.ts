@@ -66,9 +66,11 @@ export type LocalTrack = { id: number, filePath: string, fileName: string, title
 
 export type LocalTrackPlaybackDetails = { coverDataUrl: string | null, lyrics: ResolvedLyrics | null, lyricsError: string | null, };
 
-export type LyricLine = { startMs: number | null, text: string, };
+export type LyricLine = { startMs: number | null, endMs: number | null, text: string, words: Array<LyricWord>, };
 
 export type LyricResponse = { lyric: string | null, tlyric: string | null, rlyric: string | null, lxlyric: string | null, };
+
+export type LyricWord = { startMs: number, endMs: number, text: string, };
 
 export type LyricsSource = "embedded" | "sidecar" | "network";
 

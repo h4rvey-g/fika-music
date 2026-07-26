@@ -6,6 +6,7 @@ import type { PluginRecord } from "./lib/plugin-api";
 import type { AudioSourceRecord } from "./lib/audio-source-api";
 import type { OnlineTrack } from "./lib/online-music-api";
 import { THEME_OPTIONS, UI_PREFERENCES_STORAGE_KEY } from "./lib/ui-preferences";
+import { DESKTOP_LYRICS_STORAGE_KEY } from "./lib/desktop-lyrics";
 import {
   createAudioSourceRecord,
   createLocalTrack,
@@ -21,6 +22,8 @@ import { createTestQueryPlugin } from "./test/query-client";
 const tauriMocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   listen: vi.fn(),
+  emitTo: vi.fn(),
+  getByLabel: vi.fn(),
 }));
 
 let listedPlugins: PluginRecord[] = [];
@@ -33,6 +36,11 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: tauriMocks.listen,
+  emitTo: tauriMocks.emitTo,
+}));
+
+vi.mock("@tauri-apps/api/webviewWindow", () => ({
+  WebviewWindow: { getByLabel: tauriMocks.getByLabel },
 }));
 
 vi.mock("./components/PluginManager.vue", () => ({
@@ -116,6 +124,8 @@ describe("application shell", () => {
     vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
     vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
     tauriMocks.listen.mockResolvedValue(vi.fn());
+    tauriMocks.emitTo.mockResolvedValue(undefined);
+    tauriMocks.getByLabel.mockResolvedValue(null);
     config.global.plugins = [createTestQueryPlugin()];
     tauriMocks.invoke.mockImplementation((command: string) => {
       if (command === "get_scan_status") {
@@ -650,6 +660,96 @@ describe("application shell", () => {
     await modeButton.trigger("click");
     expect(modeButton.attributes("aria-label")).toContain("Sequential");
     wrapper.unmount();
+  });
+
+  it("toggles and persists the desktop lyrics window from the playback bar", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const toggle = wrapper.get('[data-testid="desktop-lyrics-toggle"]');
+    expect(toggle.attributes("aria-pressed")).toBe("false");
+
+    await toggle.trigger("click");
+
+    expect(toggle.attributes("aria-pressed")).toBe("true");
+    expect(
+      JSON.parse(localStorage.getItem(DESKTOP_LYRICS_STORAGE_KEY) ?? "{}").enabled,
+    ).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("broadcasts desktop word timing and freezes its clock while playback buffers", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    localStorage.setItem(DESKTOP_LYRICS_STORAGE_KEY, JSON.stringify({ enabled: true }));
+    tauriMocks.getByLabel.mockResolvedValue({
+      setMinSize: vi.fn().mockResolvedValue(undefined),
+      setAlwaysOnTop: vi.fn().mockResolvedValue(undefined),
+      setIgnoreCursorEvents: vi.fn().mockResolvedValue(undefined),
+      show: vi.fn().mockResolvedValue(undefined),
+      hide: vi.fn().mockResolvedValue(undefined),
+    });
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "get_scan_status") return Promise.resolve(createScanStatus());
+      if (command === "list_plugins") return Promise.resolve([]);
+      if (command === "list_audio_sources") return Promise.resolve([]);
+      if (command === "get_online_music_settings") {
+        return Promise.resolve(createOnlineMusicSettings());
+      }
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "list_online_music_channels") return Promise.resolve([]);
+      if (command === "local_track_media_source") {
+        return Promise.resolve({ filePath: "/music/second.mp3" });
+      }
+      if (command === "local_track_playback_details") {
+        return Promise.resolve({
+          coverDataUrl: null,
+          lyricsError: null,
+          lyrics: {
+            source: "sidecar",
+            provider: null,
+            isSynced: true,
+            savedPath: null,
+            matchScore: null,
+            lines: [
+              { startMs: 1_000, endMs: 3_000, text: "AB", words: [] },
+              { startMs: 3_000, endMs: null, text: "Next", words: [] },
+            ],
+          },
+        });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get('button[aria-label="Play Second"]').trigger("click");
+    await flushPromises();
+
+    const audio = wrapper.get("audio").element;
+    Object.defineProperty(audio, "currentTime", { configurable: true, value: 1.5 });
+    Object.defineProperty(audio, "duration", { configurable: true, value: 10 });
+    audio.dispatchEvent(new Event("timeupdate"));
+    audio.dispatchEvent(new Event("waiting"));
+    await wrapper.vm.$nextTick();
+
+    expect(tauriMocks.emitTo).toHaveBeenLastCalledWith(
+      "desktop-lyrics",
+      "desktop-lyrics:state",
+      expect.objectContaining({
+        currentLine: "AB",
+        currentTimingSource: "estimated",
+        playbackPositionMs: 1_500,
+        clockRunning: false,
+        currentWords: [
+          { text: "A", startMs: 1_000, endMs: 2_000 },
+          { text: "B", startMs: 2_000, endMs: 3_000 },
+        ],
+      }),
+    );
+    wrapper.unmount();
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   });
 
   it("navigates local tracks and wraps at the end in repeat mode", async () => {

@@ -1,4 +1,5 @@
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use flate2::read::ZlibDecoder;
 use lofty::config::ParseOptions;
 use lofty::file::{AudioFile, TaggedFile, TaggedFileExt};
 use lofty::id3::v2::{
@@ -7,6 +8,8 @@ use lofty::id3::v2::{
 use lofty::mpeg::MpegFile;
 use lofty::tag::ItemKey;
 use netease_music::{LyricParams, NeteaseMusicClient, SearchParams};
+use quick_xml::events::Event;
+use quick_xml::{Reader, XmlVersion};
 use reqwest::blocking::Client;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -37,6 +40,9 @@ const NETWORK_PROVIDER_TIMEOUT: Duration = Duration::from_secs(6);
 const NETWORK_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PROVIDER_CANDIDATES: usize = 20;
 const MAX_PROVIDER_FETCH_ATTEMPTS: usize = 2;
+const KUGOU_KRC_XOR_KEY: [u8; 16] = [
+    0x40, 0x47, 0x61, 0x77, 0x5e, 0x32, 0x74, 0x47, 0x51, 0x36, 0x31, 0x2d, 0xce, 0xd2, 0x6e, 0x69,
+];
 
 #[derive(Debug, Clone, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
@@ -96,9 +102,20 @@ pub enum LyricsSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "bindings.ts")]
+pub struct LyricWord {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct LyricLine {
     pub start_ms: Option<u64>,
+    pub end_ms: Option<u64>,
     pub text: String,
+    pub words: Vec<LyricWord>,
 }
 
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
@@ -443,19 +460,26 @@ fn fetch_netease_lyrics(
         })?;
     validate_netease_response(&response, "lyric")?;
 
-    let original = response
-        .body
+    Ok(netease_lyric_text(&response.body))
+}
+
+fn netease_lyric_text(body: &Value) -> Option<String> {
+    let enhanced = ["/yrc/lyric", "/klyric/lyric"]
+        .into_iter()
+        .find_map(|path| {
+            body.pointer(path)
+                .and_then(|value| json_string_value(Some(value)))
+        });
+    let original = body
         .pointer("/lrc/lyric")
         .and_then(|value| json_string_value(Some(value)));
-    let translation = response
-        .body
+    let translation = body
         .pointer("/tlyric/lyric")
         .and_then(|value| json_string_value(Some(value)));
-    let romanization = response
-        .body
+    let romanization = body
         .pointer("/romalrc/lyric")
         .and_then(|value| json_string_value(Some(value)));
-    Ok(combine_lyric_texts([original, translation, romanization]))
+    combine_lyric_texts([enhanced.or(original), translation, romanization])
 }
 
 fn resolve_netease_lyrics(
@@ -558,17 +582,44 @@ fn fetch_qq_lyrics(
     client: &Client,
     candidate: &ProviderCandidate,
 ) -> Result<Option<String>, LyricsError> {
+    if let Some(lyrics) = request_qq_lyrics(client, candidate, true)? {
+        if looks_like_lyric_text(&lyrics) {
+            return Ok(Some(lyrics));
+        }
+    }
+    request_qq_lyrics(client, candidate, false)
+}
+
+fn request_qq_lyrics(
+    client: &Client,
+    candidate: &ProviderCandidate,
+    enhanced: bool,
+) -> Result<Option<String>, LyricsError> {
+    let param = if enhanced {
+        json!({
+            "crypt": 0,
+            "format": "json",
+            "qrc": 1,
+            "qrc_t": 0,
+            "roma": 1,
+            "songMID": candidate.id,
+            "trans": 1,
+            "type": -1
+        })
+    } else {
+        json!({
+            "crypt": 0,
+            "roma": 1,
+            "songMID": candidate.id,
+            "trans": 1,
+            "type": 0
+        })
+    };
     let body = json!({
         "req": {
             "method": "GetPlayLyricInfo",
             "module": "music.musichallSong.PlayLyricInfo",
-            "param": {
-                "crypt": 0,
-                "roma": 1,
-                "songMID": candidate.id,
-                "trans": 1,
-                "type": 0
-            }
+            "param": param
         },
         "comm": {"ct": 24, "cv": 0}
     });
@@ -591,6 +642,14 @@ fn fetch_qq_lyrics(
     let translation = decode_base64_lyric(data.and_then(|value| value.get("trans")));
     let romanization = decode_base64_lyric(data.and_then(|value| value.get("roma")));
     Ok(combine_lyric_texts([original, translation, romanization]))
+}
+
+fn looks_like_lyric_text(text: &str) -> bool {
+    text.contains("LyricContent=")
+        || text.lines().any(|line| {
+            parse_millisecond_line_header(line.trim_start()).is_some()
+                || !parse_lrc_timestamps(line, 0).0.is_empty()
+        })
 }
 
 fn resolve_qq_lyrics(query: &TrackLyricsQuery) -> Result<Option<DownloadedLyrics>, LyricsError> {
@@ -792,7 +851,7 @@ fn fetch_kugou_lyrics(
             ("client", "pc"),
             ("id", lyric_candidate.id.as_str()),
             ("accesskey", lyric_candidate.access_key.as_str()),
-            ("fmt", "lrc"),
+            ("fmt", "krc"),
             ("charset", "utf8"),
         ])
         .send()?;
@@ -821,8 +880,32 @@ fn fetch_kugou_lyrics(
     if decoded.len() as u64 > MAX_LYRICS_FILE_BYTES {
         return Err(LyricsError::ResponseTooLarge);
     }
-    let text = decode_text_file(&decoded);
+    let text = decode_kugou_lyric(&decoded)?;
     Ok((!text.trim().is_empty()).then_some(text))
+}
+
+fn decode_kugou_lyric(bytes: &[u8]) -> Result<String, LyricsError> {
+    let Some(payload) = bytes.strip_prefix(b"krc1") else {
+        return Ok(decode_text_file(bytes));
+    };
+    let decrypted = payload
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| byte ^ KUGOU_KRC_XOR_KEY[index % KUGOU_KRC_XOR_KEY.len()])
+        .collect::<Vec<_>>();
+    let decoder = ZlibDecoder::new(decrypted.as_slice());
+    let mut decoded = Vec::new();
+    decoder
+        .take(MAX_LYRICS_FILE_BYTES.saturating_add(1))
+        .read_to_end(&mut decoded)
+        .map_err(|error| LyricsError::InvalidProviderData {
+            provider: KUGOU_PROVIDER_NAME,
+            message: format!("failed to decompress KRC lyrics: {error}"),
+        })?;
+    if decoded.len() as u64 > MAX_LYRICS_FILE_BYTES {
+        return Err(LyricsError::ResponseTooLarge);
+    }
+    Ok(decode_text_file(&decoded))
 }
 
 fn resolve_kugou_lyrics(query: &TrackLyricsQuery) -> Result<Option<DownloadedLyrics>, LyricsError> {
@@ -1383,33 +1466,48 @@ fn resolved_lyrics(
 }
 
 fn parse_lyrics(text: &str) -> Vec<LyricLine> {
-    let normalized = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
+    let qrc_content = extract_qrc_lyric_content(text);
+    let normalized = qrc_content
+        .as_deref()
+        .unwrap_or(text)
+        .trim_start_matches('\u{feff}')
+        .replace("\r\n", "\n");
     let offset_ms = normalized
         .lines()
         .find_map(|line| parse_offset(line.trim()))
         .unwrap_or_default();
-    let mut timed_lines = BTreeMap::<u64, Vec<String>>::new();
+    let mut timed_lines = BTreeMap::<u64, Vec<ParsedTimedLine>>::new();
     let mut plain_lines = Vec::new();
 
     for raw_line in normalized.lines() {
-        let (timestamps, content) = parse_lrc_line(raw_line, offset_ms);
-        let content = content.trim();
-        if timestamps.is_empty() {
-            if !content.is_empty() && !is_metadata_line(raw_line.trim()) {
+        let parsed_lines = parse_timed_lyric_line(raw_line, offset_ms);
+        if parsed_lines.is_empty() {
+            let content = raw_line.trim();
+            if !content.is_empty() && !is_metadata_line(content) {
                 plain_lines.push(LyricLine {
                     start_ms: None,
+                    end_ms: None,
                     text: content.to_owned(),
+                    words: Vec::new(),
                 });
             }
             continue;
         }
-        if content.is_empty() {
-            continue;
-        }
-        for timestamp in timestamps {
-            let texts = timed_lines.entry(timestamp).or_default();
-            if !texts.iter().any(|text| text == content) {
-                texts.push(content.to_owned());
+
+        for parsed_line in parsed_lines {
+            if parsed_line.text.is_empty() {
+                continue;
+            }
+            let lines = timed_lines.entry(parsed_line.start_ms).or_default();
+            if let Some(existing) = lines
+                .iter_mut()
+                .find(|existing| existing.text == parsed_line.text)
+            {
+                if existing.words.is_empty() && !parsed_line.words.is_empty() {
+                    *existing = parsed_line;
+                }
+            } else {
+                lines.push(parsed_line);
             }
         }
     }
@@ -1418,16 +1516,150 @@ fn parse_lyrics(text: &str) -> Vec<LyricLine> {
         return plain_lines;
     }
 
-    timed_lines
+    let mut lines = timed_lines
         .into_iter()
-        .map(|(start_ms, texts)| LyricLine {
-            start_ms: Some(start_ms),
-            text: texts.join("\n"),
+        .map(|(start_ms, parsed_lines)| {
+            let end_ms = parsed_lines.iter().filter_map(|line| line.end_ms).max();
+            let words = if parsed_lines.iter().any(|line| !line.words.is_empty()) {
+                merge_timed_words(&parsed_lines, start_ms, end_ms)
+            } else {
+                Vec::new()
+            };
+            LyricLine {
+                start_ms: Some(start_ms),
+                end_ms,
+                text: parsed_lines
+                    .iter()
+                    .map(|line| line.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                words,
+            }
+        })
+        .collect::<Vec<_>>();
+    set_line_end_times(&mut lines);
+    lines
+}
+
+fn extract_qrc_lyric_content(text: &str) -> Option<String> {
+    if !text.contains("LyricContent=") {
+        return None;
+    }
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(false);
+    loop {
+        match reader.read_event().ok()? {
+            Event::Start(element) | Event::Empty(element) => {
+                for attribute in element.attributes().with_checks(false).flatten() {
+                    if attribute.key.as_ref() == b"LyricContent" {
+                        return attribute
+                            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                            .ok()
+                            .map(|value| value.into_owned());
+                    }
+                }
+            }
+            Event::Eof => return None,
+            _ => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ParsedTimedLine {
+    start_ms: u64,
+    end_ms: Option<u64>,
+    text: String,
+    words: Vec<LyricWord>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum WordTimeOrigin {
+    Absolute,
+    Relative,
+}
+
+#[derive(Debug)]
+struct WordTimingMarker {
+    start: u64,
+    duration: u64,
+    range_start: usize,
+    range_end: usize,
+}
+
+fn parse_timed_lyric_line(line: &str, offset_ms: i64) -> Vec<ParsedTimedLine> {
+    let line = line.trim_start();
+    if let Some((start_ms, duration_ms, content)) = parse_millisecond_line_header(line) {
+        let adjusted_start_ms = start_ms.saturating_add_signed(offset_ms);
+        let words = if content.contains('(') {
+            parse_marked_words(
+                content,
+                '(',
+                ')',
+                WordTimeOrigin::Absolute,
+                adjusted_start_ms,
+                offset_ms,
+            )
+        } else {
+            parse_marked_words(
+                content,
+                '<',
+                '>',
+                WordTimeOrigin::Relative,
+                adjusted_start_ms,
+                offset_ms,
+            )
+        };
+        return vec![ParsedTimedLine {
+            start_ms: adjusted_start_ms,
+            end_ms: Some(adjusted_start_ms.saturating_add(duration_ms)),
+            text: strip_word_timing(content, &[('<', '>'), ('(', ')')])
+                .trim()
+                .to_owned(),
+            words,
+        }];
+    }
+
+    let (timestamps, content) = parse_lrc_timestamps(line, offset_ms);
+    if timestamps.is_empty() {
+        return Vec::new();
+    }
+    let text = strip_word_timing(content, &[('<', '>')]).trim().to_owned();
+    timestamps
+        .into_iter()
+        .map(|start_ms| {
+            let words = parse_marked_words(
+                content,
+                '<',
+                '>',
+                WordTimeOrigin::Relative,
+                start_ms,
+                offset_ms,
+            );
+            let end_ms = words.iter().map(|word| word.end_ms).max();
+            ParsedTimedLine {
+                start_ms,
+                end_ms,
+                text: text.clone(),
+                words,
+            }
         })
         .collect()
 }
 
-fn parse_lrc_line(line: &str, offset_ms: i64) -> (Vec<u64>, &str) {
+fn parse_millisecond_line_header(line: &str) -> Option<(u64, u64, &str)> {
+    let after_open = line.strip_prefix('[')?;
+    let close_index = after_open.find(']')?;
+    let mut parts = after_open[..close_index].split(',');
+    let start_ms = parts.next()?.trim().parse().ok()?;
+    let duration_ms = parts.next()?.trim().parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((start_ms, duration_ms, &after_open[close_index + 1..]))
+}
+
+fn parse_lrc_timestamps(line: &str, offset_ms: i64) -> (Vec<u64>, &str) {
     let mut timestamps = Vec::new();
     let mut remainder = line.trim_start();
     while let Some(after_open) = remainder.strip_prefix('[') {
@@ -1442,6 +1674,143 @@ fn parse_lrc_line(line: &str, offset_ms: i64) -> (Vec<u64>, &str) {
         remainder = &after_open[close_index + 1..];
     }
     (timestamps, remainder)
+}
+
+fn parse_marked_words(
+    content: &str,
+    open: char,
+    close: char,
+    origin: WordTimeOrigin,
+    line_start_ms: u64,
+    offset_ms: i64,
+) -> Vec<LyricWord> {
+    let markers = word_timing_markers(content, open, close);
+    let Some(first_marker) = markers.first() else {
+        return Vec::new();
+    };
+    let markers_precede_text = content[..first_marker.range_start].trim().is_empty();
+    let mut words = markers
+        .iter()
+        .enumerate()
+        .filter_map(|(index, marker)| {
+            let text_range = if markers_precede_text {
+                marker.range_end
+                    ..markers
+                        .get(index + 1)
+                        .map_or(content.len(), |next| next.range_start)
+            } else {
+                let text_start = if index > 0 {
+                    markers[index - 1].range_end
+                } else {
+                    0
+                };
+                text_start..marker.range_start
+            };
+            let text = content[text_range].to_owned();
+            if text.is_empty() {
+                return None;
+            }
+            let start_ms = match origin {
+                WordTimeOrigin::Absolute => marker.start.saturating_add_signed(offset_ms),
+                WordTimeOrigin::Relative => line_start_ms.saturating_add(marker.start),
+            };
+            Some(LyricWord {
+                start_ms,
+                end_ms: start_ms.saturating_add(marker.duration),
+                text,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if !markers_precede_text {
+        if let (Some(last_marker), Some(last_word)) = (markers.last(), words.last_mut()) {
+            last_word.text.push_str(&content[last_marker.range_end..]);
+        }
+    }
+    if let Some(first_word) = words.first_mut() {
+        first_word.text = first_word.text.trim_start().to_owned();
+    }
+    if let Some(last_word) = words.last_mut() {
+        last_word.text = last_word.text.trim_end().to_owned();
+    }
+    words.retain(|word| !word.text.is_empty());
+    words
+}
+
+fn word_timing_markers(content: &str, open: char, close: char) -> Vec<WordTimingMarker> {
+    let mut markers = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative_open) = content[cursor..].find(open) {
+        let range_start = cursor + relative_open;
+        let values_start = range_start + open.len_utf8();
+        let Some(relative_close) = content[values_start..].find(close) else {
+            break;
+        };
+        let range_end = values_start + relative_close + close.len_utf8();
+        let mut values = content[values_start..values_start + relative_close].split(',');
+        if let (Some(start), Some(duration)) = (
+            values.next().and_then(|value| value.trim().parse().ok()),
+            values.next().and_then(|value| value.trim().parse().ok()),
+        ) {
+            markers.push(WordTimingMarker {
+                start,
+                duration,
+                range_start,
+                range_end,
+            });
+        }
+        cursor = range_end;
+    }
+    markers
+}
+
+fn strip_word_timing(content: &str, delimiters: &[(char, char)]) -> String {
+    let mut stripped = content.to_owned();
+    for &(open, close) in delimiters {
+        let markers = word_timing_markers(&stripped, open, close);
+        for marker in markers.into_iter().rev() {
+            stripped.replace_range(marker.range_start..marker.range_end, "");
+        }
+    }
+    stripped
+}
+
+fn merge_timed_words(
+    parsed_lines: &[ParsedTimedLine],
+    line_start_ms: u64,
+    line_end_ms: Option<u64>,
+) -> Vec<LyricWord> {
+    let mut words = Vec::new();
+    for parsed_line in parsed_lines {
+        if parsed_line.words.is_empty() {
+            continue;
+        }
+        if !words.is_empty() {
+            words.push(LyricWord {
+                start_ms: line_start_ms,
+                end_ms: line_end_ms.unwrap_or(line_start_ms),
+                text: "\n".to_owned(),
+            });
+        }
+        words.extend(parsed_line.words.iter().cloned());
+    }
+    words
+}
+
+fn set_line_end_times(lines: &mut [LyricLine]) {
+    for index in 0..lines.len() {
+        let Some(start_ms) = lines[index].start_ms else {
+            continue;
+        };
+        let next_start_ms = lines.get(index + 1).and_then(|line| line.start_ms);
+        let explicit_end_ms = lines[index].end_ms.filter(|end_ms| *end_ms > start_ms);
+        lines[index].end_ms = match (explicit_end_ms, next_start_ms) {
+            (Some(explicit), Some(next)) => Some(explicit.min(next).max(start_ms)),
+            (Some(explicit), None) => Some(explicit),
+            (None, Some(next)) => Some(next.max(start_ms)),
+            (None, None) => None,
+        };
+    }
 }
 
 fn parse_timestamp(value: &str) -> Option<u64> {
@@ -1567,7 +1936,9 @@ fn synchronized_id3_lyrics(tag: &Id3v2Tag) -> Option<ResolvedLyrics> {
                     .into_iter()
                     .map(|(start_ms, texts)| LyricLine {
                         start_ms: Some(start_ms),
+                        end_ms: None,
                         text: texts.join("\n"),
+                        words: Vec::new(),
                     })
                     .collect(),
                 saved_path: None,
@@ -1688,10 +2059,12 @@ fn path_to_string(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::{write::ZlibEncoder, Compression};
     use lofty::config::WriteOptions;
     use lofty::id3::v2::{BinaryFrame, FrameId};
     use lofty::TextEncoding;
     use serde_json::json;
+    use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
     static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
@@ -1737,15 +2110,21 @@ mod tests {
             vec![
                 LyricLine {
                     start_ms: Some(1_450),
+                    end_ms: Some(3_250),
                     text: "First".to_owned(),
+                    words: Vec::new(),
                 },
                 LyricLine {
                     start_ms: Some(3_250),
+                    end_ms: Some(5_250),
                     text: "First".to_owned(),
+                    words: Vec::new(),
                 },
                 LyricLine {
                     start_ms: Some(5_250),
+                    end_ms: None,
                     text: "Second".to_owned(),
+                    words: Vec::new(),
                 },
             ]
         );
@@ -1759,6 +2138,120 @@ mod tests {
     }
 
     #[test]
+    fn parse_lyrics_should_not_assign_source_timing_to_untimed_translation() {
+        let lines =
+            parse_lyrics("[00:01.00]<0,500>Original\n[00:01.00]Translation\n[00:02.00]Next");
+
+        assert_eq!(lines[0].text, "Original\nTranslation");
+        assert_eq!(
+            lines[0]
+                .words
+                .iter()
+                .map(|word| word.text.as_str())
+                .collect::<String>(),
+            "Original"
+        );
+    }
+
+    #[test]
+    fn parse_lyrics_should_parse_enhanced_lrc_word_timings() {
+        let lines = parse_lyrics("[00:01.000]<0,400>Hello <400,600>world\n[00:02.000]<0,500>Next");
+
+        assert_eq!(lines[0].text, "Hello world");
+        assert_eq!(
+            lines[0].words,
+            vec![
+                LyricWord {
+                    start_ms: 1_000,
+                    end_ms: 1_400,
+                    text: "Hello ".to_owned(),
+                },
+                LyricWord {
+                    start_ms: 1_400,
+                    end_ms: 2_000,
+                    text: "world".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(lines[0].end_ms, Some(2_000));
+    }
+
+    #[test]
+    fn parse_lyrics_should_parse_yrc_absolute_word_timings() {
+        let lines = parse_lyrics(
+            "[1000,1000](1000,400,0)Coffee (1400,600,0)cools\n[2000,500](2000,500,0)Next",
+        );
+
+        assert_eq!(lines[0].text, "Coffee cools");
+        assert_eq!(lines[0].words[0].start_ms, 1_000);
+        assert_eq!(lines[0].words[0].end_ms, 1_400);
+        assert_eq!(lines[0].words[1].text, "cools");
+        assert_eq!(lines[0].words[1].end_ms, 2_000);
+    }
+
+    #[test]
+    fn parse_lyrics_should_parse_qrc_trailing_word_timings() {
+        let lines =
+            parse_lyrics("[1000,1000]Coffee (1000,400)cools(1400,600)\n[2000,500]Next(2000,500)");
+
+        assert_eq!(lines[0].text, "Coffee cools");
+        assert_eq!(lines[0].words[0].text, "Coffee ");
+        assert_eq!(lines[0].words[0].start_ms, 1_000);
+        assert_eq!(lines[0].words[1].text, "cools");
+        assert_eq!(lines[0].words[1].end_ms, 2_000);
+    }
+
+    #[test]
+    fn parse_lyrics_should_extract_qrc_xml_content_and_entities() {
+        let lines = parse_lyrics(
+            r#"<?xml version="1.0"?><QrcInfos><LyricInfo LyricContent="[1000,1000]A &amp; B(1000,1000)&#10;[2000,500]Next(2000,500)"/></QrcInfos>"#,
+        );
+
+        assert_eq!(lines[0].text, "A & B");
+        assert_eq!(lines[0].words[0].text, "A & B");
+        assert_eq!(lines[0].words[0].end_ms, 2_000);
+    }
+
+    #[test]
+    fn parse_lyrics_should_preserve_non_timing_parentheses() {
+        let lines = parse_lyrics("[00:01.00]Song (live)\n[00:02.00]Next");
+
+        assert_eq!(lines[0].text, "Song (live)");
+        assert!(lines[0].words.is_empty());
+    }
+
+    #[test]
+    fn parse_lyrics_should_parse_krc_relative_word_timings() {
+        let lines =
+            parse_lyrics("[1000,1000]<0,400,0>Coffee <400,600,0>cools\n[2000,500]<0,500,0>Next");
+
+        assert_eq!(lines[0].text, "Coffee cools");
+        assert_eq!(lines[0].words[0].start_ms, 1_000);
+        assert_eq!(lines[0].words[1].start_ms, 1_400);
+        assert_eq!(lines[0].words[1].end_ms, 2_000);
+    }
+
+    #[test]
+    fn decode_kugou_lyric_should_decrypt_and_inflate_krc_payloads() {
+        let original = b"[1000,500]<0,500,0>Line";
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(original)
+            .expect("KRC fixture should compress");
+        let compressed = encoder.finish().expect("KRC fixture should finish");
+        let encrypted = compressed
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| byte ^ KUGOU_KRC_XOR_KEY[index % KUGOU_KRC_XOR_KEY.len()]);
+        let payload = b"krc1".iter().copied().chain(encrypted).collect::<Vec<_>>();
+
+        assert_eq!(
+            decode_kugou_lyric(&payload).expect("KRC fixture should decode"),
+            String::from_utf8_lossy(original)
+        );
+    }
+
+    #[test]
     fn parse_lyrics_should_keep_plain_lines_and_ignore_metadata() {
         let lines = parse_lyrics("[ar:Artist]\nFirst line\nSecond line");
 
@@ -1767,11 +2260,15 @@ mod tests {
             vec![
                 LyricLine {
                     start_ms: None,
+                    end_ms: None,
                     text: "First line".to_owned(),
+                    words: Vec::new(),
                 },
                 LyricLine {
                     start_ms: None,
+                    end_ms: None,
                     text: "Second line".to_owned(),
+                    words: Vec::new(),
                 },
             ]
         );
@@ -1806,11 +2303,15 @@ mod tests {
             vec![
                 LyricLine {
                     start_ms: Some(1_000),
+                    end_ms: None,
                     text: "First line".to_owned(),
+                    words: Vec::new(),
                 },
                 LyricLine {
                     start_ms: Some(3_250),
+                    end_ms: None,
                     text: "Second line".to_owned(),
+                    words: Vec::new(),
                 },
             ]
         );
@@ -1842,6 +2343,21 @@ mod tests {
                 duration_seconds: Some(180.0),
             }]
         );
+    }
+
+    #[test]
+    fn netease_lyric_text_should_prefer_word_timed_lyrics() {
+        let body = json!({
+            "yrc": {"lyric": "[1000,500](1000,500,0)Timed"},
+            "lrc": {"lyric": "[00:01.00]Plain"},
+            "tlyric": {"lyric": "[00:01.00]Translation"}
+        });
+
+        let text = netease_lyric_text(&body).expect("lyrics should resolve");
+
+        assert!(text.contains("Timed"));
+        assert!(!text.contains("Plain"));
+        assert!(text.contains("Translation"));
     }
 
     #[test]
@@ -1895,6 +2411,17 @@ mod tests {
         let decoded = decode_base64_lyric(Some(&Value::String(encoded)));
 
         assert_eq!(decoded.as_deref(), Some("[00:01.00]First line"));
+    }
+
+    #[test]
+    fn looks_like_lyric_text_should_reject_encrypted_qq_qrc_payloads() {
+        assert!(!looks_like_lyric_text(
+            "F5AF80D82C4F4BA241E179EB82BC410A27430E82B5546E6E"
+        ));
+        assert!(looks_like_lyric_text(
+            "<QrcInfos><LyricInfo LyricContent=\"[1000,500]Line(1000,500)\"/></QrcInfos>"
+        ));
+        assert!(looks_like_lyric_text("[00:01.00]Line"));
     }
 
     #[test]

@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop-lyrics",
+  "description": "Minimal capability for the desktop lyrics overlay",
+  "windows": ["desktop-lyrics"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
+    "core:window:allow-set-size"
+  ]
+}

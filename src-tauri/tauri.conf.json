@@ -11,13 +11,33 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
+        "label": "main",
         "title": "fika-music",
         "width": 1200,
         "height": 760,
         "minWidth": 1000,
         "minHeight": 650
+      },
+      {
+        "label": "desktop-lyrics",
+        "url": "index.html?window=desktop-lyrics",
+        "title": "Fika Music Desktop Lyrics",
+        "width": 720,
+        "height": 150,
+        "minWidth": 320,
+        "minHeight": 100,
+        "center": true,
+        "visible": false,
+        "focus": false,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": false,
+        "resizable": true
       }
     ],
     "security": {

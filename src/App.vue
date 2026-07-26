@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   AlertCircle,
   AudioLines,
+  Captions,
   Download,
   FolderOpen,
   Gauge,
@@ -36,6 +38,7 @@ import PluginManager from "./components/PluginManager.vue";
 import PluginWorkspace from "./components/PluginWorkspace.vue";
 import NeteaseSource from "./components/NeteaseSource.vue";
 import NowPlayingPanel from "./components/NowPlayingPanel.vue";
+import DesktopLyricsSettings from "./components/DesktopLyricsSettings.vue";
 import OnlineMusic from "./components/OnlineMusic.vue";
 import OnlineMusicSettingsPanel from "./components/OnlineMusicSettings.vue";
 import { useLibraryScan } from "./composables/use-library-scan";
@@ -78,6 +81,23 @@ import {
   type PlaybackMode,
   type ThemePreference,
 } from "./lib/ui-preferences";
+import {
+  DEFAULT_DESKTOP_LYRICS_PREFERENCES,
+  DESKTOP_LYRICS_HIDE_EVENT,
+  DESKTOP_LYRICS_READY_EVENT,
+  DESKTOP_LYRICS_UPDATE_EVENT,
+  desktopLyricsMessage,
+  loadDesktopLyricsPreferences,
+  parseDesktopLyricsPreferences,
+  resolveDesktopLyricLines,
+  saveDesktopLyricsPreferences,
+  type DesktopLyricsPreferences,
+  type DesktopLyricsState,
+} from "./lib/desktop-lyrics";
+import {
+  broadcastDesktopLyricsState,
+  syncDesktopLyricsWindow,
+} from "./lib/desktop-lyrics-window";
 
 type LibraryBrowserInstance = {
   refresh: () => Promise<void>;
@@ -136,6 +156,7 @@ type AppSection = (typeof sections)[number]["id"];
 type ActiveSection = AppSection | "plugin";
 
 const savedUiPreferences = loadUiPreferences();
+const savedDesktopLyricsPreferences = loadDesktopLyricsPreferences();
 const appError = ref<string | null>(null);
 const libraryScan = useLibraryScan((message) => {
   appError.value = message;
@@ -167,10 +188,12 @@ const activeOnlineUrl = ref<string | null>(null);
 const sourceChangeMessage = ref<string | null>(null);
 const audioUrl = ref<string | null>(null);
 const isPlaying = ref(false);
+const isPlaybackWaiting = ref(false);
 const playbackPosition = ref(0);
 const playbackDuration = ref(0);
 const volume = ref(savedUiPreferences.volume);
 const playbackMode = ref<PlaybackMode>(savedUiPreferences.playbackMode);
+const desktopLyricsPreferences = ref(savedDesktopLyricsPreferences);
 const themePreference = ref(savedUiPreferences.theme);
 const layoutDensity = ref(savedUiPreferences.density);
 const nowPlayingCoverUrl = ref<string | null>(null);
@@ -203,6 +226,7 @@ let onlinePlaybackController: AbortController | null = null;
 let pendingRemoteQueueLoad: Promise<OnlineTrack[]> | null = null;
 let remoteQueueGeneration = 0;
 let sourceChangeMessageTimer: ReturnType<typeof setTimeout> | null = null;
+const desktopLyricsUnlisteners: UnlistenFn[] = [];
 const failedOnlineAttempts = new ExpiringCache<string, true>(5 * 60_000, 256);
 const failedOnlineUrls = new ExpiringCache<string, true>(5 * 60_000, 256);
 const playCountTracker = new PlayCountTracker();
@@ -306,6 +330,32 @@ const nextPlaybackModeLabel = computed(() => {
       return "Sequential";
   }
 });
+const desktopLyricLines = computed(() => {
+  if (!activeTrack.value && !activeRemoteTitle.value) {
+    return desktopLyricsMessage("Nothing playing");
+  }
+  if (isLoadingLyrics.value) {
+    return desktopLyricsMessage("Loading lyrics");
+  }
+  if (lyricsError.value) {
+    return desktopLyricsMessage("Lyrics unavailable");
+  }
+  return resolveDesktopLyricLines(
+    activeLyrics.value,
+    playbackPosition.value,
+    playbackDuration.value,
+  );
+});
+const desktopLyricsState = computed<DesktopLyricsState>(() => ({
+  title: nowPlayingTitle.value,
+  subtitle: nowPlayingSubtitle.value,
+  ...desktopLyricLines.value,
+  isPlaying: isPlaying.value,
+  clockRunning: isPlaying.value && !isPlaybackWaiting.value,
+  playbackRate: audioElement.value?.playbackRate || 1,
+  playbackPositionMs: playbackPosition.value * 1_000,
+  preferences: { ...desktopLyricsPreferences.value },
+}));
 
 watch(themePreference, applyTheme, { immediate: true });
 watch(volume, updateVolume);
@@ -333,13 +383,34 @@ watch(
     });
   },
 );
+watch(
+  desktopLyricsPreferences,
+  (preferences) => {
+    saveDesktopLyricsPreferences(preferences);
+    void syncDesktopLyricsWindow(desktopLyricsState.value);
+  },
+  { deep: true },
+);
+watch(
+  [
+    nowPlayingTitle,
+    nowPlayingSubtitle,
+    desktopLyricLines,
+    playbackPosition,
+    isPlaying,
+    isPlaybackWaiting,
+  ],
+  () => void broadcastDesktopLyricsState(desktopLyricsState.value),
+);
 
 onMounted(async () => {
+  await setupDesktopLyricsEvents();
   await Promise.all([
     libraryScan.initialize(),
     loadPluginNavigation(),
     loadAudioSourceNavigation(),
   ]);
+  await syncDesktopLyricsWindow(desktopLyricsState.value);
 });
 
 onBeforeUnmount(() => {
@@ -347,8 +418,23 @@ onBeforeUnmount(() => {
   if (sourceChangeMessageTimer) clearTimeout(sourceChangeMessageTimer);
   playbackDetailsGeneration += 1;
   onlinePlaybackController?.abort();
+  for (const unlisten of desktopLyricsUnlisteners) unlisten();
   sampleListeningTime();
 });
+
+async function setupDesktopLyricsEvents() {
+  desktopLyricsUnlisteners.push(
+    await listen(DESKTOP_LYRICS_READY_EVENT, () => {
+      void broadcastDesktopLyricsState(desktopLyricsState.value);
+    }),
+    await listen(DESKTOP_LYRICS_HIDE_EVENT, () => {
+      updateDesktopLyricsPreferences({ enabled: false });
+    }),
+    await listen<Partial<DesktopLyricsPreferences>>(DESKTOP_LYRICS_UPDATE_EVENT, (event) => {
+      updateDesktopLyricsPreferences(event.payload);
+    }),
+  );
+}
 
 function selectSection(section: AppSection) {
   const resetOnlineHome = section === "online" && activeSection.value === "online";
@@ -423,6 +509,22 @@ function resetUiPreferences() {
   playbackAudioSourceId.value = DEFAULT_UI_PREFERENCES.audioSourceId;
   volume.value = DEFAULT_UI_PREFERENCES.volume;
   playbackMode.value = DEFAULT_UI_PREFERENCES.playbackMode;
+  resetDesktopLyricsPreferences();
+}
+
+function updateDesktopLyricsPreferences(patch: Partial<DesktopLyricsPreferences>) {
+  desktopLyricsPreferences.value = parseDesktopLyricsPreferences({
+    ...desktopLyricsPreferences.value,
+    ...patch,
+  });
+}
+
+function resetDesktopLyricsPreferences() {
+  desktopLyricsPreferences.value = { ...DEFAULT_DESKTOP_LYRICS_PREFERENCES };
+}
+
+function toggleDesktopLyrics() {
+  updateDesktopLyricsPreferences({ enabled: !desktopLyricsPreferences.value.enabled });
 }
 
 function resetPlaybackDetails(
@@ -973,6 +1075,7 @@ function updateVolume() {
 async function onAudioEnded() {
   pauseListeningTime();
   isPlaying.value = false;
+  isPlaybackWaiting.value = false;
   playbackPosition.value = playbackDuration.value;
   if (!localQueueActive.value && localQueueId.value && queuedLocalTrack.value) {
     localQueueActive.value = true;
@@ -985,10 +1088,12 @@ async function onAudioEnded() {
 function onAudioPause() {
   pauseListeningTime();
   isPlaying.value = false;
+  isPlaybackWaiting.value = false;
 }
 
 function onAudioPlay() {
   isPlaying.value = true;
+  isPlaybackWaiting.value = false;
   if (activeTrack.value) {
     playCountTracker.start(performance.now());
   }
@@ -996,9 +1101,11 @@ function onAudioPlay() {
 
 function onAudioWaiting() {
   pauseListeningTime();
+  isPlaybackWaiting.value = true;
 }
 
 function onAudioPlaying() {
+  isPlaybackWaiting.value = false;
   if (activeTrack.value) {
     playCountTracker.start(performance.now());
   }
@@ -1091,6 +1198,7 @@ function seekPlayback(event: Event) {
 
 function onAudioError() {
   isPlaying.value = false;
+  isPlaybackWaiting.value = false;
   if (activeOnlineTrack.value && remoteQueueActive.value) {
     void recoverOnlinePlayback();
     return;
@@ -1452,6 +1560,12 @@ function trackSubtitle(track: LocalTrack) {
             </div>
           </section>
 
+          <DesktopLyricsSettings
+            :preferences="desktopLyricsPreferences"
+            @update="updateDesktopLyricsPreferences"
+            @reset="resetDesktopLyricsPreferences"
+          />
+
       <OnlineMusicSettingsPanel
         :audio-sources="audioSourceRecords"
         @settings-changed="onlineMusicConfig.updateSettings($event)"
@@ -1555,6 +1669,23 @@ function trackSubtitle(track: LocalTrack) {
               <div v-if="sourceChangeMessage" class="truncate text-xs text-warning">{{ sourceChangeMessage }}</div>
             </div>
             <div class="flex shrink-0 items-center gap-1">
+              <div
+                class="tooltip tooltip-top"
+                :data-tip="desktopLyricsPreferences.enabled ? 'Hide desktop lyrics' : 'Show desktop lyrics'"
+              >
+                <button
+                  class="btn btn-square btn-ghost btn-sm"
+                  :class="{ 'btn-active': desktopLyricsPreferences.enabled }"
+                  type="button"
+                  :aria-label="desktopLyricsPreferences.enabled ? 'Hide desktop lyrics' : 'Show desktop lyrics'"
+                  :aria-pressed="desktopLyricsPreferences.enabled"
+                  :title="desktopLyricsPreferences.enabled ? 'Hide desktop lyrics' : 'Show desktop lyrics'"
+                  data-testid="desktop-lyrics-toggle"
+                  @click="toggleDesktopLyrics"
+                >
+                  <Captions :size="16" aria-hidden="true" />
+                </button>
+              </div>
               <div class="tooltip tooltip-top" data-tip="Add to My Favorite Music">
                 <button
                   class="btn btn-square btn-ghost btn-sm"
