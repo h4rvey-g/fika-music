@@ -6,7 +6,9 @@ import {
   AlertCircle,
   AudioLines,
   Captions,
+  Check,
   Download,
+  Ellipsis,
   FolderOpen,
   Gauge,
   Headphones,
@@ -79,6 +81,7 @@ import {
   loadUiPreferences,
   saveUiPreferences,
   type PlaybackMode,
+  type StreamQuality,
   type ThemePreference,
 } from "./lib/ui-preferences";
 import {
@@ -152,6 +155,13 @@ const settingsSection = {
   icon: Settings,
 } as const;
 
+const STREAM_QUALITY_OPTIONS: ReadonlyArray<{ value: StreamQuality; label: string }> = [
+  { value: "128k", label: "128 kbps" },
+  { value: "320k", label: "320 kbps" },
+  { value: "flac", label: "FLAC" },
+  { value: "flac24bit", label: "FLAC 24-bit" },
+];
+
 const sections = [...mainSections, settingsSection];
 type AppSection = (typeof sections)[number]["id"];
 type ActiveSection = AppSection | "plugin";
@@ -179,7 +189,6 @@ const audioSourceRecords = ref<AudioSourceRecord[]>([]);
 const sidebarOpen = ref(false);
 const activeTrack = ref<LocalTrack | null>(null);
 const activeRemoteTitle = ref<string | null>(null);
-const activeRemoteProvider = ref<string | null>(null);
 const activeOnlineTrack = ref<OnlineTrack | null>(null);
 const activeRemoteQuality = ref<string | null>(null);
 const activeOnlineAudioSourceId = ref<string | null>(null);
@@ -204,6 +213,7 @@ const isLoadingLyrics = ref(false);
 const lyricsError = ref<string | null>(null);
 const isPreparingPlayback = ref(false);
 const audioElement = ref<HTMLAudioElement | null>(null);
+const playbackOptionsMenu = ref<HTMLDetailsElement | null>(null);
 const libraryBrowser = ref<LibraryBrowserInstance | null>(null);
 const onlineMusic = ref<OnlineMusicInstance | null>(null);
 const libraryTrackCount = ref(0);
@@ -255,9 +265,9 @@ const nowPlayingSubtitle = computed(() => {
   }
 
   if (!activeRemoteTitle.value) return "Select a local or remote track";
-  return [activeRemoteProvider.value || "Remote Source Provider", activeRemoteQuality.value]
-    .filter(Boolean)
-    .join(" · ");
+  return activeOnlineTrack.value
+    ? [activeOnlineTrack.value.artist, activeOnlineTrack.value.album].filter(Boolean).join(" - ")
+    : "Remote track";
 });
 const activeOnlineTrackSupportsLibraryActions = computed(() => {
   const track = activeOnlineTrack.value;
@@ -279,6 +289,16 @@ const activeOnlinePlaylistPending = computed(() => {
 });
 const activeOnlineDownloadPending = computed(() => onlineMusic.value?.isDownloadActionPending() ?? false);
 const volumePercent = computed(() => Math.round(volume.value * 100));
+const currentPlaybackAudioSourceId = computed(() =>
+  activeOnlineTrack.value
+    ? activeOnlineAudioSourceId.value
+    : playbackAudioSourceId.value,
+);
+const currentPlaybackQuality = computed(() =>
+  activeOnlineTrack.value && activeRemoteQuality.value
+    ? activeRemoteQuality.value
+    : remoteQuality.value,
+);
 const canGoPrevious = computed(() => {
   if (remoteQueueActive.value && remoteQueueIndex.value >= 0) {
     return playbackMode.value !== "sequential" || remoteQueueIndex.value > 0;
@@ -415,6 +435,7 @@ watch(
 );
 
 onMounted(async () => {
+  document.addEventListener("click", handlePlaybackOptionsOutsideClick);
   await setupDesktopLyricsEvents();
   await Promise.all([
     libraryScan.initialize(),
@@ -426,6 +447,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  document.removeEventListener("click", handlePlaybackOptionsOutsideClick);
   libraryScan.dispose();
   if (sourceChangeMessageTimer) clearTimeout(sourceChangeMessageTimer);
   playbackDetailsGeneration += 1;
@@ -648,7 +670,6 @@ async function playTrack(track: LocalTrack) {
 
     activeTrack.value = track;
     activeRemoteTitle.value = null;
-    activeRemoteProvider.value = null;
     activeRemoteQuality.value = null;
     audioUrl.value = convertFileSrc(source.filePath);
     queuedLocalTrack.value = track;
@@ -729,9 +750,9 @@ async function playRemotePlayback(playback: NeteasePlayback) {
   try {
     activeTrack.value = null;
     activeOnlineTrack.value = onlineTrackFromRemotePlayback(playback);
-    activeRemoteTitle.value = `${playback.track.title} - ${playback.track.artist}`;
-    activeRemoteProvider.value = playback.providerName;
-    activeRemoteQuality.value = null;
+    activeRemoteTitle.value = playback.track.title;
+    activeRemoteQuality.value = remoteQuality.value;
+    activeOnlineAudioSourceId.value = playbackAudioSourceId.value;
     audioUrl.value = playback.url;
     void loadRemoteTrackLyrics(
       lyricsQueryForRemoteTrack(playback.track),
@@ -795,13 +816,54 @@ function favoriteActiveOnlineTrack() {
 }
 
 function addActiveOnlineTrackToPlaylist() {
+  closePlaybackOptionsMenu();
   const track = activeOnlineTrack.value;
   if (track) void onlineMusic.value?.openPlaylistPicker(track);
 }
 
 function downloadActiveOnlineTrack() {
+  closePlaybackOptionsMenu();
   const track = activeOnlineTrack.value;
   if (track) void onlineMusic.value?.downloadTrack(track);
+}
+
+function closePlaybackOptionsMenu() {
+  playbackOptionsMenu.value?.removeAttribute("open");
+}
+
+function handlePlaybackOptionsOutsideClick(event: MouseEvent) {
+  const menu = playbackOptionsMenu.value;
+  if (menu?.open && event.target instanceof Node && !menu.contains(event.target)) {
+    closePlaybackOptionsMenu();
+  }
+}
+
+function changePlaybackAudioSource(audioSourceId: string) {
+  const track = activeOnlineTrack.value;
+  const shouldReload = Boolean(
+    track && audioSourceId !== activeOnlineAudioSourceId.value,
+  );
+  playbackAudioSourceId.value = audioSourceId;
+  closePlaybackOptionsMenu();
+  if (track && shouldReload) {
+    clearFailedOnlinePlayback(track.key);
+    clearOnlinePlaybackFailures(track.key);
+    void reloadActiveOnlinePlayback("Changing audio source");
+  }
+}
+
+function changePlaybackQuality(quality: StreamQuality) {
+  const track = activeOnlineTrack.value;
+  const shouldReload = Boolean(
+    track && quality !== activeRemoteQuality.value,
+  );
+  remoteQuality.value = quality;
+  closePlaybackOptionsMenu();
+  if (track && shouldReload) {
+    clearFailedOnlinePlayback(track.key);
+    clearOnlinePlaybackFailures(track.key);
+    void reloadActiveOnlinePlayback("Changing audio quality");
+  }
 }
 
 async function handleOnlinePlayRequest(
@@ -834,30 +896,65 @@ async function playOnlineQueueTrack(index: number) {
   appError.value = null;
 
   try {
-    const { settings, channels } = await onlineMusicConfig.load();
-    const enabledChannels = new Set(channels.map((channel) => channel.id));
-    const track = {
-      ...snapshotTrack,
-      candidates: snapshotTrack.candidates.filter((candidate) =>
-        enabledChannels.has(candidate.channelId),
-      ),
-    };
-    if (!track.candidates.length) {
-      throw new Error("Playback is unavailable from the configured Audio Sources.");
-    }
-    const playback = await resolveOnlineTrack({
-      track,
-      audioSources: audioSourceRecords.value,
-      settings,
-      selectedAudioSourceId: playbackAudioSourceId.value,
-      signal: controller.signal,
-      excludedAttempts: activeFailedAttempts(track.key),
-      excludedUrls: activeFailedUrls(track.key),
-    });
+    const playback = await resolveConfiguredOnlinePlayback(
+      snapshotTrack,
+      controller.signal,
+      true,
+    );
     if (controller.signal.aborted || onlinePlaybackController !== controller) return;
     remoteQueueIndex.value = index;
     await applyOnlinePlayback(playback);
     if (index === remoteQueue.value.length - 1) void loadMoreRemoteQueue();
+  } catch (error) {
+    if (!(error instanceof DOMException && error.name === "AbortError")) {
+      appError.value = normalizeError(error);
+    }
+  } finally {
+    if (onlinePlaybackController === controller) {
+      resolvingOnlineTrackKey.value = null;
+      isPreparingPlayback.value = false;
+    }
+  }
+}
+
+async function resolveConfiguredOnlinePlayback(
+  track: OnlineTrack,
+  signal: AbortSignal,
+  requireEnabledChannel: boolean,
+) {
+  const { settings, channels } = await onlineMusicConfig.load();
+  const enabledChannels = new Set(channels.map((channel) => channel.id));
+  const candidates = requireEnabledChannel
+    ? track.candidates.filter((candidate) => enabledChannels.has(candidate.channelId))
+    : track.candidates;
+  if (!candidates.length) {
+    throw new Error("Playback is unavailable from the configured Audio Sources.");
+  }
+  const resolvedTrack = candidates === track.candidates ? track : { ...track, candidates };
+  return resolveOnlineTrack({
+    track: resolvedTrack,
+    audioSources: audioSourceRecords.value,
+    settings,
+    selectedAudioSourceId: playbackAudioSourceId.value,
+    quality: remoteQuality.value,
+    signal,
+    excludedAttempts: activeFailedAttempts(track.key),
+    excludedUrls: activeFailedUrls(track.key),
+  });
+}
+
+async function playStandaloneOnlineTrack(track: OnlineTrack) {
+  onlinePlaybackController?.abort();
+  const controller = new AbortController();
+  onlinePlaybackController = controller;
+  resolvingOnlineTrackKey.value = track.key;
+  isPreparingPlayback.value = true;
+  appError.value = null;
+
+  try {
+    const playback = await resolveConfiguredOnlinePlayback(track, controller.signal, false);
+    if (controller.signal.aborted || onlinePlaybackController !== controller) return;
+    await applyOnlinePlayback(playback);
   } catch (error) {
     if (!(error instanceof DOMException && error.name === "AbortError")) {
       appError.value = normalizeError(error);
@@ -876,7 +973,6 @@ async function applyOnlinePlayback(playback: OnlinePlayback) {
   activeTrack.value = null;
   activeOnlineTrack.value = playback.track;
   activeRemoteTitle.value = playback.track.title;
-  activeRemoteProvider.value = `${playback.providerName} · ${playback.candidate.channelName}`;
   activeRemoteQuality.value = playback.quality;
   activeOnlineAudioSourceId.value = playback.audioSourceId;
   activeOnlineChannelId.value = playback.candidate.channelId;
@@ -1221,8 +1317,6 @@ function onAudioError() {
 async function recoverOnlinePlayback() {
   const track = activeOnlineTrack.value;
   if (!track || remoteQueueIndex.value < 0) return;
-  const priorPosition = playbackPosition.value;
-  const priorDuration = playbackDuration.value || track.durationSeconds || 0;
   if (activeOnlineAttemptKey.value) {
     failedOnlineAttempts.set(
       `${track.key}::${activeOnlineAttemptKey.value}`,
@@ -1232,11 +1326,30 @@ async function recoverOnlinePlayback() {
   if (activeOnlineUrl.value) {
     failedOnlineUrls.set(`${track.key}::${activeOnlineUrl.value}`, true);
   }
-  sourceChangeMessage.value = "Changing playback source";
-  await playOnlineQueueTrack(remoteQueueIndex.value);
+  await reloadActiveOnlinePlayback("Changing playback source");
+}
+
+async function reloadActiveOnlinePlayback(message: string) {
+  const track = activeOnlineTrack.value;
+  if (!track) return;
+  const priorPosition = playbackPosition.value;
+  const priorDuration = playbackDuration.value || track.durationSeconds || 0;
+  const wasPlaying = isPlaying.value;
+  sourceChangeMessage.value = message;
+
+  if (remoteQueueActive.value && remoteQueueIndex.value >= 0) {
+    await playOnlineQueueTrack(remoteQueueIndex.value);
+  } else {
+    await playStandaloneOnlineTrack(track);
+  }
+
   const nextDuration = playbackDuration.value || activeOnlineTrack.value?.durationSeconds || 0;
   if (audioElement.value && Math.abs(nextDuration - priorDuration) <= 3) {
     audioElement.value.currentTime = Math.min(priorPosition, Math.max(0, nextDuration - 0.25));
+  }
+  if (audioElement.value && !wasPlaying) {
+    audioElement.value.pause();
+    isPlaying.value = false;
   }
   if (sourceChangeMessageTimer) clearTimeout(sourceChangeMessageTimer);
   sourceChangeMessageTimer = window.setTimeout(() => {
@@ -1662,10 +1775,10 @@ function trackSubtitle(track: LocalTrack) {
         aria-label="Playback bar"
       >
         <div
-          class="mx-auto grid w-full max-w-7xl grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 md:grid-cols-[minmax(0,1fr)_minmax(13rem,1.4fr)] lg:grid-cols-[minmax(0,1fr)_minmax(15rem,1.5fr)_minmax(7rem,1fr)]"
+          class="mx-auto grid w-full max-w-7xl grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 md:grid-cols-[minmax(0,1fr)_minmax(13rem,1.4fr)_auto] lg:grid-cols-[minmax(0,1fr)_minmax(15rem,1.5fr)_minmax(11rem,1fr)]"
           :class="layoutDensity === 'compact' ? 'px-3 py-2 lg:px-4' : 'px-4 py-3 lg:px-6'"
         >
-          <div class="flex min-w-0 items-center gap-3">
+          <div class="flex min-w-0 items-center gap-3" data-testid="playback-track-info">
             <div class="flex size-10 shrink-0 items-center justify-center overflow-hidden rounded bg-base-200 sm:size-11">
               <img
                 v-if="nowPlayingCoverUrl"
@@ -1679,71 +1792,6 @@ function trackSubtitle(track: LocalTrack) {
               <div class="truncate text-sm font-medium">{{ nowPlayingTitle }}</div>
               <div class="truncate text-xs text-base-content/60">{{ nowPlayingSubtitle }}</div>
               <div v-if="sourceChangeMessage" class="truncate text-xs text-warning">{{ sourceChangeMessage }}</div>
-            </div>
-            <div class="flex shrink-0 items-center gap-1">
-              <div
-                class="tooltip tooltip-top"
-                :data-tip="desktopLyricsPreferences.enabled ? 'Hide desktop lyrics' : 'Show desktop lyrics'"
-              >
-                <button
-                  class="btn btn-square btn-ghost btn-sm"
-                  :class="{ 'btn-active': desktopLyricsPreferences.enabled }"
-                  type="button"
-                  :aria-label="desktopLyricsPreferences.enabled ? 'Hide desktop lyrics' : 'Show desktop lyrics'"
-                  :aria-pressed="desktopLyricsPreferences.enabled"
-                  :title="desktopLyricsPreferences.enabled ? 'Hide desktop lyrics' : 'Show desktop lyrics'"
-                  data-testid="desktop-lyrics-toggle"
-                  @click="toggleDesktopLyrics"
-                >
-                  <Captions :size="16" aria-hidden="true" />
-                </button>
-              </div>
-              <div class="tooltip tooltip-top" data-tip="Add to My Favorite Music">
-                <button
-                  class="btn btn-square btn-ghost btn-sm"
-                  type="button"
-                  :disabled="!activeOnlineTrackSupportsLibraryActions || activeOnlineFavoritePending"
-                  :aria-label="activeOnlineTrack ? `Add ${activeOnlineTrack.title} to My Favorite Music` : 'Favorite current online track'"
-                  :aria-pressed="activeOnlineTrackIsFavorite"
-                  title="Add to My Favorite Music"
-                  @click="favoriteActiveOnlineTrack"
-                >
-                  <RefreshCw v-if="activeOnlineFavoritePending" class="animate-spin" :size="16" aria-hidden="true" />
-                  <Heart
-                    v-else
-                    :class="{ 'text-error': activeOnlineTrackIsFavorite }"
-                    :fill="activeOnlineTrackIsFavorite ? 'currentColor' : 'none'"
-                    :size="16"
-                    aria-hidden="true"
-                  />
-                </button>
-              </div>
-              <div class="tooltip tooltip-top" data-tip="Download">
-                <button
-                  class="btn btn-square btn-ghost btn-sm"
-                  type="button"
-                  :disabled="!activeOnlineTrack || activeOnlineDownloadPending"
-                  :aria-label="activeOnlineTrack ? `Download ${activeOnlineTrack.title}` : 'Download current online track'"
-                  title="Download"
-                  @click="downloadActiveOnlineTrack"
-                >
-                  <RefreshCw v-if="activeOnlineDownloadPending" class="animate-spin" :size="16" aria-hidden="true" />
-                  <Download v-else :size="16" aria-hidden="true" />
-                </button>
-              </div>
-              <div class="tooltip tooltip-top" data-tip="Add to Playlist">
-                <button
-                  class="btn btn-square btn-ghost btn-sm"
-                  type="button"
-                  :disabled="!activeOnlineTrackSupportsLibraryActions || activeOnlinePlaylistPending"
-                  :aria-label="activeOnlineTrack ? `Add ${activeOnlineTrack.title} to a Playlist` : 'Add current online track to a Playlist'"
-                  title="Add to Playlist"
-                  @click="addActiveOnlineTrackToPlaylist"
-                >
-                  <RefreshCw v-if="activeOnlinePlaylistPending" class="animate-spin" :size="16" aria-hidden="true" />
-                  <ListPlus v-else :size="16" aria-hidden="true" />
-                </button>
-              </div>
             </div>
           </div>
 
@@ -1831,18 +1879,182 @@ function trackSubtitle(track: LocalTrack) {
             </div>
           </div>
 
-          <div class="hidden min-w-0 items-center justify-end gap-2 lg:col-start-3 lg:row-start-1 lg:flex">
-            <Volume2 class="shrink-0" :size="17" aria-hidden="true" />
-            <input
-              v-model.number="volume"
-              class="range range-xs min-w-0 max-w-32"
-              type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              aria-label="Volume"
-              @input="updateVolume"
-            />
+          <div
+            class="col-start-2 row-start-1 flex shrink-0 items-center justify-end gap-1 md:col-start-3 lg:col-start-3 lg:row-start-1"
+            data-testid="playback-actions"
+          >
+            <div
+              class="tooltip tooltip-top"
+              :data-tip="desktopLyricsPreferences.enabled ? 'Hide desktop lyrics' : 'Show desktop lyrics'"
+            >
+              <button
+                class="btn btn-square btn-ghost btn-sm"
+                :class="{ 'btn-active': desktopLyricsPreferences.enabled }"
+                type="button"
+                :aria-label="desktopLyricsPreferences.enabled ? 'Hide desktop lyrics' : 'Show desktop lyrics'"
+                :aria-pressed="desktopLyricsPreferences.enabled"
+                :title="desktopLyricsPreferences.enabled ? 'Hide desktop lyrics' : 'Show desktop lyrics'"
+                data-testid="desktop-lyrics-toggle"
+                @click="toggleDesktopLyrics"
+              >
+                <Captions :size="16" aria-hidden="true" />
+              </button>
+            </div>
+
+            <div class="tooltip tooltip-top" data-tip="Add to My Favorite Music">
+              <button
+                class="btn btn-square btn-ghost btn-sm"
+                type="button"
+                :disabled="!activeOnlineTrackSupportsLibraryActions || activeOnlineFavoritePending"
+                :aria-label="activeOnlineTrack ? `Add ${activeOnlineTrack.title} to My Favorite Music` : 'Favorite current online track'"
+                :aria-pressed="activeOnlineTrackIsFavorite"
+                title="Add to My Favorite Music"
+                @click="favoriteActiveOnlineTrack"
+              >
+                <RefreshCw v-if="activeOnlineFavoritePending" class="animate-spin" :size="16" aria-hidden="true" />
+                <Heart
+                  v-else
+                  :class="{ 'text-error': activeOnlineTrackIsFavorite }"
+                  :fill="activeOnlineTrackIsFavorite ? 'currentColor' : 'none'"
+                  :size="16"
+                  aria-hidden="true"
+                />
+              </button>
+            </div>
+
+            <div class="group relative">
+              <button
+                class="btn btn-square btn-ghost btn-sm"
+                type="button"
+                aria-label="Volume"
+                :aria-valuetext="`${volumePercent}%`"
+                title="Volume"
+              >
+                <Volume2 :size="17" aria-hidden="true" />
+              </button>
+              <div
+                class="absolute bottom-full left-1/2 z-50 hidden -translate-x-1/2 flex-col pb-2 group-hover:flex group-focus-within:flex"
+                data-testid="volume-popover"
+              >
+                <div class="flex h-36 w-12 flex-col items-center gap-2 rounded border border-base-300 bg-base-100 px-2 py-3 shadow-lg">
+                  <output class="text-xs tabular-nums text-base-content/65">{{ volumePercent }}</output>
+                  <input
+                    v-model.number="volume"
+                    class="range range-xs range-vertical min-h-0 flex-1"
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    aria-label="Volume"
+                    :aria-valuetext="`${volumePercent}%`"
+                    @input="updateVolume"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <details
+              ref="playbackOptionsMenu"
+              class="dropdown dropdown-end dropdown-top"
+              data-testid="playback-options-menu"
+            >
+              <summary
+                class="btn btn-square btn-ghost btn-sm"
+                aria-label="More options"
+                title="More options"
+              >
+                <Ellipsis :size="18" aria-hidden="true" />
+              </summary>
+              <ul
+                class="dropdown-content menu menu-sm z-50 mb-2 w-60 rounded border border-base-300 bg-base-100 p-2 shadow-lg"
+                role="menu"
+                aria-label="More playback options"
+              >
+                <li>
+                  <button
+                    type="button"
+                    :disabled="!activeOnlineTrack || activeOnlineDownloadPending"
+                    :aria-label="activeOnlineTrack ? `Download ${activeOnlineTrack.title}` : 'Download current online track'"
+                    @click="downloadActiveOnlineTrack"
+                  >
+                    <RefreshCw v-if="activeOnlineDownloadPending" class="animate-spin" :size="16" aria-hidden="true" />
+                    <Download v-else :size="16" aria-hidden="true" />
+                    <span>Download</span>
+                  </button>
+                </li>
+                <li>
+                  <button
+                    type="button"
+                    :disabled="!activeOnlineTrackSupportsLibraryActions || activeOnlinePlaylistPending"
+                    :aria-label="activeOnlineTrack ? `Add ${activeOnlineTrack.title} to a Playlist` : 'Add current online track to a Playlist'"
+                    @click="addActiveOnlineTrackToPlaylist"
+                  >
+                    <RefreshCw v-if="activeOnlinePlaylistPending" class="animate-spin" :size="16" aria-hidden="true" />
+                    <ListPlus v-else :size="16" aria-hidden="true" />
+                    <span>Add to Playlist</span>
+                  </button>
+                </li>
+                <li>
+                  <details>
+                    <summary>
+                      <AudioLines :size="16" aria-hidden="true" />
+                      <span>Change Audio Source</span>
+                    </summary>
+                    <ul>
+                      <li v-if="!availableAudioSources.length" class="menu-disabled">
+                        <span>No Audio Sources available</span>
+                      </li>
+                      <li v-for="source in availableAudioSources" :key="source.value">
+                        <button
+                          type="button"
+                          role="menuitemradio"
+                          :aria-checked="currentPlaybackAudioSourceId === source.value"
+                          :data-audio-source-id="source.value"
+                          @click="changePlaybackAudioSource(source.value)"
+                        >
+                          <Check
+                            v-if="currentPlaybackAudioSourceId === source.value"
+                            class="shrink-0"
+                            :size="16"
+                            aria-hidden="true"
+                          />
+                          <span v-else class="size-4 shrink-0" aria-hidden="true"></span>
+                          <span>{{ source.label }}</span>
+                        </button>
+                      </li>
+                    </ul>
+                  </details>
+                </li>
+                <li>
+                  <details>
+                    <summary>
+                      <Gauge :size="16" aria-hidden="true" />
+                      <span>Change Quality</span>
+                    </summary>
+                    <ul>
+                      <li v-for="quality in STREAM_QUALITY_OPTIONS" :key="quality.value">
+                        <button
+                          type="button"
+                          role="menuitemradio"
+                          :aria-checked="currentPlaybackQuality === quality.value"
+                          :data-stream-quality="quality.value"
+                          @click="changePlaybackQuality(quality.value)"
+                        >
+                          <Check
+                            v-if="currentPlaybackQuality === quality.value"
+                            class="shrink-0"
+                            :size="16"
+                            aria-hidden="true"
+                          />
+                          <span v-else class="size-4 shrink-0" aria-hidden="true"></span>
+                          <span>{{ quality.label }}</span>
+                        </button>
+                      </li>
+                    </ul>
+                  </details>
+                </li>
+              </ul>
+            </details>
           </div>
 
           <audio

@@ -340,7 +340,7 @@ describe("application shell", () => {
     ).toBe("source-two");
 
     neteaseSource.vm.$emit("playbackReady", {
-      track: createNeteaseTrack(),
+      track: createNeteaseTrack({ album: "Test Album" }),
       url: "https://cdn.example.test/Test%20Track.mp3",
       providerName: "Source Two",
       diagnostics: [],
@@ -351,11 +351,140 @@ describe("application shell", () => {
       "https://cdn.example.test/Test%20Track.mp3",
     );
     const playbackBar = wrapper.get('footer[aria-label="Playback bar"]');
-    expect(playbackBar.text()).toContain("Test Track");
-    expect(playbackBar.text()).toContain("Source Two");
-    expect(playbackBar.find('button[aria-label="Add Test Track to My Favorite Music"]').exists()).toBe(true);
-    expect(playbackBar.find('button[aria-label="Add Test Track to a Playlist"]').exists()).toBe(true);
-    expect(playbackBar.find('button[aria-label="Download Test Track"]').exists()).toBe(true);
+    const trackInfo = playbackBar.get('[data-testid="playback-track-info"]');
+    const actions = playbackBar.get('[data-testid="playback-actions"]');
+    expect(trackInfo.text()).toContain("Test Track");
+    expect(trackInfo.text()).toContain("Test Artist - Test Album");
+    expect(trackInfo.text()).not.toContain("Source Two");
+    expect(trackInfo.find("button").exists()).toBe(false);
+    expect(actions.find('[data-testid="desktop-lyrics-toggle"]').exists()).toBe(true);
+    expect(actions.find('button[aria-label="Add Test Track to My Favorite Music"]').exists()).toBe(true);
+    expect(actions.find('button[aria-label="Add Test Track to a Playlist"]').exists()).toBe(true);
+    expect(actions.find('button[aria-label="Download Test Track"]').exists()).toBe(true);
+    expect(actions.get('button[data-audio-source-id="source-two"]').attributes("aria-checked"))
+      .toBe("true");
+    expect(actions.get('button[data-audio-source-id="source-one"]').attributes("aria-checked"))
+      .toBe("false");
+    expect(actions.get('input[aria-label="Volume"]').classes()).toContain("range-vertical");
+    expect(actions.get('[data-testid="volume-popover"]').classes()).toEqual(
+      expect.arrayContaining(["left-1/2", "-translate-x-1/2"]),
+    );
+    wrapper.unmount();
+  });
+
+  it("closes the playback options menu after clicking outside it", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const menu = wrapper.get<HTMLDetailsElement>('[data-testid="playback-options-menu"]');
+    menu.element.open = true;
+    document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(menu.element.open).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("changes the default audio source and quality from the playback options menu", async () => {
+    listedAudioSources = [
+      createAudioSourceRecord({ id: "source-one", name: "Source One" }),
+      createAudioSourceRecord({ id: "source-two", name: "Source Two" }),
+    ];
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const actions = wrapper.get('[data-testid="playback-actions"]');
+    await actions.get('button[data-audio-source-id="source-two"]').trigger("click");
+    await actions.get('button[data-stream-quality="320k"]').trigger("click");
+    await wrapper.vm.$nextTick();
+
+    expect(actions.get('button[data-audio-source-id="source-two"]').attributes("aria-checked"))
+      .toBe("true");
+    expect(actions.get('button[data-stream-quality="320k"]').attributes("aria-checked"))
+      .toBe("true");
+    expect(JSON.parse(localStorage.getItem(UI_PREFERENCES_STORAGE_KEY) ?? "{}"))
+      .toEqual(expect.objectContaining({ audioSourceId: "source-two", streamQuality: "320k" }));
+    wrapper.unmount();
+  });
+
+  it("re-resolves the current online track after changing its source or quality", async () => {
+    listedAudioSources = [
+      createAudioSourceRecord({ id: "source-one", name: "Source One" }),
+      createAudioSourceRecord({ id: "source-two", name: "Source Two" }),
+    ];
+    const track = createOnlineTrack();
+    const defaultInvoke = tauriMocks.invoke.getMockImplementation();
+    tauriMocks.invoke.mockImplementation((command: string, payload?: {
+      audioSourceId?: string;
+      request?: { quality?: string };
+    }) => {
+      if (command === "list_online_music_channels") {
+        return Promise.resolve([{
+          id: "netease",
+          pluginId: "fika.netease",
+          pluginName: "NetEase",
+          providerId: "netease",
+          sourceId: "wy",
+          sourceName: "NetEase",
+          excluded: false,
+          actions: ["musicUrl"],
+        }]);
+      }
+      if (command === "dispatch_audio_source_request") {
+        return Promise.resolve({
+          response: {
+            action: "musicUrl",
+            data: `https://cdn.example.test/${payload?.audioSourceId}-${payload?.request?.quality}.mp3`,
+          },
+          diagnostics: [],
+        });
+      }
+      if (command === "resolve_remote_track_lyrics") return Promise.resolve(null);
+      return defaultInvoke?.(command, payload);
+    });
+    vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(function (
+      this: HTMLMediaElement,
+    ) {
+      queueMicrotask(() => this.dispatchEvent(new Event("canplay")));
+    });
+    const wrapper = mount(App);
+    await flushPromises();
+
+    wrapper
+      .getComponent({ name: "OnlineMusic" })
+      .vm.$emit("playRequest", track, [track], 0, true);
+    await flushPromises();
+
+    const trackInfo = wrapper.get('[data-testid="playback-track-info"]');
+    expect(trackInfo.text()).toContain("Song");
+    expect(trackInfo.text()).toContain("Artist - Album");
+    expect(trackInfo.text()).not.toContain("Source One");
+
+    const actions = wrapper.get('[data-testid="playback-actions"]');
+    await actions.get('button[data-audio-source-id="source-two"]').trigger("click");
+    await flushPromises();
+    const latestPlaybackRequest = () => {
+      const requests = tauriMocks.invoke.mock.calls
+        .filter(([command]) => command === "dispatch_audio_source_request");
+      return requests[requests.length - 1];
+    };
+    expect(latestPlaybackRequest()).toEqual([
+      "dispatch_audio_source_request",
+      expect.objectContaining({ audioSourceId: "source-two" }),
+    ]);
+
+    await actions.get('button[data-stream-quality="320k"]').trigger("click");
+    await flushPromises();
+    expect(latestPlaybackRequest()).toEqual([
+      "dispatch_audio_source_request",
+      expect.objectContaining({
+        audioSourceId: "source-two",
+        request: expect.objectContaining({ quality: "320k" }),
+      }),
+    ]);
+    expect(actions.get('button[data-audio-source-id="source-two"]').attributes("aria-checked"))
+      .toBe("true");
+    expect(actions.get('button[data-stream-quality="320k"]').attributes("aria-checked"))
+      .toBe("true");
     wrapper.unmount();
   });
 
