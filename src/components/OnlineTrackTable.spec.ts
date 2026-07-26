@@ -5,21 +5,80 @@ import { createOnlineTrack } from "../test/fixtures";
 
 const track = createOnlineTrack({ key: "song-1", title: "Song 1" });
 
-function mountTable(supportsLibraryActions = true, isFavorite = false) {
+function mountTable(
+  supportsLibraryActions = true,
+  isFavorite = false,
+  tracks = [track],
+) {
   return mount(OnlineTrackTable, {
     props: {
-      tracks: [track],
+      tracks,
       activeKey: null,
-      playing: false,
-      resolvingKey: null,
       trackActionId: null,
       supportsLibraryActions: () => supportsLibraryActions,
+      supportsPlaylistSelection: () => supportsLibraryActions,
       isFavorite: () => isFavorite,
     },
   });
 }
 
 describe("OnlineTrackTable", () => {
+  it("plays on row double-click without rendering a leading play button", async () => {
+    const wrapper = mountTable();
+
+    expect(wrapper.find('button[aria-label="Play Song 1"]').exists()).toBe(false);
+    await wrapper.get('[data-online-track-key="song-1"]').trigger("dblclick");
+
+    expect(wrapper.emitted("play")?.[0]).toEqual([track]);
+  });
+
+  it("multi-selects tracks and exposes batch actions from the context menu", async () => {
+    const tracks = [
+      track,
+      createOnlineTrack({ key: "song-2", title: "Song 2" }),
+      createOnlineTrack({ key: "song-3", title: "Song 3" }),
+    ];
+    const wrapper = mountTable(true, false, tracks);
+    const rows = wrapper.findAll("tbody tr");
+
+    await rows[0].trigger("click");
+    await rows[2].trigger("click", { ctrlKey: true });
+    await rows[2].trigger("contextmenu", { clientX: 100, clientY: 100 });
+
+    expect(rows[0].attributes("aria-selected")).toBe("true");
+    expect(rows[1].attributes("aria-selected")).toBe("false");
+    expect(rows[2].attributes("aria-selected")).toBe("true");
+    expect(wrapper.get("[data-online-track-menu]").text()).toContain("2 tracks selected");
+
+    const download = wrapper
+      .findAll("[data-online-track-menu] button")
+      .find((button) => button.text().includes("Download"));
+    await download?.trigger("click");
+    expect(wrapper.emitted("downloadSelection")?.[0]).toEqual([[tracks[0], tracks[2]]]);
+
+    await rows[2].trigger("contextmenu", { clientX: 100, clientY: 100 });
+    const addToPlaylist = wrapper
+      .findAll("[data-online-track-menu] button")
+      .find((button) => button.text().includes("Add to Playlist"));
+    await addToPlaylist?.trigger("click");
+    expect(wrapper.emitted("addSelectionToPlaylist")?.[0]).toEqual([[tracks[0], tracks[2]]]);
+  });
+
+  it("selects a contiguous range with shift-click", async () => {
+    const tracks = [
+      track,
+      createOnlineTrack({ key: "song-2", title: "Song 2" }),
+      createOnlineTrack({ key: "song-3", title: "Song 3" }),
+    ];
+    const wrapper = mountTable(true, false, tracks);
+    const rows = wrapper.findAll("tbody tr");
+
+    await rows[0].trigger("click");
+    await rows[2].trigger("click", { shiftKey: true });
+
+    expect(rows.every((row) => row.attributes("aria-selected") === "true")).toBe(true);
+  });
+
   it("emits favorite and playlist actions for an available track", async () => {
     const wrapper = mountTable();
 

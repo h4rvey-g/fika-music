@@ -1,23 +1,127 @@
 <script setup lang="ts">
-import { Download, Heart, ListPlus, Music2, Pause, Play, RefreshCw } from "@lucide/vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { Download, Heart, ListPlus, Music2, RefreshCw } from "@lucide/vue";
 import type { OnlineTrack } from "../lib/online-music-api";
 
-defineProps<{
+const props = defineProps<{
   tracks: OnlineTrack[];
   activeKey: string | null;
-  playing: boolean;
-  resolvingKey: string | null;
   trackActionId: string | null;
   supportsLibraryActions: (track: OnlineTrack) => boolean;
+  supportsPlaylistSelection: (tracks: OnlineTrack[]) => boolean;
   isFavorite: (track: OnlineTrack) => boolean;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   play: [track: OnlineTrack];
   download: [track: OnlineTrack];
+  downloadSelection: [tracks: OnlineTrack[]];
   favorite: [track: OnlineTrack];
   addToPlaylist: [track: OnlineTrack];
+  addSelectionToPlaylist: [tracks: OnlineTrack[]];
 }>();
+
+const selectedKeys = ref<Set<string>>(new Set());
+const selectionAnchor = ref<number | null>(null);
+const contextMenu = ref<{ x: number; y: number } | null>(null);
+const selectedTracks = computed(() =>
+  props.tracks.filter((track) => selectedKeys.value.has(track.key))
+);
+const selectionSupportsPlaylist = computed(() =>
+  props.supportsPlaylistSelection(selectedTracks.value)
+);
+
+watch(
+  () => props.tracks,
+  (tracks) => {
+    const availableKeys = new Set(tracks.map((track) => track.key));
+    selectedKeys.value = new Set(
+      [...selectedKeys.value].filter((key) => availableKeys.has(key)),
+    );
+    if (selectionAnchor.value !== null && selectionAnchor.value >= tracks.length) {
+      selectionAnchor.value = null;
+    }
+    closeContextMenu();
+  },
+);
+
+onMounted(() => {
+  window.addEventListener("pointerdown", handleWindowPointerDown);
+  window.addEventListener("blur", closeContextMenu);
+  window.addEventListener("resize", closeContextMenu);
+  window.addEventListener("scroll", closeContextMenu, true);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("pointerdown", handleWindowPointerDown);
+  window.removeEventListener("blur", closeContextMenu);
+  window.removeEventListener("resize", closeContextMenu);
+  window.removeEventListener("scroll", closeContextMenu, true);
+});
+
+function selectTrack(event: MouseEvent, index: number) {
+  const track = props.tracks[index];
+  if (!track) return;
+
+  if (event.shiftKey && selectionAnchor.value !== null) {
+    const start = Math.min(selectionAnchor.value, index);
+    const end = Math.max(selectionAnchor.value, index);
+    const rangeKeys = props.tracks.slice(start, end + 1).map((item) => item.key);
+    selectedKeys.value = event.metaKey || event.ctrlKey
+      ? new Set([...selectedKeys.value, ...rangeKeys])
+      : new Set(rangeKeys);
+  } else if (event.metaKey || event.ctrlKey) {
+    const next = new Set(selectedKeys.value);
+    if (next.has(track.key)) next.delete(track.key);
+    else next.add(track.key);
+    selectedKeys.value = next;
+    selectionAnchor.value = index;
+  } else {
+    selectedKeys.value = new Set([track.key]);
+    selectionAnchor.value = index;
+  }
+}
+
+function openContextMenu(event: MouseEvent, index: number) {
+  const track = props.tracks[index];
+  if (!track) return;
+  if (!selectedKeys.value.has(track.key)) {
+    selectedKeys.value = new Set([track.key]);
+    selectionAnchor.value = index;
+  }
+  contextMenu.value = menuPosition(event.clientX, event.clientY);
+}
+
+function closeContextMenu() {
+  contextMenu.value = null;
+}
+
+function handleWindowPointerDown(event: PointerEvent) {
+  const target = event.target;
+  if (target instanceof Element && target.closest("[data-online-track-menu]")) return;
+  closeContextMenu();
+}
+
+function downloadSelection() {
+  if (selectedTracks.value.length) emit("downloadSelection", [...selectedTracks.value]);
+  closeContextMenu();
+}
+
+function addSelectionToPlaylist() {
+  if (selectedTracks.value.length) {
+    emit("addSelectionToPlaylist", [...selectedTracks.value]);
+  }
+  closeContextMenu();
+}
+
+function menuPosition(x: number, y: number) {
+  const width = 240;
+  const height = 112;
+  return {
+    x: Math.max(8, Math.min(x, window.innerWidth - width - 8)),
+    y: Math.max(8, Math.min(y, window.innerHeight - height - 8)),
+  };
+}
 
 function duration(seconds: number | null) {
   if (seconds === null) return "--:--";
@@ -26,31 +130,43 @@ function duration(seconds: number | null) {
 </script>
 
 <template>
-  <div class="overflow-x-auto">
-    <table class="table table-xs table-pin-rows">
-      <thead>
-        <tr>
-          <th class="w-12"></th>
-          <th>Title</th>
-          <th class="hidden md:table-cell">Artist</th>
-          <th class="hidden lg:table-cell">Album</th>
-          <th class="w-28">Sources</th>
-          <th class="w-16 text-right">Time</th>
-          <th class="w-28"></th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="track in tracks" :key="track.key" :class="{ 'bg-base-200': activeKey === track.key }">
-          <td>
-            <button class="btn btn-square btn-ghost btn-xs" type="button" :aria-label="`Play ${track.title}`" @click="$emit('play', track)">
-              <RefreshCw v-if="resolvingKey === track.key" class="animate-spin" :size="14" aria-hidden="true" />
-              <Pause v-else-if="activeKey === track.key && playing" :size="14" aria-hidden="true" />
-              <Play v-else :size="14" aria-hidden="true" />
-            </button>
-          </td>
+  <div>
+    <div class="overflow-x-auto">
+      <table class="table table-xs table-pin-rows">
+        <thead>
+          <tr>
+            <th>Title</th>
+            <th class="hidden md:table-cell">Artist</th>
+            <th class="hidden lg:table-cell">Album</th>
+            <th class="w-28">Sources</th>
+            <th class="w-16 text-right">Time</th>
+            <th class="w-28"></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="(track, index) in tracks"
+            :key="track.key"
+            :data-online-track-key="track.key"
+            class="cursor-default select-none"
+            :class="selectedKeys.has(track.key)
+              ? 'bg-neutral text-neutral-content'
+              : activeKey === track.key
+                ? 'bg-base-200'
+                : 'hover:bg-base-200/60'"
+            :aria-selected="selectedKeys.has(track.key)"
+            tabindex="0"
+            @click="selectTrack($event, index)"
+            @dblclick="$emit('play', track)"
+            @keydown.enter.prevent="$emit('play', track)"
+            @contextmenu.prevent.stop="openContextMenu($event, index)"
+          >
           <td class="max-w-56">
             <div class="flex min-w-0 items-center gap-2">
-              <div class="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded bg-base-200">
+              <div
+                class="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded"
+                :class="selectedKeys.has(track.key) ? 'bg-neutral-content/15' : 'bg-base-200'"
+              >
                 <img v-if="track.coverUrl" :src="track.coverUrl" class="size-full object-cover" alt="" />
                 <Music2 v-else :size="15" aria-hidden="true" />
               </div>
@@ -81,7 +197,8 @@ function duration(seconds: number | null) {
                 :aria-label="`Add ${track.title} to My Favorite Music`"
                 :aria-pressed="isFavorite(track)"
                 :title="supportsLibraryActions(track) ? 'Add to My Favorite Music' : 'This track is not available on NetEase or KuGou'"
-                @click="$emit('favorite', track)"
+                @click.stop="$emit('favorite', track)"
+                @dblclick.stop
               >
                 <RefreshCw v-if="trackActionId === `favorite:${track.key}`" class="animate-spin" :size="14" aria-hidden="true" />
                 <Heart
@@ -98,18 +215,55 @@ function duration(seconds: number | null) {
                 :disabled="!supportsLibraryActions(track) || trackActionId === `playlist:${track.key}`"
                 :aria-label="`Add ${track.title} to a Playlist`"
                 :title="supportsLibraryActions(track) ? 'Add to Playlist' : 'This track is not available on NetEase or KuGou'"
-                @click="$emit('addToPlaylist', track)"
+                @click.stop="$emit('addToPlaylist', track)"
+                @dblclick.stop
               >
                 <RefreshCw v-if="trackActionId === `playlist:${track.key}`" class="animate-spin" :size="14" aria-hidden="true" />
                 <ListPlus v-else :size="14" aria-hidden="true" />
               </button>
-              <button class="btn btn-square btn-ghost btn-xs" type="button" :aria-label="`Download ${track.title}`" title="Download" @click="$emit('download', track)">
+              <button
+                class="btn btn-square btn-ghost btn-xs"
+                type="button"
+                :aria-label="`Download ${track.title}`"
+                title="Download"
+                @click.stop="$emit('download', track)"
+                @dblclick.stop
+              >
                 <Download :size="14" aria-hidden="true" />
               </button>
             </div>
           </td>
-        </tr>
-      </tbody>
-    </table>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <ul
+      v-if="contextMenu"
+      class="menu fixed z-50 w-60 border border-base-300 bg-base-100 p-2 text-base-content shadow-xl"
+      :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+      data-online-track-menu
+      aria-label="Selected online track actions"
+    >
+      <li class="menu-title px-3 py-1 text-xs">
+        {{ selectedTracks.length }} {{ selectedTracks.length === 1 ? "track" : "tracks" }} selected
+      </li>
+      <li>
+        <button type="button" @click="downloadSelection">
+          <Download :size="15" aria-hidden="true" />
+          Download
+        </button>
+      </li>
+      <li>
+        <button
+          type="button"
+          :disabled="!selectionSupportsPlaylist"
+          @click="addSelectionToPlaylist"
+        >
+          <ListPlus :size="15" aria-hidden="true" />
+          Add to Playlist
+        </button>
+      </li>
+    </ul>
   </div>
 </template>

@@ -99,6 +99,11 @@ type PlaylistTarget = {
   candidate: OnlineTrack["candidates"][number];
 };
 
+type PlaylistSelectionTarget = {
+  playlist: OnlinePlaylist & { accountRef: string };
+  candidates: OnlineTrack["candidates"];
+};
+
 const props = defineProps<{
   isActive: boolean;
   audioSources: AudioSourceRecord[];
@@ -191,7 +196,7 @@ const recommendationPreviews = ref<Record<MusicRecommendationKind, Recommendatio
 const playlistLibraryResult = ref<OnlinePlaylistsResult | null>(null);
 const playlistLibraryLoading = ref(false);
 const playlistLibraryError = ref<string | null>(null);
-const pendingPlaylistTrack = ref<OnlineTrack | null>(null);
+const pendingPlaylistTracks = ref<OnlineTrack[]>([]);
 const selectedPlaylistTargetKey = ref("");
 const trackActionId = ref<string | null>(null);
 const trackActionMessage = ref<string | null>(null);
@@ -257,14 +262,20 @@ const failedPlaylistProviders = computed(() => playlistProviders.filter((provide
     || failure.channelName.toLowerCase().includes(provider.label.toLowerCase())
   )
 ));
-const pendingPlaylistTargets = computed(() => pendingPlaylistTrack.value
-  ? playlistTargetsForTrack(pendingPlaylistTrack.value)
-  : []);
+const pendingPlaylistTargets = computed(() =>
+  playlistTargetsForTracks(pendingPlaylistTracks.value)
+);
 const selectedPlaylistTarget = computed(() =>
   pendingPlaylistTargets.value.find((target) =>
     target.playlist.key === selectedPlaylistTargetKey.value
   ) ?? null
 );
+const playlistPickerActionId = computed(() => {
+  if (!pendingPlaylistTracks.value.length) return null;
+  return pendingPlaylistTracks.value.length === 1
+    ? `playlist:${pendingPlaylistTracks.value[0].key}`
+    : "playlist:selection";
+});
 
 onMounted(async () => {
   [unlistenSearch, unlistenDownloads, unlistenDownloadCompletions] = await Promise.all([
@@ -481,6 +492,15 @@ function supportsLibraryActions(track: OnlineTrack) {
   );
 }
 
+function supportsPlaylistSelection(tracks: OnlineTrack[]) {
+  if (!tracks.length) return false;
+  return [NETEASE_PLUGIN_ID, KUGOU_PLUGIN_ID].some((pluginId) =>
+    tracks.every((track) =>
+      track.candidates.some((candidate) => candidate.pluginId === pluginId)
+    )
+  );
+}
+
 function trackIdentity(candidate: OnlineTrack["candidates"][number]) {
   return `${candidate.pluginId}:${candidate.sourceId}:${candidate.id}`;
 }
@@ -515,6 +535,21 @@ function playlistTargetsForTrack(track: OnlineTrack, favoritesOnly = false): Pla
     return [{
       playlist: { ...playlist, accountRef: playlist.accountRef },
       candidate,
+    }];
+  });
+}
+
+function playlistTargetsForTracks(tracks: OnlineTrack[]): PlaylistSelectionTarget[] {
+  if (!tracks.length) return [];
+  return playlistLibraryItems.value.flatMap((playlist) => {
+    if (!playlist.accountRef || !playlist.canMutate) return [];
+    const candidates = tracks.map((track) =>
+      track.candidates.find((candidate) => candidate.pluginId === playlist.pluginId)
+    );
+    if (candidates.some((candidate) => !candidate)) return [];
+    return [{
+      playlist: { ...playlist, accountRef: playlist.accountRef },
+      candidates: candidates as OnlineTrack["candidates"],
     }];
   });
 }
@@ -600,9 +635,11 @@ async function addToFavorites(track: OnlineTrack) {
   }
 }
 
-async function openPlaylistPicker(track: OnlineTrack) {
-  if (!supportsLibraryActions(track)) {
-    globalError.value = "This track is not available on NetEase or KuGou.";
+async function openPlaylistPicker(trackOrTracks: OnlineTrack | OnlineTrack[]) {
+  const tracks = Array.isArray(trackOrTracks) ? trackOrTracks : [trackOrTracks];
+  if (!tracks.length) return;
+  if (tracks.some((track) => !supportsLibraryActions(track))) {
+    globalError.value = "One or more selected tracks are not available on NetEase or KuGou.";
     return;
   }
   globalError.value = null;
@@ -611,39 +648,50 @@ async function openPlaylistPicker(track: OnlineTrack) {
     globalError.value ??= "Could not load your playlists.";
     return;
   }
-  const targets = playlistTargetsForTrack(track);
+  const targets = playlistTargetsForTracks(tracks);
   if (!targets.length) {
-    globalError.value = "No matching writable playlist is available.";
+    globalError.value = tracks.length === 1
+      ? "No matching writable playlist is available."
+      : "No writable playlist supports every selected track.";
     return;
   }
-  pendingPlaylistTrack.value = track;
+  pendingPlaylistTracks.value = [...tracks];
   selectedPlaylistTargetKey.value = targets[0].playlist.key;
 }
 
 function closePlaylistPicker() {
-  if (pendingPlaylistTrack.value && trackActionId.value === `playlist:${pendingPlaylistTrack.value.key}`) {
-    return;
-  }
-  pendingPlaylistTrack.value = null;
+  if (playlistPickerActionId.value && trackActionId.value === playlistPickerActionId.value) return;
+  pendingPlaylistTracks.value = [];
   selectedPlaylistTargetKey.value = "";
 }
 
 async function confirmPlaylistAdd() {
-  const track = pendingPlaylistTrack.value;
   const target = selectedPlaylistTarget.value;
-  if (!track || !target) return;
-  trackActionId.value = `playlist:${track.key}`;
+  const tracks = [...pendingPlaylistTracks.value];
+  const actionId = playlistPickerActionId.value;
+  if (!tracks.length || !target || !actionId) return;
+  trackActionId.value = actionId;
   globalError.value = null;
-  try {
-    await addTrackToPlaylist(target);
-    showTrackActionMessage(`Added to ${target.playlist.name}.`);
-    pendingPlaylistTrack.value = null;
+  const outcomes = await Promise.allSettled(
+    target.candidates.map((candidate) =>
+      addTrackToPlaylist({ playlist: target.playlist, candidate })
+    ),
+  );
+  const succeeded = outcomes.filter((outcome) => outcome.status === "fulfilled").length;
+  const errors = outcomes.flatMap((outcome) =>
+    outcome.status === "rejected" ? [normalizeError(outcome.reason)] : []
+  );
+  if (succeeded) {
+    showTrackActionMessage(
+      tracks.length === 1
+        ? `Added to ${target.playlist.name}.`
+        : `Added ${succeeded} of ${tracks.length} tracks to ${target.playlist.name}.`,
+    );
+    pendingPlaylistTracks.value = [];
     selectedPlaylistTargetKey.value = "";
-  } catch (error) {
-    globalError.value = normalizeError(error);
-  } finally {
-    trackActionId.value = null;
   }
+  if (errors.length) globalError.value = errors.join(" ");
+  trackActionId.value = null;
 }
 
 async function preloadForYou(refreshPlaylists = false) {
@@ -1082,6 +1130,15 @@ async function downloadTrack(track: OnlineTrack) {
   await createDownload("track", track.title, [track]);
 }
 
+async function downloadTracks(tracks: OnlineTrack[]) {
+  if (!tracks.length) return;
+  await createDownload(
+    tracks.length === 1 ? "track" : "selection",
+    tracks.length === 1 ? tracks[0].title : `${tracks.length} selected tracks`,
+    [...tracks],
+  );
+}
+
 async function downloadAll() {
   if (!detail.value || !detailTracks.value.length) return;
   const tracks = [...detailTracks.value];
@@ -1258,7 +1315,7 @@ function showHome() {
   recommendationFailures.value = [];
   recommendationError.value = null;
   globalError.value = null;
-  pendingPlaylistTrack.value = null;
+  pendingPlaylistTracks.value = [];
   selectedPlaylistTargetKey.value = "";
   trackActionId.value = null;
   loginRequiredPluginId.value = null;
@@ -1500,15 +1557,16 @@ defineExpose({
         v-else
         :tracks="detailTracks"
         :active-key="activeOnlineTrackKey"
-        :playing="isPlaying"
-        :resolving-key="resolvingOnlineTrackKey"
         :track-action-id="trackActionId"
         :supports-library-actions="supportsLibraryActions"
+        :supports-playlist-selection="supportsPlaylistSelection"
         :is-favorite="isTrackFavorite"
         @play="playTrack($event, detailTracks)"
         @download="downloadTrack"
+        @download-selection="downloadTracks"
         @favorite="addToFavorites"
         @add-to-playlist="openPlaylistPicker"
+        @add-selection-to-playlist="openPlaylistPicker"
       />
       <div v-if="detailHasMore" class="flex justify-center py-4">
         <button class="btn btn-sm" type="button" :disabled="detailLoadingMore" @click="loadMoreDetail">
@@ -1615,16 +1673,17 @@ defineExpose({
       <OnlineTrackTable
         v-else-if="recommendationTracks.length"
         :tracks="recommendationTracks"
-          :active-key="activeOnlineTrackKey"
-          :playing="isPlaying"
-          :resolving-key="resolvingOnlineTrackKey"
-          :track-action-id="trackActionId"
-          :supports-library-actions="supportsLibraryActions"
-          :is-favorite="isTrackFavorite"
-          @play="requestTrackPlayback($event, recommendationTracks)"
-          @download="downloadTrack"
-          @favorite="addToFavorites"
-          @add-to-playlist="openPlaylistPicker"
+        :active-key="activeOnlineTrackKey"
+        :track-action-id="trackActionId"
+        :supports-library-actions="supportsLibraryActions"
+        :supports-playlist-selection="supportsPlaylistSelection"
+        :is-favorite="isTrackFavorite"
+        @play="requestTrackPlayback($event, recommendationTracks)"
+        @download="downloadTrack"
+        @download-selection="downloadTracks"
+        @favorite="addToFavorites"
+        @add-to-playlist="openPlaylistPicker"
+        @add-selection-to-playlist="openPlaylistPicker"
       />
       <div
         v-if="activeRecommendationEntry.id === 'roaming' && recommendationTracks.length"
@@ -1966,15 +2025,16 @@ defineExpose({
           v-else-if="section.id === 'songs'"
           :tracks="sectionItems<OnlineTrack>('songs')"
           :active-key="activeOnlineTrackKey"
-          :playing="isPlaying"
-          :resolving-key="resolvingOnlineTrackKey"
           :track-action-id="trackActionId"
           :supports-library-actions="supportsLibraryActions"
+          :supports-playlist-selection="supportsPlaylistSelection"
           :is-favorite="isTrackFavorite"
           @play="requestTrackPlayback($event, sectionItems<OnlineTrack>('songs'))"
           @download="downloadTrack"
+          @download-selection="downloadTracks"
           @favorite="addToFavorites"
           @add-to-playlist="openPlaylistPicker"
+          @add-selection-to-playlist="openPlaylistPicker"
         />
 
         <ul v-else class="list divide-y divide-base-300">
@@ -2009,7 +2069,7 @@ defineExpose({
 
     <Teleport to="body" :disabled="isActive">
       <dialog
-        v-if="pendingPlaylistTrack"
+        v-if="pendingPlaylistTracks.length"
         open
         tabindex="0"
         class="modal"
@@ -2021,13 +2081,15 @@ defineExpose({
             <div class="min-w-0 flex-1">
               <h2 id="online-playlist-picker-title" class="text-base font-semibold">Add to Playlist</h2>
               <p class="mt-1 truncate text-sm text-base-content/65">
-                {{ pendingPlaylistTrack.title }} · {{ pendingPlaylistTrack.artist }}
+                {{ pendingPlaylistTracks.length === 1
+                  ? `${pendingPlaylistTracks[0].title} · ${pendingPlaylistTracks[0].artist}`
+                  : `${pendingPlaylistTracks.length} selected tracks` }}
               </p>
             </div>
             <button
               class="btn btn-square btn-ghost btn-sm"
               type="button"
-              :disabled="trackActionId === `playlist:${pendingPlaylistTrack.key}`"
+              :disabled="trackActionId === playlistPickerActionId"
               aria-label="Close playlist picker"
               @click="closePlaylistPicker"
             >
@@ -2058,7 +2120,7 @@ defineExpose({
             <button
               class="btn btn-ghost btn-sm"
               type="button"
-              :disabled="trackActionId === `playlist:${pendingPlaylistTrack.key}`"
+              :disabled="trackActionId === playlistPickerActionId"
               @click="closePlaylistPicker"
             >
               Cancel
@@ -2066,16 +2128,16 @@ defineExpose({
             <button
               class="btn btn-primary btn-sm"
               type="submit"
-              :disabled="!selectedPlaylistTarget || trackActionId === `playlist:${pendingPlaylistTrack.key}`"
+              :disabled="!selectedPlaylistTarget || trackActionId === playlistPickerActionId"
             >
-              <RefreshCw v-if="trackActionId === `playlist:${pendingPlaylistTrack.key}`" class="animate-spin" :size="15" aria-hidden="true" />
+              <RefreshCw v-if="trackActionId === playlistPickerActionId" class="animate-spin" :size="15" aria-hidden="true" />
               <ListPlus v-else :size="15" aria-hidden="true" />
               Add
             </button>
           </div>
         </form>
         <form method="dialog" class="modal-backdrop" @submit.prevent="closePlaylistPicker">
-          <button type="submit" :disabled="trackActionId === `playlist:${pendingPlaylistTrack.key}`">Close</button>
+          <button type="submit" :disabled="trackActionId === playlistPickerActionId">Close</button>
         </form>
       </dialog>
     </Teleport>

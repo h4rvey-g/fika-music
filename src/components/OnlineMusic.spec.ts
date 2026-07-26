@@ -261,7 +261,8 @@ describe("Online Music workspace", () => {
       pageSize: 100,
       requestId: expect.stringMatching(/^online-detail-/),
     });
-    expect(wrapper.find('button[aria-label="Play Song 1"]').exists()).toBe(true);
+    expect(wrapper.find('[data-online-track-key="song-1"]').exists()).toBe(true);
+    expect(wrapper.find('button[aria-label="Play Song 1"]').exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -443,6 +444,69 @@ describe("Online Music workspace", () => {
     wrapper.unmount();
   });
 
+  it("adds a multi-selection to the same writable playlist", async () => {
+    tauriMocks.invoke.mockImplementation((command: string, args?: {
+      request?: { action: string; playlistId: string; track: { id: string } };
+    }) => {
+      if (command === "get_online_music_settings") return Promise.resolve(settings);
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "start_online_music_search") return Promise.resolve("search-1");
+      if (command === "online_music_playlists") {
+        return Promise.resolve({
+          items: [libraryPlaylist],
+          failures: [],
+          supportedChannels: 1,
+          completedChannels: 1,
+        });
+      }
+      if (command === "dispatch_plugin_request" && args?.request?.action === "playlistAddTrack") {
+        return Promise.resolve({
+          response: {
+            action: "playlistAddTrack",
+            data: {
+              auditId: 0,
+              operation: "add",
+              playlistId: args.request.playlistId,
+              trackId: args.request.track.id,
+              occurredAt: 1,
+            },
+          },
+          diagnostics: [],
+        });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+    const tracks = [track(1), track(2)];
+    await search(wrapper, "Song", "songs", tracks);
+    const rows = wrapper.findAll("tbody tr");
+
+    await rows[0].trigger("click");
+    await rows[1].trigger("click", { ctrlKey: true });
+    await rows[1].trigger("contextmenu", { clientX: 100, clientY: 100 });
+    const addToPlaylist = wrapper
+      .findAll("[data-online-track-menu] button")
+      .find((button) => button.text().includes("Add to Playlist"));
+    await addToPlaylist?.trigger("click");
+    await flushPromises();
+
+    const picker = wrapper.get("[data-online-playlist-picker]");
+    expect(picker.text()).toContain("2 selected tracks");
+    await picker.trigger("submit");
+    await flushPromises();
+
+    const addedTrackIds = tauriMocks.invoke.mock.calls
+      .filter(([command, args]) =>
+        command === "dispatch_plugin_request"
+        && args?.request?.action === "playlistAddTrack"
+      )
+      .map(([, args]) => args.request.track.id);
+    expect(addedTrackIds).toEqual(["1", "2"]);
+    expect(wrapper.text()).toContain("Added 2 of 2 tracks to Private Mix.");
+    wrapper.unmount();
+  });
+
   it("fills each recommendation entrance with its first track cover", async () => {
     const covers = {
       daily: "https://cdn.test/daily.jpg",
@@ -532,7 +596,8 @@ describe("Online Music workspace", () => {
       kind: "daily",
       requestId: expect.stringMatching(/^online-recommendation-daily-/),
     });
-    expect(wrapper.find('button[aria-label="Play Song 1"]').exists()).toBe(true);
+    expect(wrapper.find('[data-online-track-key="song-1"]').exists()).toBe(true);
+    expect(wrapper.find('button[aria-label="Play Song 1"]').exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -582,16 +647,10 @@ describe("Online Music workspace", () => {
     await flushPromises();
 
     expect(
-      wrapper.findAll('button[aria-label^="Play Song "]').map((button) =>
-        button.attributes("aria-label")
+      wrapper.findAll("[data-online-track-key]").map((row) =>
+        row.attributes("data-online-track-key")
       ),
-    ).toEqual([
-      "Play Song 1",
-      "Play Song 2",
-      "Play Song 3",
-      "Play Song 4",
-      "Play Song 5",
-    ]);
+    ).toEqual(["song-1", "song-2", "song-3", "song-4", "song-5"]);
     expect(roamingRequests).toBe(2);
     wrapper.unmount();
   });
@@ -623,7 +682,7 @@ describe("Online Music workspace", () => {
 
     await wrapper.get('button[aria-label="私人漫游"]').trigger("click");
     await flushPromises();
-    await wrapper.get('button[aria-label="Play Song 3"]').trigger("click");
+    await wrapper.get('[data-online-track-key="song-3"]').trigger("dblclick");
     await flushPromises();
 
     const requests = wrapper.emitted("playRequest") ?? [];
@@ -686,7 +745,8 @@ describe("Online Music workspace", () => {
 
     expect(wrapper.text()).toContain("All Songs");
     expect(wrapper.text()).toContain("Song 6");
-    expect(wrapper.find('button[aria-label="Play Song 1"]').exists()).toBe(true);
+    expect(wrapper.find('[data-online-track-key="song-1"]').exists()).toBe(true);
+    expect(wrapper.find('button[aria-label="Play Song 1"]').exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -737,6 +797,71 @@ describe("Online Music workspace", () => {
       tauriMocks.invoke.mock.calls.some(([command]) => command === "create_online_download_task"),
     ).toBe(false);
     expect(wrapper.findAll('[role="tab"]')[0].classes()).toContain("tab-active");
+    wrapper.unmount();
+  });
+
+  it("creates one download task for a multi-selection", async () => {
+    const tracks = [track(1), track(2)];
+    const task: OnlineDownloadTask = {
+      taskId: "selection-task",
+      kind: "selection",
+      title: "2 selected tracks",
+      state: "queued",
+      destination: "/downloads",
+      selectedAudioSourceId: null,
+      totalItems: 2,
+      completedItems: 0,
+      skippedItems: 0,
+      failedItems: 0,
+      createdAt: 1,
+      updatedAt: 1,
+      items: [],
+    };
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "get_online_music_settings") {
+        return Promise.resolve({ ...settings, downloadDirectory: "/downloads" });
+      }
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "start_online_music_search") return Promise.resolve("search-1");
+      if (command === "online_music_playlists") {
+        return Promise.resolve({
+          items: [],
+          failures: [],
+          supportedChannels: 0,
+          completedChannels: 0,
+        });
+      }
+      if (command === "create_online_download_task") return Promise.resolve(task);
+      if (command === "start_online_download_task") {
+        return Promise.resolve({ ...task, state: "running", updatedAt: 2 });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+    await search(wrapper, "Song", "songs", tracks);
+    const rows = wrapper.findAll("tbody tr");
+
+    await rows[0].trigger("click");
+    await rows[1].trigger("click", { ctrlKey: true });
+    await rows[1].trigger("contextmenu", { clientX: 100, clientY: 100 });
+    const download = wrapper
+      .findAll("[data-online-track-menu] button")
+      .find((button) => button.text().includes("Download"));
+    await download?.trigger("click");
+    await flushPromises();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("create_online_download_task", {
+      kind: "selection",
+      title: "2 selected tracks",
+      tracks,
+      selectedAudioSourceId: "",
+      localMusicFolder: "/music",
+    });
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("start_online_download_task", {
+      taskId: "selection-task",
+    });
+    expect(wrapper.findAll('[role="tab"]')[1].classes()).toContain("tab-active");
     wrapper.unmount();
   });
 
