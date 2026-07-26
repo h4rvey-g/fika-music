@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SourceRequestOutcome } from "./plugin-api";
 import {
+  addKugouPlaylistTrack,
   cancelKugouQrLogin,
   getKugouPlaylist,
   getKugouRecommendations,
@@ -72,6 +73,7 @@ describe("KuGou API", () => {
             trackCount: 1,
             ownerName: "Fika",
             canMutate: false,
+            isFavorite: false,
           },
           tracks: [track],
         },
@@ -90,6 +92,48 @@ describe("KuGou API", () => {
         playlistId: "collection_3_42_1_0",
       },
       requestId: "request-2",
+    });
+  });
+
+  it("adds a KuGou track with the metadata required by the playlist gateway", async () => {
+    invokeMock.mockResolvedValue({
+      response: {
+        action: "playlistAddTrack",
+        data: {
+          auditId: 0,
+          operation: "add",
+          playlistId: "collection_3_42_1_0",
+          trackId: track.id,
+          occurredAt: 1,
+        },
+      },
+      diagnostics: [],
+    } satisfies SourceRequestOutcome);
+
+    await addKugouPlaylistTrack(
+      accountRef,
+      "collection_3_42_1_0",
+      {
+        ...track,
+        platformIds: { albumId: 12, mixSongId: 34 },
+      },
+    );
+
+    expect(invokeMock).toHaveBeenCalledWith("dispatch_plugin_request", {
+      pluginId: "fika.kugou",
+      request: {
+        action: "playlistAddTrack",
+        source: "kg",
+        accountRef,
+        playlistId: "collection_3_42_1_0",
+        track: {
+          id: track.id,
+          source: "kg",
+          title: track.title,
+          platformIds: { albumId: 12, mixSongId: 34 },
+        },
+      },
+      requestId: undefined,
     });
   });
 

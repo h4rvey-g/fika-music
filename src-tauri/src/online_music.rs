@@ -757,6 +757,8 @@ pub struct OnlinePlaylist {
     pub cover_url: Option<String>,
     pub track_count: Option<u64>,
     pub owner_name: Option<String>,
+    pub can_mutate: bool,
+    pub is_favorite: bool,
     #[ts(type = "Record<string, string | number>")]
     pub platform_ids: BTreeMap<String, JsonScalar>,
     #[ts(type = "Record<string, unknown>")]
@@ -783,6 +785,8 @@ impl OnlinePlaylist {
             cover_url: playlist.cover_url,
             track_count: playlist.track_count,
             owner_name: playlist.owner_name,
+            can_mutate: false,
+            is_favorite: false,
             platform_ids: playlist.platform_ids,
             raw_info: playlist.raw_info,
             rank,
@@ -811,6 +815,8 @@ impl OnlinePlaylist {
             cover_url: playlist.cover_url,
             track_count: Some(playlist.track_count),
             owner_name: Some(playlist.owner_name),
+            can_mutate: playlist.can_mutate,
+            is_favorite: playlist.is_favorite,
             rank,
         }
     }

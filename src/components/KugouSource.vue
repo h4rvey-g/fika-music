@@ -679,7 +679,7 @@ function formatDuration(seconds: number | null) {
               <div class="truncate text-sm font-semibold">{{ selectedPlaylist.playlist.name }}</div>
               <div class="text-xs text-base-content/60">{{ selectedPlaylist.playlist.ownerName }} · {{ selectedPlaylist.tracks.length }} tracks</div>
             </div>
-            <span class="badge badge-ghost badge-sm">Read only</span>
+            <span v-if="!selectedPlaylist.playlist.canMutate" class="badge badge-ghost badge-sm">Read only</span>
           </div>
           <div v-if="selectedPlaylist?.tracks.length" :ref="playlistVirtual.setViewport" class="h-[clamp(20rem,60vh,36rem)] overflow-auto">
             <table class="table table-sm" aria-label="KuGou Playlist tracks" :aria-rowcount="selectedPlaylist.tracks.length + 1">

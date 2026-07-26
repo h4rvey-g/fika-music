@@ -50,6 +50,7 @@ const playlist: SourcePlaylist = {
   trackCount: 1,
   ownerName: "Fika",
   canMutate: false,
+  isFavorite: false,
 };
 
 function kugouPluginRecord() {
@@ -63,11 +64,13 @@ function kugouPluginRecord() {
     declaredCapabilities: [
       "account:ref",
       "playlist:read",
+      "playlist:write",
       "bridge:kugou-music-api",
     ],
     grantedCapabilities: [
       "account:ref",
       "playlist:read",
+      "playlist:write",
       "bridge:kugou-music-api",
     ],
     requiredHostBridges: ["kugou-music-api"],

@@ -24,6 +24,7 @@ import {
 import type { AudioSourceRecord } from "../generated/bindings";
 import OnlineTrackTable from "./OnlineTrackTable.vue";
 import { cancelSourceRequest } from "../lib/plugin-api";
+import type { RemoteTrack } from "../lib/plugin-api";
 import { normalizeError } from "../lib/errors";
 import {
   cancelOnlineDownloadTask,
@@ -62,8 +63,8 @@ import {
   type OnlineSearchSectionResult,
   type OnlineTrack,
 } from "../lib/online-music-api";
-import { NETEASE_PLUGIN_ID } from "../lib/netease-api";
-import { KUGOU_PLUGIN_ID } from "../lib/kugou-api";
+import { addNeteasePlaylistTrack, NETEASE_PLUGIN_ID } from "../lib/netease-api";
+import { addKugouPlaylistTrack, KUGOU_PLUGIN_ID } from "../lib/kugou-api";
 
 type SectionState = {
   loading: boolean;
@@ -91,6 +92,11 @@ type RecommendationPreviewState = {
   error: string | null;
   requestId: string | null;
   generation: number;
+};
+
+type PlaylistTarget = {
+  playlist: OnlinePlaylist & { accountRef: string };
+  candidate: OnlineTrack["candidates"][number];
 };
 
 const props = defineProps<{
@@ -185,6 +191,12 @@ const recommendationPreviews = ref<Record<MusicRecommendationKind, Recommendatio
 const playlistLibraryResult = ref<OnlinePlaylistsResult | null>(null);
 const playlistLibraryLoading = ref(false);
 const playlistLibraryError = ref<string | null>(null);
+const pendingPlaylistTrack = ref<OnlineTrack | null>(null);
+const selectedPlaylistTargetKey = ref("");
+const trackActionId = ref<string | null>(null);
+const trackActionMessage = ref<string | null>(null);
+const favoriteTrackKeys = ref<Set<string>>(new Set());
+const favoriteTrackIdentities = ref<Set<string>>(new Set());
 
 let unlistenSearch: (() => void) | null = null;
 let unlistenDownloads: (() => void) | null = null;
@@ -202,6 +214,7 @@ let pendingPrivateRoamingBatch: Promise<OnlineRecommendationsResult | null> | nu
 let playlistLibraryGeneration = 0;
 let playlistLibraryRequestId: string | null = null;
 let pendingPlaylistLibraryLoad: Promise<OnlinePlaylistsResult | null> | null = null;
+let trackActionMessageTimer: number | null = null;
 let pendingSearchEvents: OnlineSearchSectionEvent[] = [];
 const pendingRecommendationLoads = new Map<
   MusicRecommendationKind,
@@ -244,6 +257,14 @@ const failedPlaylistProviders = computed(() => playlistProviders.filter((provide
     || failure.channelName.toLowerCase().includes(provider.label.toLowerCase())
   )
 ));
+const pendingPlaylistTargets = computed(() => pendingPlaylistTrack.value
+  ? playlistTargetsForTrack(pendingPlaylistTrack.value)
+  : []);
+const selectedPlaylistTarget = computed(() =>
+  pendingPlaylistTargets.value.find((target) =>
+    target.playlist.key === selectedPlaylistTargetKey.value
+  ) ?? null
+);
 
 onMounted(async () => {
   [unlistenSearch, unlistenDownloads, unlistenDownloadCompletions] = await Promise.all([
@@ -291,6 +312,7 @@ onBeforeUnmount(() => {
   cancelPlaylistLibraryLoad();
   cancelPrivateRoamingBatchLoad();
   if (searchId.value) void cancelSourceRequest(searchId.value);
+  if (trackActionMessageTimer !== null) window.clearTimeout(trackActionMessageTimer);
 });
 
 function newSectionStates(): Record<OnlineSearchSection, SectionState> {
@@ -451,6 +473,177 @@ function cancelPlaylistLibraryLoad() {
   playlistLibraryRequestId = null;
   playlistLibraryLoading.value = false;
   pendingPlaylistLibraryLoad = null;
+}
+
+function supportsLibraryActions(track: OnlineTrack) {
+  return track.candidates.some((candidate) =>
+    candidate.pluginId === NETEASE_PLUGIN_ID || candidate.pluginId === KUGOU_PLUGIN_ID
+  );
+}
+
+function trackIdentity(candidate: OnlineTrack["candidates"][number]) {
+  return `${candidate.pluginId}:${candidate.sourceId}:${candidate.id}`;
+}
+
+function isTrackFavorite(track: OnlineTrack) {
+  return favoriteTrackKeys.value.has(track.key) || track.candidates.some((candidate) =>
+    favoriteTrackIdentities.value.has(trackIdentity(candidate))
+  );
+}
+
+function isTrackActionPending(track: OnlineTrack, action: "favorite" | "playlist") {
+  return trackActionId.value === `${action}:${track.key}`;
+}
+
+function isDownloadActionPending() {
+  return downloadActionId.value === "create";
+}
+
+function playlistTargetsForTrack(track: OnlineTrack, favoritesOnly = false): PlaylistTarget[] {
+  return playlistLibraryItems.value.flatMap((playlist) => {
+    if (
+      !playlist.accountRef ||
+      !playlist.canMutate ||
+      (favoritesOnly && !playlist.isFavorite)
+    ) {
+      return [];
+    }
+    const candidate = track.candidates.find((candidate) =>
+      candidate.pluginId === playlist.pluginId
+    );
+    if (!candidate) return [];
+    return [{
+      playlist: { ...playlist, accountRef: playlist.accountRef },
+      candidate,
+    }];
+  });
+}
+
+function remoteTrackFromCandidate(candidate: OnlineTrack["candidates"][number]): RemoteTrack {
+  return {
+    id: candidate.id,
+    source: candidate.sourceId,
+    title: candidate.title,
+    artist: candidate.artist,
+    album: candidate.album,
+    durationSeconds: candidate.durationSeconds,
+    coverUrl: candidate.coverUrl,
+    trackNumber: candidate.trackNumber ?? undefined,
+    discNumber: candidate.discNumber ?? undefined,
+    platformIds: candidate.platformIds,
+    rawInfo: candidate.rawInfo,
+  };
+}
+
+async function addTrackToPlaylist(target: PlaylistTarget) {
+  const track = remoteTrackFromCandidate(target.candidate);
+  if (target.playlist.pluginId === NETEASE_PLUGIN_ID) {
+    return addNeteasePlaylistTrack(target.playlist.accountRef, target.playlist.id, track);
+  }
+  if (target.playlist.pluginId === KUGOU_PLUGIN_ID) {
+    return addKugouPlaylistTrack(target.playlist.accountRef, target.playlist.id, track);
+  }
+  throw new Error("The selected playlist does not support adding tracks.");
+}
+
+function showTrackActionMessage(message: string) {
+  trackActionMessage.value = message;
+  if (trackActionMessageTimer !== null) window.clearTimeout(trackActionMessageTimer);
+  trackActionMessageTimer = window.setTimeout(() => {
+    trackActionMessage.value = null;
+    trackActionMessageTimer = null;
+  }, 5_000);
+}
+
+async function addToFavorites(track: OnlineTrack) {
+  if (!supportsLibraryActions(track)) {
+    globalError.value = "This track is not available on NetEase or KuGou.";
+    return;
+  }
+  globalError.value = null;
+  const library = await loadPlaylistLibrary();
+  if (!library) {
+    globalError.value ??= "Could not load your playlists.";
+    return;
+  }
+  const targets = playlistTargetsForTrack(track, true);
+  if (!targets.length) {
+    globalError.value = "No matching My Favorite Music playlist is available.";
+    return;
+  }
+
+  trackActionId.value = `favorite:${track.key}`;
+  const outcomes = await Promise.allSettled(targets.map(addTrackToPlaylist));
+  trackActionId.value = null;
+  const succeeded = outcomes.filter((outcome) => outcome.status === "fulfilled").length;
+  const errors = outcomes.flatMap((outcome) =>
+    outcome.status === "rejected" ? [normalizeError(outcome.reason)] : []
+  );
+  if (succeeded) {
+    favoriteTrackKeys.value = new Set([...favoriteTrackKeys.value, track.key]);
+    favoriteTrackIdentities.value = new Set([
+      ...favoriteTrackIdentities.value,
+      ...targets.flatMap((target, index) =>
+        outcomes[index].status === "fulfilled"
+          ? [trackIdentity(target.candidate)]
+          : []
+      ),
+    ]);
+    showTrackActionMessage(
+      succeeded === 1
+        ? "Added to My Favorite Music."
+        : `Added to ${succeeded} favorite playlists.`,
+    );
+  }
+  if (errors.length) {
+    globalError.value = errors.join(" ");
+  }
+}
+
+async function openPlaylistPicker(track: OnlineTrack) {
+  if (!supportsLibraryActions(track)) {
+    globalError.value = "This track is not available on NetEase or KuGou.";
+    return;
+  }
+  globalError.value = null;
+  const library = await loadPlaylistLibrary();
+  if (!library) {
+    globalError.value ??= "Could not load your playlists.";
+    return;
+  }
+  const targets = playlistTargetsForTrack(track);
+  if (!targets.length) {
+    globalError.value = "No matching writable playlist is available.";
+    return;
+  }
+  pendingPlaylistTrack.value = track;
+  selectedPlaylistTargetKey.value = targets[0].playlist.key;
+}
+
+function closePlaylistPicker() {
+  if (pendingPlaylistTrack.value && trackActionId.value === `playlist:${pendingPlaylistTrack.value.key}`) {
+    return;
+  }
+  pendingPlaylistTrack.value = null;
+  selectedPlaylistTargetKey.value = "";
+}
+
+async function confirmPlaylistAdd() {
+  const track = pendingPlaylistTrack.value;
+  const target = selectedPlaylistTarget.value;
+  if (!track || !target) return;
+  trackActionId.value = `playlist:${track.key}`;
+  globalError.value = null;
+  try {
+    await addTrackToPlaylist(target);
+    showTrackActionMessage(`Added to ${target.playlist.name}.`);
+    pendingPlaylistTrack.value = null;
+    selectedPlaylistTargetKey.value = "";
+  } catch (error) {
+    globalError.value = normalizeError(error);
+  } finally {
+    trackActionId.value = null;
+  }
 }
 
 async function preloadForYou(refreshPlaylists = false) {
@@ -1065,6 +1258,9 @@ function showHome() {
   recommendationFailures.value = [];
   recommendationError.value = null;
   globalError.value = null;
+  pendingPlaylistTrack.value = null;
+  selectedPlaylistTargetKey.value = "";
+  trackActionId.value = null;
   loginRequiredPluginId.value = null;
   detailRetryAvailable.value = false;
   void preloadForYou();
@@ -1074,12 +1270,20 @@ function showHome() {
   });
 }
 
-defineExpose({ showHome });
+defineExpose({
+  addToFavorites,
+  downloadTrack,
+  isDownloadActionPending,
+  isTrackActionPending,
+  isTrackFavorite,
+  openPlaylistPicker,
+  showHome,
+});
 
 </script>
 
 <template>
-  <div class="mx-auto flex w-full max-w-7xl flex-col gap-4 px-3 py-3 lg:px-5 lg:py-4">
+  <div class="flex w-full min-w-0 flex-col gap-4">
     <div class="flex flex-col gap-3 border-b border-base-300 pb-4 sm:flex-row sm:items-center">
       <div class="relative min-w-0 flex-1">
         <form class="join flex w-full" role="search" @submit.prevent="submitSearch()">
@@ -1156,6 +1360,10 @@ defineExpose({ showHome });
     <div v-if="completionMessage" role="status" class="alert alert-success py-2 text-sm">
       <Download :size="16" aria-hidden="true" />
       {{ completionMessage }}
+    </div>
+    <div v-if="trackActionMessage" role="status" class="alert alert-success py-2 text-sm">
+      <ListPlus :size="16" aria-hidden="true" />
+      {{ trackActionMessage }}
     </div>
 
     <div v-if="activeTab === 'downloads'" class="min-h-64">
@@ -1294,8 +1502,13 @@ defineExpose({ showHome });
         :active-key="activeOnlineTrackKey"
         :playing="isPlaying"
         :resolving-key="resolvingOnlineTrackKey"
+        :track-action-id="trackActionId"
+        :supports-library-actions="supportsLibraryActions"
+        :is-favorite="isTrackFavorite"
         @play="playTrack($event, detailTracks)"
         @download="downloadTrack"
+        @favorite="addToFavorites"
+        @add-to-playlist="openPlaylistPicker"
       />
       <div v-if="detailHasMore" class="flex justify-center py-4">
         <button class="btn btn-sm" type="button" :disabled="detailLoadingMore" @click="loadMoreDetail">
@@ -1402,11 +1615,16 @@ defineExpose({ showHome });
       <OnlineTrackTable
         v-else-if="recommendationTracks.length"
         :tracks="recommendationTracks"
-        :active-key="activeOnlineTrackKey"
-        :playing="isPlaying"
-        :resolving-key="resolvingOnlineTrackKey"
-        @play="requestTrackPlayback($event, recommendationTracks)"
-        @download="downloadTrack"
+          :active-key="activeOnlineTrackKey"
+          :playing="isPlaying"
+          :resolving-key="resolvingOnlineTrackKey"
+          :track-action-id="trackActionId"
+          :supports-library-actions="supportsLibraryActions"
+          :is-favorite="isTrackFavorite"
+          @play="requestTrackPlayback($event, recommendationTracks)"
+          @download="downloadTrack"
+          @favorite="addToFavorites"
+          @add-to-playlist="openPlaylistPicker"
       />
       <div
         v-if="activeRecommendationEntry.id === 'roaming' && recommendationTracks.length"
@@ -1750,8 +1968,13 @@ defineExpose({ showHome });
           :active-key="activeOnlineTrackKey"
           :playing="isPlaying"
           :resolving-key="resolvingOnlineTrackKey"
+          :track-action-id="trackActionId"
+          :supports-library-actions="supportsLibraryActions"
+          :is-favorite="isTrackFavorite"
           @play="requestTrackPlayback($event, sectionItems<OnlineTrack>('songs'))"
           @download="downloadTrack"
+          @favorite="addToFavorites"
+          @add-to-playlist="openPlaylistPicker"
         />
 
         <ul v-else class="list divide-y divide-base-300">
@@ -1783,5 +2006,78 @@ defineExpose({ showHome });
         </div>
       </section>
     </div>
+
+    <Teleport to="body" :disabled="isActive">
+      <dialog
+        v-if="pendingPlaylistTrack"
+        open
+        tabindex="0"
+        class="modal"
+        aria-labelledby="online-playlist-picker-title"
+        @cancel.prevent="closePlaylistPicker"
+      >
+        <form class="modal-box max-w-lg" data-online-playlist-picker @submit.prevent="confirmPlaylistAdd">
+          <div class="flex items-start gap-3">
+            <div class="min-w-0 flex-1">
+              <h2 id="online-playlist-picker-title" class="text-base font-semibold">Add to Playlist</h2>
+              <p class="mt-1 truncate text-sm text-base-content/65">
+                {{ pendingPlaylistTrack.title }} · {{ pendingPlaylistTrack.artist }}
+              </p>
+            </div>
+            <button
+              class="btn btn-square btn-ghost btn-sm"
+              type="button"
+              :disabled="trackActionId === `playlist:${pendingPlaylistTrack.key}`"
+              aria-label="Close playlist picker"
+              @click="closePlaylistPicker"
+            >
+              <X :size="17" aria-hidden="true" />
+            </button>
+          </div>
+
+          <ul class="menu mt-4 max-h-72 w-full overflow-y-auto rounded border border-base-300 p-1">
+            <li v-for="target in pendingPlaylistTargets" :key="target.playlist.key">
+              <button
+                type="button"
+                :class="{ 'menu-active': selectedPlaylistTargetKey === target.playlist.key }"
+                :aria-pressed="selectedPlaylistTargetKey === target.playlist.key"
+                @click="selectedPlaylistTargetKey = target.playlist.key"
+              >
+                <span class="min-w-0 flex-1 text-left">
+                  <span class="block truncate text-sm">{{ target.playlist.name }}</span>
+                  <span class="block truncate text-xs opacity-60">
+                    {{ target.playlist.ownerName || target.playlist.channelName }}
+                  </span>
+                </span>
+                <span class="badge badge-ghost badge-sm shrink-0">{{ target.playlist.channelName }}</span>
+              </button>
+            </li>
+          </ul>
+
+          <div class="modal-action">
+            <button
+              class="btn btn-ghost btn-sm"
+              type="button"
+              :disabled="trackActionId === `playlist:${pendingPlaylistTrack.key}`"
+              @click="closePlaylistPicker"
+            >
+              Cancel
+            </button>
+            <button
+              class="btn btn-primary btn-sm"
+              type="submit"
+              :disabled="!selectedPlaylistTarget || trackActionId === `playlist:${pendingPlaylistTrack.key}`"
+            >
+              <RefreshCw v-if="trackActionId === `playlist:${pendingPlaylistTrack.key}`" class="animate-spin" :size="15" aria-hidden="true" />
+              <ListPlus v-else :size="15" aria-hidden="true" />
+              Add
+            </button>
+          </div>
+        </form>
+        <form method="dialog" class="modal-backdrop" @submit.prevent="closePlaylistPicker">
+          <button type="submit" :disabled="trackActionId === `playlist:${pendingPlaylistTrack.key}`">Close</button>
+        </form>
+      </dialog>
+    </Teleport>
   </div>
 </template>

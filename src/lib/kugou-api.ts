@@ -11,6 +11,7 @@ import {
   type SourceDiagnostic,
   type SourcePlaylist,
   type SourcePlaylistDetail,
+  type SourcePlaylistMutation,
   type SourceQuality,
   type SourceRequest,
   type SourceRequestOutcome,
@@ -97,6 +98,26 @@ export async function getKugouPlaylist(
     requestId,
   );
   return operationResult(outcome, "playlistRead", (response) => response.data);
+}
+
+export async function addKugouPlaylistTrack(
+  accountRef: string,
+  playlistId: string,
+  track: RemoteTrack,
+): Promise<KugouOperationResult<SourcePlaylistMutation>> {
+  const outcome = await dispatch({
+    action: "playlistAddTrack",
+    source: KUGOU_SOURCE_ID,
+    accountRef,
+    playlistId,
+    track: {
+      id: track.id,
+      source: track.source,
+      title: track.title,
+      platformIds: track.platformIds ?? {},
+    },
+  });
+  return operationResult(outcome, "playlistAddTrack", (response) => response.data);
 }
 
 export async function resolveKugouTrack(

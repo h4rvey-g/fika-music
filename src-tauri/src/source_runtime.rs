@@ -589,6 +589,13 @@ fn validate_playlist_id(playlist_id: &str) -> Result<(), String> {
 pub struct SourceTrackRef {
     pub id: String,
     pub source: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub title: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    #[ts(type = "Record<string, string | number>")]
+    pub platform_ids: BTreeMap<String, JsonScalar>,
 }
 
 impl SourceTrackRef {
@@ -599,6 +606,14 @@ impl SourceTrackRef {
         if self.source.trim().is_empty() {
             return Err("track source must not be empty".to_owned());
         }
+        if self
+            .title
+            .as_deref()
+            .is_some_and(|title| title.trim().is_empty())
+        {
+            return Err("track title must not be empty when provided".to_owned());
+        }
+        validate_platform_ids(&self.platform_ids)?;
         Ok(())
     }
 }
@@ -749,12 +764,17 @@ pub struct SourceRecommendationsResponse {
 #[ts(export_to = "bindings.ts")]
 pub struct SourcePlaylist {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mutation_id: Option<String>,
     pub name: String,
     pub description: Option<String>,
     pub cover_url: Option<String>,
     pub track_count: u64,
     pub owner_name: String,
     pub can_mutate: bool,
+    #[serde(default)]
+    pub is_favorite: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]

@@ -57,6 +57,7 @@ const playlist: SourcePlaylist = {
   trackCount: 0,
   ownerName: "Fika",
   canMutate: true,
+  isFavorite: false,
 };
 
 function neteasePluginRecord(overrides: Partial<PluginRecord> = {}): PluginRecord {

@@ -183,6 +183,7 @@ describe("application shell", () => {
     expect(wrapper.get("h1").text()).toBe("Online Music");
     expect(wrapper.get('input[aria-label="Search Online Music"]').attributes("placeholder"))
       .toBe("Search songs, artists, albums, and playlists");
+    expect(wrapper.find('[aria-label="Now playing details"]').exists()).toBe(true);
 
     const sourcesButton = navigation
       .findAll("button")
@@ -339,8 +340,12 @@ describe("application shell", () => {
     expect(wrapper.get("audio").attributes("src")).toBe(
       "https://cdn.example.test/Test%20Track.mp3",
     );
-    expect(wrapper.get('footer[aria-label="Playback bar"]').text()).toContain("Test Track");
-    expect(wrapper.get('footer[aria-label="Playback bar"]').text()).toContain("Source Two");
+    const playbackBar = wrapper.get('footer[aria-label="Playback bar"]');
+    expect(playbackBar.text()).toContain("Test Track");
+    expect(playbackBar.text()).toContain("Source Two");
+    expect(playbackBar.find('button[aria-label="Add Test Track to My Favorite Music"]').exists()).toBe(true);
+    expect(playbackBar.find('button[aria-label="Add Test Track to a Playlist"]').exists()).toBe(true);
+    expect(playbackBar.find('button[aria-label="Download Test Track"]').exists()).toBe(true);
     wrapper.unmount();
   });
 

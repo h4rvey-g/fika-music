@@ -60,6 +60,8 @@ const playlist: OnlinePlaylist = {
   coverUrl: null,
   trackCount: 12,
   ownerName: "Listener",
+  canMutate: false,
+  isFavorite: false,
   platformIds: { id: "playlist-1" },
   rawInfo: {},
   rank: 1,
@@ -70,6 +72,8 @@ const libraryPlaylist: OnlinePlaylist = {
   key: "fika.netease:wy:netease-account:1:playlist-1",
   accountRef: "netease-account:1",
   coverUrl: "https://cdn.test/private-mix.jpg",
+  canMutate: true,
+  isFavorite: true,
 };
 
 const kugouLibraryPlaylist: OnlinePlaylist = {
@@ -84,6 +88,8 @@ const kugouLibraryPlaylist: OnlinePlaylist = {
   name: "KuGou Favorites",
   coverUrl: "https://cdn.test/kugou-favorites.jpg",
   trackCount: 24,
+  canMutate: true,
+  isFavorite: true,
   platformIds: { id: "playlist-2" },
   rank: 2,
 };
@@ -285,6 +291,155 @@ describe("Online Music workspace", () => {
     expect(status.text()).toContain("KuGou Music unavailable");
     await status.get("button").trigger("click");
     expect(wrapper.emitted("openPlugin")?.[0]).toEqual(["fika.kugou"]);
+    wrapper.unmount();
+  });
+
+  it("adds a song to each matching provider favorite playlist", async () => {
+    const matchedTrack = {
+      ...track(1),
+      candidates: [
+        ...track(1).candidates,
+        createOnlineTrackCandidate({
+          channelId: "fika.kugou:kg",
+          pluginId: "fika.kugou",
+          sourceId: "kg",
+          channelName: "KuGou",
+          id: "4D766DEC7A90A011D730ED939D158131",
+          title: "Song 1",
+          platformIds: { albumId: 12, mixSongId: 34 },
+          rank: 2,
+        }),
+      ],
+    };
+    tauriMocks.invoke.mockImplementation((command: string, args?: {
+      request?: { action: string; playlistId: string; track: { id: string } };
+    }) => {
+      if (command === "get_online_music_settings") return Promise.resolve(settings);
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "start_online_music_search") return Promise.resolve("search-1");
+      if (command === "online_music_playlists") {
+        return Promise.resolve({
+          items: [libraryPlaylist, kugouLibraryPlaylist],
+          failures: [],
+          supportedChannels: 2,
+          completedChannels: 2,
+        });
+      }
+      if (command === "dispatch_plugin_request" && args?.request?.action === "playlistAddTrack") {
+        return Promise.resolve({
+          response: {
+            action: "playlistAddTrack",
+            data: {
+              auditId: 0,
+              operation: "add",
+              playlistId: args.request.playlistId,
+              trackId: args.request.track.id,
+              occurredAt: 1,
+            },
+          },
+          diagnostics: [],
+        });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+    await search(wrapper, "Song", "songs", [matchedTrack]);
+
+    await wrapper.get('button[aria-label="Add Song 1 to My Favorite Music"]').trigger("click");
+    await flushPromises();
+
+    const mutations = tauriMocks.invoke.mock.calls
+      .filter(([command]) => command === "dispatch_plugin_request")
+      .map(([, args]) => args);
+    expect(mutations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        pluginId: "fika.netease",
+        request: expect.objectContaining({
+          source: "wy",
+          accountRef: "netease-account:1",
+          playlistId: "playlist-1",
+          track: { id: "1", source: "wy" },
+        }),
+      }),
+      expect.objectContaining({
+        pluginId: "fika.kugou",
+        request: expect.objectContaining({
+          source: "kg",
+          accountRef: "kugou-account:1",
+          playlistId: "playlist-2",
+          track: {
+            id: "4D766DEC7A90A011D730ED939D158131",
+            source: "kg",
+            title: "Song 1",
+            platformIds: { albumId: 12, mixSongId: 34 },
+          },
+        }),
+      }),
+    ]));
+    expect(wrapper.text()).toContain("Added to 2 favorite playlists.");
+    const favoriteButton = wrapper.get('button[aria-label="Add Song 1 to My Favorite Music"]');
+    expect(favoriteButton.get("svg").attributes("fill")).toBe("currentColor");
+    expect(favoriteButton.get("svg").classes()).toContain("text-error");
+    wrapper.unmount();
+  });
+
+  it("limits the playlist picker to playlists backed by the selected song's providers", async () => {
+    tauriMocks.invoke.mockImplementation((command: string, args?: {
+      request?: { action: string; playlistId: string; track: { id: string } };
+    }) => {
+      if (command === "get_online_music_settings") return Promise.resolve(settings);
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "start_online_music_search") return Promise.resolve("search-1");
+      if (command === "online_music_playlists") {
+        return Promise.resolve({
+          items: [libraryPlaylist, kugouLibraryPlaylist],
+          failures: [],
+          supportedChannels: 2,
+          completedChannels: 2,
+        });
+      }
+      if (command === "dispatch_plugin_request" && args?.request?.action === "playlistAddTrack") {
+        return Promise.resolve({
+          response: {
+            action: "playlistAddTrack",
+            data: {
+              auditId: 0,
+              operation: "add",
+              playlistId: args.request.playlistId,
+              trackId: args.request.track.id,
+              occurredAt: 1,
+            },
+          },
+          diagnostics: [],
+        });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+    await search(wrapper, "Song", "songs", [track(1)]);
+
+    await wrapper.get('button[aria-label="Add Song 1 to a Playlist"]').trigger("click");
+    await flushPromises();
+
+    const picker = wrapper.get("[data-online-playlist-picker]");
+    expect(picker.text()).toContain("Private Mix");
+    expect(picker.text()).not.toContain("KuGou Favorites");
+    await picker.trigger("submit");
+    await flushPromises();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("dispatch_plugin_request", {
+      pluginId: "fika.netease",
+      request: {
+        action: "playlistAddTrack",
+        source: "wy",
+        accountRef: "netease-account:1",
+        playlistId: "playlist-1",
+        track: { id: "1", source: "wy" },
+      },
+      requestId: undefined,
+    });
     wrapper.unmount();
   });
 

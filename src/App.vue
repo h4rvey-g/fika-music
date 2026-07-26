@@ -4,10 +4,13 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import {
   AlertCircle,
   AudioLines,
+  Download,
   FolderOpen,
   Gauge,
   Headphones,
+  Heart,
   Library,
+  ListPlus,
   ListOrdered,
   Menu,
   Music2,
@@ -83,6 +86,12 @@ type LibraryBrowserInstance = {
 };
 
 type OnlineMusicInstance = {
+  addToFavorites: (track: OnlineTrack) => Promise<void>;
+  downloadTrack: (track: OnlineTrack) => Promise<void>;
+  isDownloadActionPending: () => boolean;
+  isTrackActionPending: (track: OnlineTrack, action: "favorite" | "playlist") => boolean;
+  isTrackFavorite: (track: OnlineTrack) => boolean;
+  openPlaylistPicker: (track: OnlineTrack) => Promise<void>;
   showHome: () => void;
 };
 
@@ -225,6 +234,25 @@ const nowPlayingSubtitle = computed(() => {
     .filter(Boolean)
     .join(" · ");
 });
+const activeOnlineTrackSupportsLibraryActions = computed(() => {
+  const track = activeOnlineTrack.value;
+  return Boolean(track?.candidates.some((candidate) =>
+    candidate.pluginId === NETEASE_PLUGIN_ID || candidate.pluginId === KUGOU_PLUGIN_ID
+  ));
+});
+const activeOnlineTrackIsFavorite = computed(() => {
+  const track = activeOnlineTrack.value;
+  return Boolean(track && onlineMusic.value?.isTrackFavorite(track));
+});
+const activeOnlineFavoritePending = computed(() => {
+  const track = activeOnlineTrack.value;
+  return Boolean(track && onlineMusic.value?.isTrackActionPending(track, "favorite"));
+});
+const activeOnlinePlaylistPending = computed(() => {
+  const track = activeOnlineTrack.value;
+  return Boolean(track && onlineMusic.value?.isTrackActionPending(track, "playlist"));
+});
+const activeOnlineDownloadPending = computed(() => onlineMusic.value?.isDownloadActionPending() ?? false);
 const volumePercent = computed(() => Math.round(volume.value * 100));
 const canGoPrevious = computed(() => {
   if (remoteQueueActive.value && remoteQueueIndex.value >= 0) {
@@ -586,6 +614,7 @@ async function playRemotePlayback(playback: NeteasePlayback) {
   appError.value = null;
   try {
     activeTrack.value = null;
+    activeOnlineTrack.value = onlineTrackFromRemotePlayback(playback);
     activeRemoteTitle.value = `${playback.track.title} - ${playback.track.artist}`;
     activeRemoteProvider.value = playback.providerName;
     activeRemoteQuality.value = null;
@@ -607,6 +636,58 @@ async function playRemotePlayback(playback: NeteasePlayback) {
   } finally {
     isPreparingPlayback.value = false;
   }
+}
+
+function onlineTrackFromRemotePlayback(playback: NeteasePlayback): OnlineTrack {
+  const source = playback.track.source;
+  const pluginId = source === "wy"
+    ? NETEASE_PLUGIN_ID
+    : source === "kg"
+      ? KUGOU_PLUGIN_ID
+      : "";
+  const candidate = {
+    channelId: `${pluginId}:${source}`,
+    pluginId,
+    sourceId: source,
+    channelName: playback.providerName,
+    id: playback.track.id,
+    title: playback.track.title,
+    artist: playback.track.artist,
+    album: playback.track.album,
+    durationSeconds: playback.track.durationSeconds,
+    coverUrl: playback.track.coverUrl,
+    trackNumber: playback.track.trackNumber ?? null,
+    discNumber: playback.track.discNumber ?? null,
+    platformIds: playback.track.platformIds ?? {},
+    rawInfo: playback.track.rawInfo,
+    rank: 0,
+  };
+  return {
+    key: `direct:${source}:${playback.track.id}`,
+    title: playback.track.title,
+    artist: playback.track.artist,
+    album: playback.track.album,
+    durationSeconds: playback.track.durationSeconds,
+    coverUrl: playback.track.coverUrl,
+    trackNumber: playback.track.trackNumber ?? null,
+    discNumber: playback.track.discNumber ?? null,
+    candidates: pluginId ? [candidate] : [],
+  };
+}
+
+function favoriteActiveOnlineTrack() {
+  const track = activeOnlineTrack.value;
+  if (track) void onlineMusic.value?.addToFavorites(track);
+}
+
+function addActiveOnlineTrackToPlaylist() {
+  const track = activeOnlineTrack.value;
+  if (track) void onlineMusic.value?.openPlaylistPicker(track);
+}
+
+function downloadActiveOnlineTrack() {
+  const track = activeOnlineTrack.value;
+  if (track) void onlineMusic.value?.downloadTrack(track);
 }
 
 async function handleOnlinePlayRequest(
@@ -1218,8 +1299,12 @@ function trackSubtitle(track: LocalTrack) {
           <AudioSourceManager @sources-changed="updateAudioSourceRecords" />
         </section>
 
-        <section v-show="activeSection === 'online'" class="min-h-full">
-          <div v-if="appError" role="alert" class="alert alert-error mx-auto mt-3 w-[calc(100%-1.5rem)] max-w-7xl py-2 lg:w-[calc(100%-2.5rem)]">
+        <section
+          v-show="activeSection === 'online'"
+          class="mx-auto flex min-h-full w-full max-w-7xl flex-col"
+          :class="layoutDensity === 'compact' ? 'gap-3 px-3 py-3 lg:px-4' : 'gap-4 px-4 py-4 lg:px-6'"
+        >
+          <div v-if="appError" role="alert" class="alert alert-error py-2">
             <AlertCircle :size="17" aria-hidden="true" />
             <span class="min-w-0 flex-1 text-sm">{{ appError }}</span>
             <button
@@ -1231,21 +1316,40 @@ function trackSubtitle(track: LocalTrack) {
               <X :size="14" aria-hidden="true" />
             </button>
           </div>
-          <OnlineMusic
-            ref="onlineMusic"
-            :is-active="activeSection === 'online'"
-            :audio-sources="audioSourceRecords"
-            :selected-audio-source-id="playbackAudioSourceId"
-            :active-online-track-key="activeOnlineTrack?.key ?? null"
-            :resolving-online-track-key="resolvingOnlineTrackKey"
-            :is-playing="isPlaying"
-            :local-music-folder="selectedFolder"
-            @play-request="handleOnlinePlayRequest"
-            @open-audio-sources="selectSection('sources')"
-            @open-plugin="selectPlugin"
-            @download-completed="handleOnlineDownloadCompleted"
-            @toggle-playback="togglePlayback"
-          />
+          <div
+            class="grid min-w-0 items-start xl:grid-cols-[minmax(0,1fr)_20rem]"
+            :class="layoutDensity === 'compact' ? 'gap-3' : 'gap-4'"
+          >
+            <OnlineMusic
+              ref="onlineMusic"
+              class="min-w-0 xl:col-start-1 xl:row-start-1"
+              :is-active="activeSection === 'online'"
+              :audio-sources="audioSourceRecords"
+              :selected-audio-source-id="playbackAudioSourceId"
+              :active-online-track-key="activeOnlineTrack?.key ?? null"
+              :resolving-online-track-key="resolvingOnlineTrackKey"
+              :is-playing="isPlaying"
+              :local-music-folder="selectedFolder"
+              @play-request="handleOnlinePlayRequest"
+              @open-audio-sources="selectSection('sources')"
+              @open-plugin="selectPlugin"
+              @download-completed="handleOnlineDownloadCompleted"
+              @toggle-playback="togglePlayback"
+            />
+            <NowPlayingPanel
+              v-if="activeSection === 'online'"
+              class="min-w-0 xl:sticky xl:top-4 xl:col-start-2 xl:row-start-1"
+              :title="nowPlayingTitle"
+              :subtitle="nowPlayingSubtitle"
+              :cover-url="nowPlayingCoverUrl"
+              :lyrics="activeLyrics"
+              :lyrics-loading="isLoadingLyrics"
+              :lyrics-error="lyricsError"
+              :playback-position="playbackPosition"
+              :can-retry="Boolean(activeTrack || activeRemoteLyricsQuery)"
+              @retry-lyrics="retryLyrics"
+            />
+          </div>
         </section>
 
         <section
@@ -1445,10 +1549,58 @@ function trackSubtitle(track: LocalTrack) {
               />
               <Music2 v-else :size="21" aria-hidden="true" />
             </div>
-            <div class="min-w-0">
+            <div class="min-w-0 flex-1">
               <div class="truncate text-sm font-medium">{{ nowPlayingTitle }}</div>
               <div class="truncate text-xs text-base-content/60">{{ nowPlayingSubtitle }}</div>
               <div v-if="sourceChangeMessage" class="truncate text-xs text-warning">{{ sourceChangeMessage }}</div>
+            </div>
+            <div class="flex shrink-0 items-center gap-1">
+              <div class="tooltip tooltip-top" data-tip="Add to My Favorite Music">
+                <button
+                  class="btn btn-square btn-ghost btn-sm"
+                  type="button"
+                  :disabled="!activeOnlineTrackSupportsLibraryActions || activeOnlineFavoritePending"
+                  :aria-label="activeOnlineTrack ? `Add ${activeOnlineTrack.title} to My Favorite Music` : 'Favorite current online track'"
+                  :aria-pressed="activeOnlineTrackIsFavorite"
+                  title="Add to My Favorite Music"
+                  @click="favoriteActiveOnlineTrack"
+                >
+                  <RefreshCw v-if="activeOnlineFavoritePending" class="animate-spin" :size="16" aria-hidden="true" />
+                  <Heart
+                    v-else
+                    :class="{ 'text-error': activeOnlineTrackIsFavorite }"
+                    :fill="activeOnlineTrackIsFavorite ? 'currentColor' : 'none'"
+                    :size="16"
+                    aria-hidden="true"
+                  />
+                </button>
+              </div>
+              <div class="tooltip tooltip-top" data-tip="Download">
+                <button
+                  class="btn btn-square btn-ghost btn-sm"
+                  type="button"
+                  :disabled="!activeOnlineTrack || activeOnlineDownloadPending"
+                  :aria-label="activeOnlineTrack ? `Download ${activeOnlineTrack.title}` : 'Download current online track'"
+                  title="Download"
+                  @click="downloadActiveOnlineTrack"
+                >
+                  <RefreshCw v-if="activeOnlineDownloadPending" class="animate-spin" :size="16" aria-hidden="true" />
+                  <Download v-else :size="16" aria-hidden="true" />
+                </button>
+              </div>
+              <div class="tooltip tooltip-top" data-tip="Add to Playlist">
+                <button
+                  class="btn btn-square btn-ghost btn-sm"
+                  type="button"
+                  :disabled="!activeOnlineTrackSupportsLibraryActions || activeOnlinePlaylistPending"
+                  :aria-label="activeOnlineTrack ? `Add ${activeOnlineTrack.title} to a Playlist` : 'Add current online track to a Playlist'"
+                  title="Add to Playlist"
+                  @click="addActiveOnlineTrackToPlaylist"
+                >
+                  <RefreshCw v-if="activeOnlinePlaylistPending" class="animate-spin" :size="16" aria-hidden="true" />
+                  <ListPlus v-else :size="16" aria-hidden="true" />
+                </button>
+              </div>
             </div>
           </div>
 

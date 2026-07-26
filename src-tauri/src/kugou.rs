@@ -3,9 +3,10 @@ use crate::source_runtime::{
     self, JsonScalar, RemoteTrack, SourceAction, SourceAlbumSearchResponse,
     SourceAlbumSearchResult, SourceArtistSearchResponse, SourceArtistSearchResult,
     SourceCapability, SourceEntityRef, SourceInfo, SourcePlaylist, SourcePlaylistDetail,
-    SourcePlaylistSearchResponse, SourcePlaylistSearchResult, SourceProvider, SourceQuality,
-    SourceRecommendationsResponse, SourceRequest, SourceResponse, SourceRuntimeContext,
-    SourceRuntimeError, SourceSearchResponse, SourceSuggestionsResponse,
+    SourcePlaylistMutation, SourcePlaylistMutationKind, SourcePlaylistSearchResponse,
+    SourcePlaylistSearchResult, SourceProvider, SourceQuality, SourceRecommendationsResponse,
+    SourceRequest, SourceResponse, SourceRuntimeContext, SourceRuntimeError, SourceSearchResponse,
+    SourceSuggestionsResponse, SourceTrackRef,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
@@ -167,6 +168,14 @@ struct KugouTrackIdentity {
     album_audio_id: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KugouPlaylistTrack {
+    title: String,
+    hash: String,
+    album_id: u64,
+    mix_song_id: u64,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum KugouBridgeError {
     #[error("KuGou bridge is unavailable: {0}")]
@@ -189,6 +198,8 @@ pub enum KugouBridgeError {
     InvalidPlaylist,
     #[error("KuGou track information is invalid")]
     InvalidTrack,
+    #[error("KuGou Playlist cannot be changed by this account")]
+    ReadOnlyPlaylist,
     #[error("KuGou response for {operation} was invalid: {message}")]
     InvalidResponse {
         operation: &'static str,
@@ -209,6 +220,7 @@ impl KugouBridgeError {
             Self::RateLimited => "rate-limited",
             Self::InvalidPlaylist => "invalid-playlist",
             Self::InvalidTrack => "invalid-track",
+            Self::ReadOnlyPlaylist => "read-only-playlist",
             Self::InvalidResponse { .. } => "invalid-response",
             Self::Persistence(_) => "persistence-failure",
         }
@@ -292,6 +304,13 @@ pub trait KugouProviderBridge: Send + Sync {
         account_ref: &str,
         playlist_id: &str,
     ) -> Result<SourcePlaylistDetail, KugouBridgeError>;
+
+    fn mutate_playlist(
+        &self,
+        account_ref: &str,
+        playlist_id: &str,
+        track: &SourceTrackRef,
+    ) -> Result<SourcePlaylistMutation, KugouBridgeError>;
 }
 
 trait CredentialStore: Send + Sync {
@@ -368,6 +387,12 @@ trait KugouApi: Send + Sync {
         playlist_id: &str,
         page: u64,
         page_size: u64,
+    ) -> Result<JsonValue, KugouBridgeError>;
+    fn add_playlist_track(
+        &self,
+        session: &StoredSession,
+        playlist_id: &str,
+        track: &KugouPlaylistTrack,
     ) -> Result<JsonValue, KugouBridgeError>;
 }
 
@@ -814,6 +839,50 @@ impl KugouApi for KugouHttpApi {
                 ("global_collection_id".to_owned(), playlist_id.to_owned()),
             ]),
             None,
+            SignatureKind::Android,
+            None,
+        )
+    }
+
+    fn add_playlist_track(
+        &self,
+        session: &StoredSession,
+        playlist_id: &str,
+        track: &KugouPlaylistTrack,
+    ) -> Result<JsonValue, KugouBridgeError> {
+        self.request_json(
+            "add playlist track",
+            GATEWAY_BASE_URL,
+            "/cloudlist.service/v6/add_song",
+            Method::POST,
+            &session.device,
+            Some(session),
+            BTreeMap::from([
+                ("last_time".to_owned(), now_timestamp().to_string()),
+                ("last_area".to_owned(), "gztx".to_owned()),
+                ("userid".to_owned(), session.user_id.clone()),
+                ("token".to_owned(), session.token.clone()),
+            ]),
+            Some(json!({
+                "userid": session.user_id,
+                "token": session.token,
+                "listid": playlist_id,
+                "list_ver": 0,
+                "type": 0,
+                "slow_upload": 1,
+                "scene": "false;null",
+                "data": [{
+                    "number": 1,
+                    "name": track.title,
+                    "hash": track.hash,
+                    "size": 0,
+                    "sort": 0,
+                    "timelen": 0,
+                    "bitrate": 0,
+                    "album_id": track.album_id,
+                    "mixsongid": track.mix_song_id,
+                }],
+            })),
             SignatureKind::Android,
             None,
         )
@@ -1392,7 +1461,7 @@ impl KugouProviderBridge for KugouServiceBridge {
     fn playlists(&self, account_ref: &str) -> Result<Vec<SourcePlaylist>, KugouBridgeError> {
         let account = self.account(account_ref)?;
         let session = self.session_for_account(account_ref)?;
-        collect_user_playlists(&account.display_name, |page| {
+        collect_user_playlists(&account.display_name, &account.user_id, |page| {
             let result = self.api.playlists(&session, page, USER_PLAYLIST_PAGE_SIZE);
             self.account_result(account_ref, result)
         })
@@ -1422,15 +1491,17 @@ impl KugouProviderBridge for KugouServiceBridge {
             .get("list_info")
             .or_else(|| data.get("info"))
             .unwrap_or(data);
-        let playlist =
-            playlist_from_json(metadata, &account.display_name).unwrap_or_else(|| SourcePlaylist {
+        let playlist = playlist_from_json(metadata, &account.display_name, &account.user_id)
+            .unwrap_or_else(|| SourcePlaylist {
                 id: playlist_id.to_owned(),
+                mutation_id: None,
                 name: "KuGou Playlist".to_owned(),
                 description: None,
                 cover_url: None,
                 track_count: json_u64(data.get("count")).unwrap_or_default(),
                 owner_name: account.display_name.clone(),
                 can_mutate: false,
+                is_favorite: false,
             });
         let total = json_u64(data.get("count"))
             .or_else(|| json_u64(metadata.get("count")))
@@ -1461,6 +1532,37 @@ impl KugouProviderBridge for KugouServiceBridge {
         }
         tracks.truncate(total as usize);
         Ok(SourcePlaylistDetail { playlist, tracks })
+    }
+
+    fn mutate_playlist(
+        &self,
+        account_ref: &str,
+        playlist_id: &str,
+        track: &SourceTrackRef,
+    ) -> Result<SourcePlaylistMutation, KugouBridgeError> {
+        validate_playlist_id(playlist_id)?;
+        let track = kugou_playlist_track_from_ref(track)?;
+        let playlist = self
+            .playlists(account_ref)?
+            .into_iter()
+            .find(|playlist| playlist.id == playlist_id)
+            .ok_or(KugouBridgeError::InvalidPlaylist)?;
+        if !playlist.can_mutate {
+            return Err(KugouBridgeError::ReadOnlyPlaylist);
+        }
+        let mutation_id = playlist.mutation_id.as_deref().unwrap_or(playlist_id);
+        let session = self.session_for_account(account_ref)?;
+        self.account_result(
+            account_ref,
+            self.api.add_playlist_track(&session, mutation_id, &track),
+        )?;
+        Ok(SourcePlaylistMutation {
+            audit_id: 0,
+            operation: SourcePlaylistMutationKind::Add,
+            playlist_id: playlist_id.to_owned(),
+            track_id: track.hash,
+            occurred_at: now_timestamp(),
+        })
     }
 }
 
@@ -1555,6 +1657,7 @@ impl SourceProvider for KugouSourceProvider {
                     SourceAction::MusicRecommendations,
                     SourceAction::PlaylistList,
                     SourceAction::PlaylistRead,
+                    SourceAction::PlaylistAddTrack,
                 ],
                 source_runtime::standard_lx_qualities(),
             ),
@@ -1740,6 +1843,22 @@ impl SourceProvider for KugouSourceProvider {
                 let result = self.bridge.playlist(&account_ref, &playlist_id);
                 Self::finish(context, operation, result).map(SourceResponse::PlaylistRead)
             }
+            SourceRequest::PlaylistAddTrack {
+                account_ref,
+                playlist_id,
+                track,
+                ..
+            } => {
+                let operation = "add KuGou playlist track";
+                Self::prepare_bridge(context, operation)?;
+                context.require_capability(SourceCapability::PlaylistWrite, operation)?;
+                context.require_capability(SourceCapability::PlaylistRead, operation)?;
+                let account_ref = Self::account_ref(context, &account_ref, operation)?;
+                let result = self
+                    .bridge
+                    .mutate_playlist(&account_ref, &playlist_id, &track);
+                Self::finish(context, operation, result).map(SourceResponse::PlaylistAddTrack)
+            }
             request => Err(context.unsupported_action(request.source(), request.action())),
         }
     }
@@ -1761,6 +1880,46 @@ fn track_identity_from_music_info(music_info: &JsonValue) -> Option<KugouTrackId
         album_id,
         album_audio_id,
     })
+}
+
+fn kugou_playlist_track_from_ref(
+    track: &SourceTrackRef,
+) -> Result<KugouPlaylistTrack, KugouBridgeError> {
+    if track.source != source_runtime::LX_SOURCE_KG {
+        return Err(KugouBridgeError::InvalidTrack);
+    }
+    let title = track
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty() && title.len() <= 512)
+        .ok_or(KugouBridgeError::InvalidTrack)?
+        .to_owned();
+    let hash = validate_track_hash(&track.id)?;
+    let album_id = track_platform_id(track, &["albumId", "album_id", "albumid"]);
+    let mix_song_id = track_platform_id(
+        track,
+        &["mixSongId", "albumAudioId", "album_audio_id", "mixsongid"],
+    );
+    Ok(KugouPlaylistTrack {
+        title,
+        hash,
+        album_id,
+        mix_song_id,
+    })
+}
+
+fn track_platform_id(track: &SourceTrackRef, keys: &[&str]) -> u64 {
+    keys.iter()
+        .find_map(|key| track.platform_ids.get(*key).and_then(json_scalar_u64))
+        .unwrap_or_default()
+}
+
+fn json_scalar_u64(value: &JsonScalar) -> Option<u64> {
+    match value {
+        JsonScalar::String(value) => value.parse().ok(),
+        JsonScalar::Number(value) => u64::try_from(*value).ok(),
+    }
 }
 
 fn validate_track_hash(track_hash: &str) -> Result<String, KugouBridgeError> {
@@ -1975,6 +2134,7 @@ fn playlist_values(body: &JsonValue) -> Option<&Vec<JsonValue>> {
 
 fn collect_user_playlists<F>(
     fallback_owner: &str,
+    account_user_id: &str,
     mut fetch_page: F,
 ) -> Result<Vec<SourcePlaylist>, KugouBridgeError>
 where
@@ -1991,7 +2151,7 @@ where
         playlists.extend(
             values
                 .iter()
-                .filter_map(|value| playlist_from_json(value, fallback_owner)),
+                .filter_map(|value| playlist_from_json(value, fallback_owner, account_user_id)),
         );
         if page_len < USER_PLAYLIST_PAGE_SIZE as usize {
             break;
@@ -2000,9 +2160,23 @@ where
     Ok(playlists)
 }
 
-fn playlist_from_json(value: &JsonValue, fallback_owner: &str) -> Option<SourcePlaylist> {
+fn playlist_from_json(
+    value: &JsonValue,
+    fallback_owner: &str,
+    account_user_id: &str,
+) -> Option<SourcePlaylist> {
     let id = playlist_id_from_json(value)?;
     let name = first_json_string(value, &["name", "listname", "specialname"])?;
+    let is_favorite = kugou_favorite_playlist(value, &name);
+    let owner_id = first_json_string(
+        value,
+        &["list_create_userid", "list_create_uid", "userid", "user_id"],
+    );
+    let mutation_id = first_json_string(
+        value,
+        &["listid", "list_id", "list_create_listid", "list_create_gid"],
+    )
+    .filter(|id| !id.is_empty());
     let description = first_json_string(value, &["intro", "description", "desc"])
         .filter(|description| !description.trim().is_empty());
     let cover_url = first_json_string(value, &["pic", "img", "imgurl", "sizable_cover", "cover"])
@@ -2024,13 +2198,54 @@ fn playlist_from_json(value: &JsonValue, fallback_owner: &str) -> Option<SourceP
     .unwrap_or_else(|| fallback_owner.to_owned());
     Some(SourcePlaylist {
         id,
+        mutation_id,
         name,
         description,
         cover_url,
         track_count,
         owner_name,
-        can_mutate: false,
+        can_mutate: owner_id.as_deref() == Some(account_user_id),
+        is_favorite,
     })
+}
+
+fn kugou_favorite_playlist(value: &JsonValue, name: &str) -> bool {
+    [
+        "is_favorite",
+        "is_fav",
+        "is_default",
+        "is_default_list",
+        "is_favorite_list",
+        "is_love",
+    ]
+    .iter()
+    .any(|key| value.get(*key).is_some_and(json_truthy))
+        || first_json_string(value, &["list_type", "list_create_type", "type"]).is_some_and(
+            |kind| {
+                matches!(
+                    kind.to_ascii_lowercase().as_str(),
+                    "favorite" | "favorites" | "liked" | "love"
+                )
+            },
+        )
+        || matches!(
+            name.trim(),
+            "我喜欢的音乐"
+                | "我喜欢"
+                | "我的喜欢"
+                | "我的收藏"
+                | "Favorite Music"
+                | "My Favorite Music"
+                | "Favorites"
+        )
+}
+
+fn json_truthy(value: &JsonValue) -> bool {
+    value.as_bool() == Some(true)
+        || value.as_u64() == Some(1)
+        || value
+            .as_str()
+            .is_some_and(|value| matches!(value, "1" | "true" | "yes"))
 }
 
 fn playlist_id_from_json(value: &JsonValue) -> Option<String> {
@@ -2606,12 +2821,28 @@ mod tests {
         ) -> Result<SourcePlaylistDetail, KugouBridgeError> {
             Err(KugouBridgeError::InvalidPlaylist)
         }
+
+        fn mutate_playlist(
+            &self,
+            _account_ref: &str,
+            playlist_id: &str,
+            track: &SourceTrackRef,
+        ) -> Result<SourcePlaylistMutation, KugouBridgeError> {
+            Ok(SourcePlaylistMutation {
+                audit_id: 0,
+                operation: SourcePlaylistMutationKind::Add,
+                playlist_id: playlist_id.to_owned(),
+                track_id: track.id.clone(),
+                occurred_at: 1,
+            })
+        }
     }
 
     fn provider_capabilities() -> BTreeSet<SourceCapability> {
         BTreeSet::from([
             SourceCapability::AccountRef,
             SourceCapability::PlaylistRead,
+            SourceCapability::PlaylistWrite,
             SourceCapability::BridgeKugouMusicApi,
         ])
     }
@@ -2825,31 +3056,63 @@ mod tests {
     }
 
     #[test]
-    fn playlist_parser_should_use_global_collection_identity_and_be_read_only() {
+    fn playlist_track_ref_should_keep_kugou_mutation_metadata() {
+        let track = kugou_playlist_track_from_ref(&SourceTrackRef {
+            id: "04DE99837D367481C2CD07C107003E1D".to_owned(),
+            source: source_runtime::LX_SOURCE_KG.to_owned(),
+            title: Some(" Test Track ".to_owned()),
+            platform_ids: BTreeMap::from([
+                ("albumId".to_owned(), JsonScalar::Number(123)),
+                ("mixSongId".to_owned(), JsonScalar::Number(456)),
+            ]),
+        })
+        .expect("KuGou track metadata should normalize");
+
+        assert_eq!(
+            track,
+            KugouPlaylistTrack {
+                title: "Test Track".to_owned(),
+                hash: "04DE99837D367481C2CD07C107003E1D".to_owned(),
+                album_id: 123,
+                mix_song_id: 456,
+            }
+        );
+    }
+
+    #[test]
+    fn playlist_parser_should_preserve_mutation_metadata_for_owned_favorites() {
         let playlist = playlist_from_json(
             &json!({
                 "global_collection_id": "collection_3_1863870844_4_0",
+                "listid": "13579",
                 "name": "Daily",
                 "count": 47,
                 "list_create_username": "Fika",
+                "list_create_userid": "42",
+                "is_default": 1,
                 "imgurl": "http://imge.kugou.com/stdmusic/{size}/playlist.jpg"
             }),
             "Fallback",
+            "42",
         )
         .expect("playlist should normalize");
 
         assert_eq!(
             (
                 playlist.id.as_str(),
+                playlist.mutation_id.as_deref(),
                 playlist.cover_url.as_deref(),
                 playlist.track_count,
-                playlist.can_mutate
+                playlist.can_mutate,
+                playlist.is_favorite,
             ),
             (
                 "collection_3_1863870844_4_0",
+                Some("13579"),
                 Some("https://imge.kugou.com/stdmusic/400/playlist.jpg"),
                 47,
-                false
+                true,
+                true,
             )
         );
     }
@@ -2878,7 +3141,7 @@ mod tests {
             .collect::<Vec<_>>();
         let mut requested_pages = Vec::new();
 
-        let playlists = collect_user_playlists("Fika", |page| {
+        let playlists = collect_user_playlists("Fika", "42", |page| {
             requested_pages.push(page);
             Ok(if page == 1 {
                 json!({ "data": { "info": first_page.clone() } })
@@ -2899,7 +3162,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_should_expose_playback_and_read_only_kugou_actions() {
+    fn provider_should_expose_kugou_playlist_mutation_actions() {
         let capabilities = provider_capabilities();
         let runtime = SourceRuntime::new();
         let provider = KugouSourceProvider::new(
@@ -2927,8 +3190,57 @@ mod tests {
                 SourceAction::MusicRecommendations,
                 SourceAction::PlaylistList,
                 SourceAction::PlaylistRead,
+                SourceAction::PlaylistAddTrack,
             ]
         );
+    }
+
+    #[test]
+    fn provider_should_dispatch_playlist_add_through_an_opaque_account_ref() {
+        let host = Arc::new(DefaultSourceHost::new(Duration::from_secs(1), 1024));
+        host.register_account_ref(KUGOU_PROVIDER_ID, "account", TEST_ACCOUNT_REF)
+            .expect("account ref should register");
+        let runtime_host: Arc<dyn SourceHost> = host;
+        let capabilities = provider_capabilities();
+        let runtime = SourceRuntime::with_host(runtime_host, capabilities.clone());
+        let provider = KugouSourceProvider::new(
+            KUGOU_PROVIDER_ID.to_owned(),
+            capabilities,
+            Arc::new(FakeProviderBridge),
+        );
+        runtime
+            .initialize_provider(&provider)
+            .expect("provider should initialize");
+
+        let outcome = runtime
+            .dispatch_request(
+                &provider,
+                SourceRequest::PlaylistAddTrack {
+                    source: source_runtime::LX_SOURCE_KG.to_owned(),
+                    account_ref: "account".to_owned(),
+                    playlist_id: "collection_3_42_1_0".to_owned(),
+                    track: SourceTrackRef {
+                        id: "04DE99837D367481C2CD07C107003E1D".to_owned(),
+                        source: source_runtime::LX_SOURCE_KG.to_owned(),
+                        title: Some("Test Track".to_owned()),
+                        platform_ids: BTreeMap::from([
+                            ("albumId".to_owned(), JsonScalar::Number(123)),
+                            ("mixSongId".to_owned(), JsonScalar::Number(456)),
+                        ]),
+                    },
+                },
+            )
+            .expect("playlist add should dispatch");
+
+        assert!(matches!(
+            outcome.response,
+            SourceResponse::PlaylistAddTrack(SourcePlaylistMutation {
+                playlist_id,
+                track_id,
+                operation: SourcePlaylistMutationKind::Add,
+                ..
+            }) if playlist_id == "collection_3_42_1_0" && track_id == "04DE99837D367481C2CD07C107003E1D"
+        ));
     }
 
     #[test]

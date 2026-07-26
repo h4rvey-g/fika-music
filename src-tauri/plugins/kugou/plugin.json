@@ -13,6 +13,7 @@
       "capabilities": [
         "account:ref",
         "playlist:read",
+        "playlist:write",
         "bridge:kugou-music-api"
       ]
     }

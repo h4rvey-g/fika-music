@@ -116,7 +116,7 @@ export type OnlineDownloadTask = { taskId: string, kind: string, title: string, 
 
 export type OnlineMusicSettings = { excludedChannels: Array<string>, channelPriority: Array<string>, audioSourcePriority: Array<string>, layerTimeoutSeconds: number, playbackTimeoutSeconds: number, preferredQuality: SourceQuality, searchHistoryEnabled: boolean, downloadDirectory: string | null, filenameTemplate: string, downloadConcurrency: number, batchNotifications: boolean, };
 
-export type OnlinePlaylist = { key: string, channelId: string, pluginId: string, sourceId: string, channelName: string, accountRef: string | null, id: string, name: string, description: string | null, coverUrl: string | null, trackCount: number | null, ownerName: string | null, platformIds: Record<string, string | number>, rawInfo: Record<string, unknown>, rank: number, };
+export type OnlinePlaylist = { key: string, channelId: string, pluginId: string, sourceId: string, channelName: string, accountRef: string | null, id: string, name: string, description: string | null, coverUrl: string | null, trackCount: number | null, ownerName: string | null, canMutate: boolean, isFavorite: boolean, platformIds: Record<string, string | number>, rawInfo: Record<string, unknown>, rank: number, };
 
 export type OnlinePlaylistDetailError = { code: string, message: string, pluginId: string, channelName: string, };
 
@@ -186,7 +186,7 @@ export type SourceInfo = { id: string, name: string, type: SourceKind, actions: 
 
 export type SourceKind = "music";
 
-export type SourcePlaylist = { id: string, name: string, description: string | null, coverUrl: string | null, trackCount: number, ownerName: string, canMutate: boolean, };
+export type SourcePlaylist = { id: string, mutationId?: string, name: string, description: string | null, coverUrl: string | null, trackCount: number, ownerName: string, canMutate: boolean, isFavorite: boolean, };
 
 export type SourcePlaylistDetail = { playlist: SourcePlaylist, tracks: Array<SourceSearchResult>, };
 
@@ -218,7 +218,7 @@ export type SourceSearchResult = { id: string, source: string, title: string, ar
 
 export type SourceSuggestionsResponse = { list: Array<string>, };
 
-export type SourceTrackRef = { id: string, source: string, };
+export type SourceTrackRef = { id: string, source: string, title?: string, platformIds?: Record<string, string | number>, };
 
 export type TrackLyricsQuery = { title: string, artist: string | null, album: string | null, durationSeconds: number | null, source: string | null, trackId: string | null, };
 

@@ -2115,9 +2115,17 @@ fn remote_track_from_json(value: &JsonValue) -> Option<RemoteTrack> {
 fn playlist_from_json(value: &JsonValue, account_user_id: &str) -> Option<SourcePlaylist> {
     let creator = value.get("creator");
     let owner_id = creator.and_then(|creator| json_id(creator.get("userId")));
+    let name = json_string(value.get("name"))?;
     Some(SourcePlaylist {
         id: json_id(value.get("id"))?,
-        name: json_string(value.get("name"))?,
+        mutation_id: None,
+        is_favorite: value
+            .get("specialType")
+            .or_else(|| value.get("special_type"))
+            .and_then(JsonValue::as_u64)
+            == Some(5)
+            || is_netease_favorite_playlist_name(&name),
+        name,
         description: json_string(value.get("description")),
         cover_url: netease_image_url(value.get("coverImgUrl")),
         track_count: value
@@ -2129,6 +2137,13 @@ fn playlist_from_json(value: &JsonValue, account_user_id: &str) -> Option<Source
             .unwrap_or_else(|| "NetEase".to_owned()),
         can_mutate: owner_id.as_deref() == Some(account_user_id),
     })
+}
+
+fn is_netease_favorite_playlist_name(name: &str) -> bool {
+    matches!(
+        name.trim(),
+        "我喜欢的音乐" | "My Favorite Music" | "Liked Songs"
+    )
 }
 
 fn mutation_kind_str(operation: SourcePlaylistMutationKind) -> &'static str {
@@ -2875,6 +2890,8 @@ mod tests {
                     track: SourceTrackRef {
                         id: "347230".to_owned(),
                         source: source_runtime::LX_SOURCE_WY.to_owned(),
+                        title: None,
+                        platform_ids: BTreeMap::new(),
                     },
                 },
             )
@@ -2916,6 +2933,8 @@ mod tests {
                     track: SourceTrackRef {
                         id: "347230".to_owned(),
                         source: source_runtime::LX_SOURCE_WY.to_owned(),
+                        title: None,
+                        platform_ids: BTreeMap::new(),
                     },
                 },
             )
@@ -2975,6 +2994,8 @@ mod tests {
                 &SourceTrackRef {
                     id: "external-track".to_owned(),
                     source: source_runtime::LX_SOURCE_TX.to_owned(),
+                    title: None,
+                    platform_ids: BTreeMap::new(),
                 },
                 SourcePlaylistMutationKind::Add,
             )
