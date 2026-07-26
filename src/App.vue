@@ -43,6 +43,7 @@ import NowPlayingPanel from "./components/NowPlayingPanel.vue";
 import DesktopLyricsSettings from "./components/DesktopLyricsSettings.vue";
 import OnlineMusic from "./components/OnlineMusic.vue";
 import OnlineMusicSettingsPanel from "./components/OnlineMusicSettings.vue";
+import fikaLogoUrl from "../src-tauri/icons/fika.svg";
 import { useLibraryScan } from "./composables/use-library-scan";
 import { useOnlineMusicConfig } from "./composables/use-online-music-config";
 import { NETEASE_PLUGIN_ID } from "./lib/netease-api";
@@ -2001,9 +2002,7 @@ function trackSubtitle(track: LocalTrack) {
       <label for="app-sidebar" aria-label="Close navigation" class="drawer-overlay"></label>
       <aside class="flex min-h-full w-60 flex-col border-r border-base-300 bg-base-100">
         <div class="flex min-h-16 items-center gap-3 border-b border-base-300 px-4">
-          <div class="flex size-9 shrink-0 items-center justify-center rounded bg-neutral text-neutral-content">
-            <Music2 :size="20" aria-hidden="true" />
-          </div>
+          <img class="size-9 shrink-0" :src="fikaLogoUrl" alt="" />
           <div class="min-w-0">
             <div class="truncate text-base font-semibold leading-tight">Fika Music</div>
             <div class="truncate text-xs text-base-content/60">Local-first library</div>
