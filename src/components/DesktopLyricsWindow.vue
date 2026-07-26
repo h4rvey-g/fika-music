@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { LogicalSize } from "@tauri-apps/api/dpi";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -9,7 +8,6 @@ import {
   Minus,
   MonitorUp,
   Plus,
-  Scaling,
   X,
 } from "@lucide/vue";
 import DesktopLyricTextEffect from "./DesktopLyricTextEffect.vue";
@@ -18,9 +16,9 @@ import {
   DESKTOP_LYRICS_HIDE_EVENT,
   DESKTOP_LYRICS_READY_EVENT,
   DESKTOP_LYRICS_STATE_EVENT,
+  DESKTOP_LYRICS_TRANSPARENT_COLOR,
   DESKTOP_LYRICS_UPDATE_EVENT,
   DESKTOP_LYRICS_WINDOW_LABEL,
-  desktopLyricsMinimumHeight,
   parseDesktopLyricsPreferences,
   type DesktopLyricWordTiming,
   type DesktopLyricsPreferences,
@@ -49,11 +47,10 @@ const unlisteners: UnlistenFn[] = [];
 let animationFrameId: number | null = null;
 
 const shellStyle = computed(() => ({
-  backgroundColor: hexToRgba(
+  backgroundColor: colorWithOpacity(
     state.value.preferences.backgroundColor,
     state.value.preferences.backgroundOpacity,
   ),
-  borderColor: hexToRgba(state.value.preferences.inactiveColor, 0.18),
   fontFamily: fontFamily(state.value.preferences.font),
   textAlign: state.value.preferences.alignment,
 }));
@@ -151,43 +148,6 @@ async function startDragging() {
   }
 }
 
-async function startResize(event: PointerEvent) {
-  if (state.value.preferences.locked) return;
-  const appWindow = getCurrentWindow();
-  try {
-    await appWindow.startResizeDragging("SouthEast");
-  } catch {
-    // macOS does not expose native resize dragging for borderless windows.
-    try {
-      const scaleFactor = await appWindow.scaleFactor();
-      const initialSize = (await appWindow.innerSize()).toLogical(scaleFactor);
-      const initialX = event.screenX;
-      const initialY = event.screenY;
-      const target = event.currentTarget as HTMLElement;
-      target.setPointerCapture?.(event.pointerId);
-
-      const resize = (moveEvent: PointerEvent) => {
-        const width = Math.max(320, initialSize.width + moveEvent.screenX - initialX);
-        const height = Math.max(
-          desktopLyricsMinimumHeight(state.value.preferences),
-          initialSize.height + moveEvent.screenY - initialY,
-        );
-        void appWindow.setSize(new LogicalSize(width, height));
-      };
-      const stop = () => {
-        target.removeEventListener("pointermove", resize);
-        target.removeEventListener("pointerup", stop);
-        target.removeEventListener("pointercancel", stop);
-      };
-      target.addEventListener("pointermove", resize);
-      target.addEventListener("pointerup", stop);
-      target.addEventListener("pointercancel", stop);
-    } catch {
-      // The native window API is unavailable in a regular browser preview.
-    }
-  }
-}
-
 async function requestHide() {
   await emitTo("main", DESKTOP_LYRICS_HIDE_EVENT);
 }
@@ -204,7 +164,10 @@ function adjustFontSize(delta: number) {
   void updatePreferences({ fontSize: state.value.preferences.fontSize + delta });
 }
 
-function hexToRgba(color: string, opacity: number) {
+function colorWithOpacity(color: string, opacity: number) {
+  if (color === DESKTOP_LYRICS_TRANSPARENT_COLOR) {
+    return DESKTOP_LYRICS_TRANSPARENT_COLOR;
+  }
   const red = Number.parseInt(color.slice(1, 3), 16);
   const green = Number.parseInt(color.slice(3, 5), 16);
   const blue = Number.parseInt(color.slice(5, 7), 16);
@@ -230,7 +193,7 @@ function fontFamily(font: DesktopLyricsPreferences["font"]) {
 
 <template>
   <main
-    class="group relative flex size-full min-h-0 select-none flex-col justify-center overflow-hidden border"
+    class="group relative flex size-full min-h-0 select-none flex-col justify-center overflow-hidden border border-transparent transition-colors duration-150 hover:border-base-content/30"
     :class="{ 'opacity-80': !state.isPlaying }"
     :style="shellStyle"
     :data-window-label="DESKTOP_LYRICS_WINDOW_LABEL"
@@ -294,18 +257,6 @@ function fontFamily(font: DesktopLyricsPreferences["font"]) {
             @click.stop="updatePreferences({ locked: true })"
           >
             <Lock :size="14" aria-hidden="true" />
-          </button>
-        </div>
-        <div class="tooltip tooltip-bottom" data-tip="Resize">
-          <button
-            class="btn btn-square btn-ghost btn-xs cursor-nwse-resize text-white hover:bg-white/15"
-            type="button"
-            aria-label="Resize desktop lyrics window"
-            title="Resize"
-            @mousedown.stop
-            @pointerdown.stop.prevent="startResize"
-          >
-            <Scaling :size="14" aria-hidden="true" />
           </button>
         </div>
         <div class="tooltip tooltip-bottom" data-tip="Hide">

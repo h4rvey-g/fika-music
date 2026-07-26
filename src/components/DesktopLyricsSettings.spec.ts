@@ -1,7 +1,10 @@
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import DesktopLyricsSettings from "./DesktopLyricsSettings.vue";
-import { DEFAULT_DESKTOP_LYRICS_PREFERENCES } from "../lib/desktop-lyrics";
+import {
+  DEFAULT_DESKTOP_LYRICS_PREFERENCES,
+  DESKTOP_LYRICS_TRANSPARENT_COLOR,
+} from "../lib/desktop-lyrics";
 
 describe("DesktopLyricsSettings", () => {
   it("emits focused preference patches from its controls", async () => {
@@ -19,6 +22,10 @@ describe("DesktopLyricsSettings", () => {
     });
     await wrapper.get('select[aria-label="Menu bar lyric width"]').setValue("56");
     await wrapper.get('input[aria-label="Current lyric color"]').setValue("#22cc88");
+    await wrapper.get('button[aria-label="Use no color for current lyric"]').trigger("click");
+    await wrapper.get('button[aria-label="Use no color for next lyric"]').trigger("click");
+    await wrapper.get('button[aria-label="Use no color for desktop lyrics background"]')
+      .trigger("click");
     await wrapper.get('button[aria-label="Align desktop lyrics right"]').trigger("click");
 
     expect(wrapper.emitted("update")).toEqual([
@@ -26,6 +33,9 @@ describe("DesktopLyricsSettings", () => {
       [{ menuBarEnabled: true }],
       [{ menuBarMaxWidth: 56 }],
       [{ activeColor: "#22cc88" }],
+      [{ activeColor: DESKTOP_LYRICS_TRANSPARENT_COLOR }],
+      [{ inactiveColor: DESKTOP_LYRICS_TRANSPARENT_COLOR }],
+      [{ backgroundColor: DESKTOP_LYRICS_TRANSPARENT_COLOR }],
       [{ alignment: "right" }],
     ]);
   });

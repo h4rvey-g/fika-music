@@ -13,10 +13,6 @@ const tauriMocks = vi.hoisted(() => ({
   listen: vi.fn(),
   onCloseRequested: vi.fn().mockResolvedValue(vi.fn()),
   startDragging: vi.fn().mockResolvedValue(undefined),
-  startResizeDragging: vi.fn().mockResolvedValue(undefined),
-  innerSize: vi.fn().mockResolvedValue({ toLogical: () => ({ width: 720, height: 150 }) }),
-  scaleFactor: vi.fn().mockResolvedValue(1),
-  setSize: vi.fn().mockResolvedValue(undefined),
 }));
 const listeners = new Map<string, (event: { payload: unknown }) => void>();
 
@@ -29,10 +25,6 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     onCloseRequested: tauriMocks.onCloseRequested,
     startDragging: tauriMocks.startDragging,
-    startResizeDragging: tauriMocks.startResizeDragging,
-    innerSize: tauriMocks.innerSize,
-    scaleFactor: tauriMocks.scaleFactor,
-    setSize: tauriMocks.setSize,
   }),
 }));
 
@@ -93,6 +85,10 @@ describe("DesktopLyricsWindow", () => {
     expect(wrapper.findAll(".desktop-lyric-word")).toHaveLength(2);
     expect(wrapper.findAll(".desktop-lyric-word")[0].attributes("style"))
       .toContain("rgb(34, 204, 136)");
+    expect(wrapper.get("main").classes()).toContain("border-transparent");
+    expect(wrapper.get("main").classes()).toContain("hover:border-base-content/30");
+    expect(wrapper.find('button[aria-label="Resize desktop lyrics window"]').exists())
+      .toBe(false);
     wrapper.unmount();
   });
 

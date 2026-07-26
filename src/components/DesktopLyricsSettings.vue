@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {
+  Ban,
   Captions,
   Lock,
   MonitorUp,
@@ -13,10 +14,44 @@ import {
 } from "@lucide/vue";
 import DesktopLyricTextEffect from "./DesktopLyricTextEffect.vue";
 import {
+  DEFAULT_DESKTOP_LYRICS_PREFERENCES,
   DESKTOP_LYRICS_FONT_OPTIONS,
+  DESKTOP_LYRICS_TRANSPARENT_COLOR,
   type DesktopLyricsAlignment,
   type DesktopLyricsPreferences,
 } from "../lib/desktop-lyrics";
+
+type DesktopLyricsColorPreference = "activeColor" | "inactiveColor" | "backgroundColor";
+
+const colorControls = [
+  {
+    preference: "activeColor",
+    label: "Current line",
+    inputLabel: "Current lyric color",
+    noColorLabel: "Use no color for current lyric",
+    fallback: DEFAULT_DESKTOP_LYRICS_PREFERENCES.activeColor,
+  },
+  {
+    preference: "inactiveColor",
+    label: "Next line",
+    inputLabel: "Next lyric color",
+    noColorLabel: "Use no color for next lyric",
+    fallback: DEFAULT_DESKTOP_LYRICS_PREFERENCES.inactiveColor,
+  },
+  {
+    preference: "backgroundColor",
+    label: "Background",
+    inputLabel: "Desktop lyrics background color",
+    noColorLabel: "Use no color for desktop lyrics background",
+    fallback: "#111827",
+  },
+] as const satisfies ReadonlyArray<{
+  preference: DesktopLyricsColorPreference;
+  label: string;
+  inputLabel: string;
+  noColorLabel: string;
+  fallback: string;
+}>;
 
 const props = defineProps<{
   preferences: DesktopLyricsPreferences;
@@ -45,6 +80,14 @@ function stringValue(event: Event) {
 
 function setAlignment(alignment: DesktopLyricsAlignment) {
   update({ alignment });
+}
+
+function setColor(preference: DesktopLyricsColorPreference, color: string) {
+  update({ [preference]: color });
+}
+
+function colorPickerValue(color: string, fallback: string) {
+  return color === DESKTOP_LYRICS_TRANSPARENT_COLOR ? fallback : color;
 }
 </script>
 
@@ -181,36 +224,37 @@ function setAlignment(alignment: DesktopLyricsAlignment) {
       </div>
 
       <div class="grid gap-4 px-4 py-4 sm:grid-cols-3">
-        <label class="flex items-center justify-between gap-3 text-sm font-medium">
-          Current line
-          <input
-            class="size-9 cursor-pointer rounded border border-base-300 bg-transparent p-1"
-            type="color"
-            :value="preferences.activeColor"
-            aria-label="Current lyric color"
-            @input="update({ activeColor: stringValue($event) })"
-          />
-        </label>
-        <label class="flex items-center justify-between gap-3 text-sm font-medium">
-          Next line
-          <input
-            class="size-9 cursor-pointer rounded border border-base-300 bg-transparent p-1"
-            type="color"
-            :value="preferences.inactiveColor"
-            aria-label="Next lyric color"
-            @input="update({ inactiveColor: stringValue($event) })"
-          />
-        </label>
-        <label class="flex items-center justify-between gap-3 text-sm font-medium">
-          Background
-          <input
-            class="size-9 cursor-pointer rounded border border-base-300 bg-transparent p-1"
-            type="color"
-            :value="preferences.backgroundColor"
-            aria-label="Desktop lyrics background color"
-            @input="update({ backgroundColor: stringValue($event) })"
-          />
-        </label>
+        <div
+          v-for="control in colorControls"
+          :key="control.preference"
+          class="flex items-center justify-between gap-3 text-sm font-medium"
+        >
+          <span>{{ control.label }}</span>
+          <div class="flex shrink-0 items-center gap-1">
+            <input
+              class="size-9 cursor-pointer rounded border border-base-300 bg-transparent p-1"
+              type="color"
+              :value="colorPickerValue(preferences[control.preference], control.fallback)"
+              :aria-label="control.inputLabel"
+              @input="setColor(control.preference, stringValue($event))"
+            />
+            <div class="tooltip tooltip-bottom" data-tip="No color">
+              <button
+                class="btn btn-square btn-ghost btn-sm"
+                :class="{
+                  'btn-active': preferences[control.preference] === DESKTOP_LYRICS_TRANSPARENT_COLOR,
+                }"
+                type="button"
+                :aria-label="control.noColorLabel"
+                :aria-pressed="preferences[control.preference] === DESKTOP_LYRICS_TRANSPARENT_COLOR"
+                title="No color"
+                @click="setColor(control.preference, DESKTOP_LYRICS_TRANSPARENT_COLOR)"
+              >
+                <Ban :size="16" aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <label

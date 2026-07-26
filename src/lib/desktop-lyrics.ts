@@ -7,6 +7,7 @@ export const DESKTOP_LYRICS_HIDE_EVENT = "desktop-lyrics:hide";
 export const DESKTOP_LYRICS_LOCK_EVENT = "desktop-lyrics:set-lock";
 export const DESKTOP_LYRICS_UPDATE_EVENT = "desktop-lyrics:update-preferences";
 export const DESKTOP_LYRICS_STORAGE_KEY = "fika.desktop-lyrics";
+export const DESKTOP_LYRICS_TRANSPARENT_COLOR = "transparent";
 
 export const DESKTOP_LYRICS_FONT_OPTIONS = [
   { value: "system", label: "System" },
@@ -87,7 +88,7 @@ export const DEFAULT_DESKTOP_LYRICS_PREFERENCES: DesktopLyricsPreferences = {
   showNextLine: true,
   activeColor: "#7dd3fc",
   inactiveColor: "#f8fafc",
-  backgroundColor: "#111827",
+  backgroundColor: DESKTOP_LYRICS_TRANSPARENT_COLOR,
   backgroundOpacity: 0.58,
   fontSize: 34,
   fontWeight: 700,
@@ -266,6 +267,9 @@ export function desktopLyricsMinimumHeight(preferences: DesktopLyricsPreferences
 }
 
 export function desktopLyricsOutlineColor(color: string) {
+  if (color === DESKTOP_LYRICS_TRANSPARENT_COLOR) {
+    return DESKTOP_LYRICS_TRANSPARENT_COLOR;
+  }
   const red = Number.parseInt(color.slice(1, 3), 16) / 255;
   const green = Number.parseInt(color.slice(3, 5), 16) / 255;
   const blue = Number.parseInt(color.slice(5, 7), 16) / 255;
@@ -296,6 +300,12 @@ function booleanValue(value: unknown, fallback: boolean) {
 }
 
 function colorValue(value: unknown, fallback: string) {
+  if (
+    typeof value === "string"
+    && value.toLowerCase() === DESKTOP_LYRICS_TRANSPARENT_COLOR
+  ) {
+    return DESKTOP_LYRICS_TRANSPARENT_COLOR;
+  }
   return typeof value === "string" && HEX_COLOR_PATTERN.test(value) ? value : fallback;
 }
 
@@ -390,26 +400,47 @@ function validSourceWords(words: LyricWord[], lineText: string) {
   const timedText = words.map((word) => word.text).join("");
   return words.length > 0
     && words.every((word) => Number.isFinite(word.startMs) && Number.isFinite(word.endMs))
-    && (timedText === lineText || lineText.startsWith(`${timedText}\n`));
+    && timedTextOffset(lineText, timedText) !== null;
 }
 
 function expandSourceWords(words: LyricWord[], lineText: string, lineEndMs: number) {
-  const expanded: DesktopLyricWordTiming[] = words.flatMap((word) => estimateWordTimings(
+  const timedText = words.map((word) => word.text).join("");
+  const offset = timedTextOffset(lineText, timedText);
+  if (offset === null) return [];
+
+  const expandedSource = words.flatMap((word) => estimateWordTimings(
     word.text,
     Math.max(0, word.startMs),
     Math.max(word.startMs, word.endMs),
   ));
-  const timedText = words.map((word) => word.text).join("");
-  const untimedText = lineText.slice(timedText.length);
-  if (untimedText) {
-    expanded.push({
-      text: untimedText,
-      startMs: lineEndMs,
-      endMs: lineEndMs,
-      isTimed: false,
-    });
+  const sourceStartMs = Math.min(...words.map((word) => Math.max(0, word.startMs)));
+  const sourceEndMs = Math.max(...words.map((word) => Math.max(word.startMs, word.endMs)));
+  const companionEndMs = sourceEndMs > sourceStartMs
+    ? sourceEndMs
+    : Math.max(sourceStartMs, lineEndMs);
+
+  return [
+    ...estimateWordTimings(lineText.slice(0, offset), sourceStartMs, companionEndMs),
+    ...expandedSource,
+    ...estimateWordTimings(
+      lineText.slice(offset + timedText.length),
+      sourceStartMs,
+      companionEndMs,
+    ),
+  ];
+}
+
+function timedTextOffset(lineText: string, timedText: string) {
+  if (!timedText) return null;
+  let offset = lineText.indexOf(timedText);
+  while (offset >= 0) {
+    const end = offset + timedText.length;
+    const startsAtLineBoundary = offset === 0 || lineText[offset - 1] === "\n";
+    const endsAtLineBoundary = end === lineText.length || lineText[end] === "\n";
+    if (startsAtLineBoundary && endsAtLineBoundary) return offset;
+    offset = lineText.indexOf(timedText, offset + 1);
   }
-  return expanded;
+  return null;
 }
 
 function estimateWordTimings(text: string, startMs: number, endMs: number) {

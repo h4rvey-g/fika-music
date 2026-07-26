@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_DESKTOP_LYRICS_PREFERENCES,
   DESKTOP_LYRICS_STORAGE_KEY,
+  DESKTOP_LYRICS_TRANSPARENT_COLOR,
   desktopLyricsMinimumHeight,
   desktopLyricsOutlineColor,
   loadDesktopLyricsPreferences,
@@ -14,6 +15,13 @@ describe("desktop lyrics", () => {
   it("chooses a contrasting text-effect color for custom lyric colors", () => {
     expect(desktopLyricsOutlineColor("#f8fafc")).toBe("rgb(0 0 0 / 82%)");
     expect(desktopLyricsOutlineColor("#111827")).toBe("rgb(255 255 255 / 88%)");
+    expect(desktopLyricsOutlineColor(DESKTOP_LYRICS_TRANSPARENT_COLOR))
+      .toBe(DESKTOP_LYRICS_TRANSPARENT_COLOR);
+  });
+
+  it("defaults the desktop lyric background to no color", () => {
+    expect(DEFAULT_DESKTOP_LYRICS_PREFERENCES.backgroundColor)
+      .toBe(DESKTOP_LYRICS_TRANSPARENT_COLOR);
   });
 
   it("falls back to defaults when persisted preferences are malformed", () => {
@@ -44,6 +52,18 @@ describe("desktop lyrics", () => {
       backgroundOpacity: 1,
       fontSize: 18,
     });
+  });
+
+  it("accepts no color for every desktop lyric color preference", () => {
+    expect(parseDesktopLyricsPreferences({
+      activeColor: "transparent",
+      inactiveColor: "TRANSPARENT",
+      backgroundColor: "transparent",
+    })).toEqual(expect.objectContaining({
+      activeColor: DESKTOP_LYRICS_TRANSPARENT_COLOR,
+      inactiveColor: DESKTOP_LYRICS_TRANSPARENT_COLOR,
+      backgroundColor: DESKTOP_LYRICS_TRANSPARENT_COLOR,
+    }));
   });
 
   it("writes normalized preferences to the desktop lyrics key", () => {
@@ -129,7 +149,7 @@ describe("desktop lyrics", () => {
     expect(result.currentWords[result.currentWords.length - 1]?.endMs).toBe(2_000);
   });
 
-  it("keeps an untimed translation inactive after source-timed lyrics", () => {
+  it("highlights an untimed translation alongside source-timed lyrics", () => {
     const result = resolveDesktopLyricLines({
       source: "network",
       provider: "NetEase",
@@ -149,12 +169,18 @@ describe("desktop lyrics", () => {
     expect(result.currentTimingSource).toBe("source");
     expect(result.currentWords.map((word) => word.text).join(""))
       .toBe("Original\nTranslation");
-    expect(result.currentWords[result.currentWords.length - 1]).toEqual({
-      text: "\nTranslation",
-      startMs: 2_000,
-      endMs: 2_000,
-      isTimed: false,
-    });
+    expect(result.currentWords.every((word) => word.isTimed !== false)).toBe(true);
+
+    const separatorIndex = result.currentWords.findIndex((word) => word.text === "\n");
+    const originalWords = result.currentWords.slice(0, separatorIndex);
+    const translationWords = result.currentWords.slice(separatorIndex + 1);
+    expect(originalWords.map((word) => word.text).join("")).toBe("Original");
+    expect(translationWords.map((word) => word.text).join("")).toBe("Translation");
+    expect(translationWords[translationWords.length - 1]?.endMs).toBe(2_000);
+    expect(originalWords.some((word) => word.startMs <= 1_500 && word.endMs >= 1_500))
+      .toBe(true);
+    expect(translationWords.some((word) => word.startMs <= 1_500 && word.endMs >= 1_500))
+      .toBe(true);
   });
 
   it("derives character timings from adjacent line timestamps", () => {
