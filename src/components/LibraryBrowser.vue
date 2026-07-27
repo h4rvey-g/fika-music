@@ -35,6 +35,10 @@ import {
   type LibraryColumnPreference,
 } from "../lib/library-preferences";
 import { normalizeError } from "../lib/errors";
+import {
+  useTrackListFollow,
+  type TrackListScrollBehavior,
+} from "../composables/use-track-list-follow";
 import { TAURI_COMMANDS } from "../generated/bindings";
 import type {
   AlbumArtSettings,
@@ -70,6 +74,7 @@ type MenuPosition = { x: number; y: number };
 type LibrarySummary = { libraryTotal: number; filteredTotal: number };
 type RowMenu = MenuPosition & { track: LocalTrack; trackIndex: number };
 type GroupMenu = MenuPosition & { group: LibraryAlbumGroup; virtualIndex: number };
+type LibraryQueryCause = "entry" | "user" | "background";
 
 const props = defineProps<{
   activeTrackId: number | null;
@@ -250,6 +255,10 @@ const renderedRows = computed(() =>
   virtualRows.value.map((virtual) => ({ virtual, item: itemAt(virtual.index) })),
 );
 const totalVirtualHeight = computed(() => rowVirtualizer.value.getTotalSize());
+const trackListFollow = useTrackListFollow({
+  viewport: scrollViewport,
+  locate: locateActiveTrack,
+});
 
 watch(
   () => virtualRows.value.map((row) => row.index).join(","),
@@ -263,6 +272,15 @@ watch(rowHeight, async () => {
   await nextTick();
   rowVirtualizer.value.measure();
 });
+
+watch(
+  () => props.activeTrackId,
+  (trackId, previousTrackId) => {
+    if (trackId !== previousTrackId) {
+      void trackListFollow.followTrackChange();
+    }
+  },
+);
 
 watch(searchInput, (value) => {
   const isEmpty = value.trim().length === 0;
@@ -279,7 +297,7 @@ watch(searchInput, (value) => {
   if (searchTimer) {
     clearTimeout(searchTimer);
   }
-  searchTimer = setTimeout(() => void runQuery(), 120);
+  searchTimer = setTimeout(() => void runQuery("user"), 120);
 });
 
 onMounted(() => {
@@ -335,7 +353,7 @@ async function initializeOnlineFeatures() {
           (event.payload.state === "completed" || event.payload.state === "paused")
           && previous !== event.payload.state
         ) {
-          void runQuery();
+          void runQuery("background");
         }
       },
     );
@@ -347,15 +365,18 @@ async function initializeOnlineFeatures() {
 async function initializeLibraryUpdates() {
   try {
     unlistenLibraryChanged = await listen<LibraryChangedEvent>("library:changed", () => {
-      void runQuery();
+      void runQuery("background");
     });
-    await runQuery();
+    await runQuery("entry");
   } catch (error) {
     emit("error", normalizeError(error));
   }
 }
 
-async function runQuery() {
+async function runQuery(cause: LibraryQueryCause = "user") {
+  if (cause !== "background") {
+    trackListFollow.beginEntry();
+  }
   const generation = ++queryGeneration;
   isQuerying.value = true;
   closeMenus();
@@ -383,7 +404,12 @@ async function runQuery() {
     clearSelection();
     emit("summary", { libraryTotal: page.libraryTotal, filteredTotal: page.total });
     await nextTick();
-    rowVirtualizer.value.scrollToIndex(0, { align: "start" });
+    if (cause === "background") {
+      await trackListFollow.recenter();
+    } else if (trackListFollow.isFollowing.value) {
+      rowVirtualizer.value.scrollToIndex(0, { align: "start", behavior: "auto" });
+      await trackListFollow.locateEntry();
+    }
     void ensureVisibleItems();
     scheduleVisibleCovers();
   } catch (error) {
@@ -394,6 +420,43 @@ async function runQuery() {
     if (generation === queryGeneration) {
       isQuerying.value = false;
     }
+  }
+}
+
+async function locateActiveTrack(
+  behavior: TrackListScrollBehavior,
+  isCurrent: () => boolean,
+) {
+  const trackId = props.activeTrackId;
+  const requestedSnapshot = snapshotId.value;
+  if (trackId === null || !requestedSnapshot) {
+    return false;
+  }
+  try {
+    const position = await invoke<number | null>(TAURI_COMMANDS.localLibraryTrackPosition, {
+      snapshotId: requestedSnapshot,
+      trackId,
+    });
+    if (
+      position === null
+      || !isCurrent()
+      || snapshotId.value !== requestedSnapshot
+      || props.activeTrackId !== trackId
+    ) {
+      return false;
+    }
+    await loadViewRange(position);
+    await nextTick();
+    if (!isCurrent()) {
+      return false;
+    }
+    rowVirtualizer.value.scrollToIndex(position, { align: "center", behavior });
+    return true;
+  } catch (error) {
+    if (isCurrent()) {
+      emit("error", normalizeError(error));
+    }
+    return false;
   }
 }
 
@@ -1419,7 +1482,11 @@ function taskPercent(task: { total: number; processed: number } | null) {
   return Math.round((task.processed / task.total) * 100);
 }
 
-defineExpose({ refresh: runQuery, startFirstTrack, updatePlayCount });
+defineExpose({
+  refresh: () => runQuery("background"),
+  startFirstTrack,
+  updatePlayCount,
+});
 </script>
 
 <template>
@@ -1771,7 +1838,7 @@ defineExpose({ refresh: runQuery, startFirstTrack, updatePlayCount });
           <div
             v-else-if="row.item?.kind === 'track' && row.item.track && row.item.trackIndex !== null"
             :id="`library-row-${row.virtual.index}`"
-            class="absolute left-0 top-0 grid cursor-default border-b border-base-300/60 text-xs"
+            class="absolute left-0 top-0 grid cursor-default border-b border-b-base-300/60 border-l-2 border-l-transparent text-xs"
             :class="[
               row.item.trackIndex % 2 === 1 ? 'bg-base-200/35' : 'bg-base-100',
               isTrackSelected(row.item.trackIndex)
@@ -1779,7 +1846,11 @@ defineExpose({ refresh: runQuery, startFirstTrack, updatePlayCount });
                   ? 'border-l-2 border-l-neutral bg-neutral/15 text-base-content'
                   : 'bg-neutral text-neutral-content'
                 : 'hover:bg-base-200',
-              activeTrackId === row.item.track.id && !isTrackSelected(row.item.trackIndex) ? 'bg-base-300' : '',
+              activeTrackId === row.item.track.id
+                ? isTrackSelected(row.item.trackIndex)
+                  ? 'border-l-primary ring-1 ring-inset ring-primary/40'
+                  : 'border-l-primary bg-primary/10 hover:bg-primary/15'
+                : '',
               focusedVirtualIndex === row.virtual.index ? 'outline outline-1 -outline-offset-1 outline-base-content/40' : '',
             ]"
             :style="{
@@ -1790,6 +1861,8 @@ defineExpose({ refresh: runQuery, startFirstTrack, updatePlayCount });
             role="row"
             :aria-rowindex="row.virtual.index + 1"
             :aria-selected="isTrackSelected(row.item.trackIndex)"
+            :aria-current="activeTrackId === row.item.track.id ? 'true' : undefined"
+            :data-playing-track="activeTrackId === row.item.track.id ? '' : undefined"
             @click="selectTrack($event, row.virtual.index, row.item.trackIndex)"
             @dblclick="createPlaybackQueue(row.item.trackIndex, true)"
             @contextmenu.stop="openRowMenu($event, row.item.trackIndex, row.item.track)"
@@ -1803,8 +1876,18 @@ defineExpose({ refresh: runQuery, startFirstTrack, updatePlayCount });
               :title="column.id === 'playing' ? undefined : displayValue(row.item.track, column.id)"
             >
               <template v-if="column.id === 'playing'">
-                <Volume2 v-if="activeTrackId === row.item.track.id && isPlaying" :size="13" aria-label="Playing" />
-                <Pause v-else-if="activeTrackId === row.item.track.id" :size="13" aria-label="Paused" />
+                <Volume2
+                  v-if="activeTrackId === row.item.track.id && isPlaying"
+                  :class="isTrackSelected(row.item.trackIndex) && !isTrackIncludedBySelectedAlbum(row.item.trackIndex) ? 'text-neutral-content' : 'text-primary'"
+                  :size="13"
+                  aria-label="Playing"
+                />
+                <Pause
+                  v-else-if="activeTrackId === row.item.track.id"
+                  :class="isTrackSelected(row.item.trackIndex) && !isTrackIncludedBySelectedAlbum(row.item.trackIndex) ? 'text-neutral-content' : 'text-primary'"
+                  :size="13"
+                  aria-label="Paused"
+                />
               </template>
               <span v-else class="truncate">{{ displayValue(row.item.track, column.id) }}</span>
             </div>

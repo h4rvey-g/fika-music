@@ -13,7 +13,8 @@ function mountTable(
   return mount(OnlineTrackTable, {
     props: {
       tracks,
-      activeKey: null,
+      activeTrack: null,
+      isPlaying: false,
       trackActionId: null,
       supportsLibraryActions: () => supportsLibraryActions,
       supportsPlaylistSelection: () => supportsLibraryActions,
@@ -30,6 +31,42 @@ describe("OnlineTrackTable", () => {
     await wrapper.get('[data-online-track-key="song-1"]').trigger("dblclick");
 
     expect(wrapper.emitted("play")?.[0]).toEqual([track]);
+  });
+
+  it("highlights every normalized match and shows the paused state", async () => {
+    const activeTrack = createOnlineTrack({
+      key: "exact-song",
+      title: "Song",
+      artist: "A / B",
+      album: "Album",
+      durationSeconds: 180,
+    });
+    const equivalentTrack = createOnlineTrack({
+      key: "equivalent-song",
+      title: " song ",
+      artist: "B & A",
+      album: " album ",
+      durationSeconds: 185,
+    });
+    const wrapper = mountTable(true, false, [activeTrack, equivalentTrack]);
+    await wrapper.setProps({ activeTrack, isPlaying: false });
+    const rows = wrapper.findAll("tbody tr");
+
+    expect(rows.every((row) => row.attributes("aria-current") === "true")).toBe(true);
+    expect(rows.every((row) => row.classes().includes("border-l-primary"))).toBe(true);
+    expect(wrapper.findAll('[aria-label="Paused"]')).toHaveLength(2);
+  });
+
+  it("retains the active marker when the online row is selected", async () => {
+    const wrapper = mountTable();
+    await wrapper.setProps({ activeTrack: track, isPlaying: true });
+    const row = wrapper.get('[data-online-track-key="song-1"]');
+
+    await row.trigger("click");
+
+    expect(row.classes()).toContain("border-l-primary");
+    expect(row.classes()).toContain("ring-primary/40");
+    expect(row.get('[aria-label="Playing"]').classes()).toContain("text-neutral-content");
   });
 
   it("multi-selects tracks and exposes batch actions from the context menu", async () => {

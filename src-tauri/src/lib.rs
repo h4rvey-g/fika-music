@@ -87,6 +87,7 @@ macro_rules! with_tauri_commands {
             get_scan_status,
             query_local_library,
             local_library_view_range,
+            local_library_track_position,
             set_local_library_group_collapsed,
             get_album_art_settings,
             set_album_art_network_enabled,
@@ -3841,6 +3842,21 @@ fn local_library_view_range(
         .map_err(|_| AppError::StatePoisoned("library").to_string())?;
     library
         .view_in_range(snapshot_id.trim(), offset, limit)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn local_library_track_position(
+    state: State<'_, AppState>,
+    snapshot_id: String,
+    track_id: i64,
+) -> CommandResult<Option<usize>> {
+    let library = state
+        .library
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("library").to_string())?;
+    library
+        .track_position(snapshot_id.trim(), track_id)
         .map_err(|error| error.to_string())
 }
 

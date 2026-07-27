@@ -236,6 +236,7 @@ export const TAURI_COMMANDS = {
   getScanStatus: "get_scan_status",
   queryLocalLibrary: "query_local_library",
   localLibraryViewRange: "local_library_view_range",
+  localLibraryTrackPosition: "local_library_track_position",
   setLocalLibraryGroupCollapsed: "set_local_library_group_collapsed",
   getAlbumArtSettings: "get_album_art_settings",
   setAlbumArtNetworkEnabled: "set_album_art_network_enabled",

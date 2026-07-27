@@ -4,6 +4,7 @@ import {
   clearPreloadedMedia,
   orderedAudioSources,
   invalidateOnlinePlaybackCaches,
+  onlineTracksMatch,
   onlinePlaylistDetailError,
   playbackAttemptKey,
   preloadMediaUrl,
@@ -84,6 +85,30 @@ describe("online music playback routing", () => {
     expect(loaded[0].getAttribute("src")).toBe("https://cdn.test/next.mp3");
     clearPreloadedMedia();
     expect(loaded[0].getAttribute("src")).toBeNull();
+  });
+
+  it("matches provider snapshots by normalized title, artist set, album, and duration", () => {
+    const left = createOnlineTrack({
+      title: " Ｓｏｎｇ ",
+      artist: "A feat. B",
+      album: " Album ",
+      durationSeconds: 180,
+    });
+    const right = createOnlineTrack({
+      title: "song",
+      artist: "B / A",
+      album: "album",
+      durationSeconds: 185,
+    });
+
+    expect(onlineTracksMatch(left, right)).toBe(true);
+  });
+
+  it("does not match online tracks whose durations differ by more than five seconds", () => {
+    const left = createOnlineTrack({ durationSeconds: 180 });
+    const right = createOnlineTrack({ durationSeconds: 186 });
+
+    expect(onlineTracksMatch(left, right)).toBe(false);
   });
 
   it("places the selected Audio Source before the persistent fallback order", () => {

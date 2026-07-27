@@ -23,6 +23,11 @@ import {
 } from "@lucide/vue";
 import type { AudioSourceRecord } from "../generated/bindings";
 import OnlineTrackTable from "./OnlineTrackTable.vue";
+import {
+  centerElementInScrollViewport,
+  useTrackListFollow,
+  type TrackListScrollBehavior,
+} from "../composables/use-track-list-follow";
 import { cancelSourceRequest } from "../lib/plugin-api";
 import type { RemoteTrack } from "../lib/plugin-api";
 import { normalizeError } from "../lib/errors";
@@ -44,6 +49,7 @@ import {
   listenOnlineDownloadTasks,
   listenOnlineMusicSearch,
   onlinePlaylistDetailError,
+  onlineTracksMatch,
   pauseOnlineDownloadTask,
   refreshOnlineDownloadItemCandidates,
   retryOnlineDownloadItem,
@@ -110,7 +116,7 @@ const props = defineProps<{
   isActive: boolean;
   audioSources: AudioSourceRecord[];
   selectedAudioSourceId: string;
-  activeOnlineTrackKey: string | null;
+  activeOnlineTrack: OnlineTrack | null;
   resolvingOnlineTrackKey: string | null;
   isPlaying: boolean;
   localMusicFolder: string | null;
@@ -162,6 +168,8 @@ const recommendationEntries: RecommendationEntry[] = [
 ];
 
 const query = ref("");
+const workspaceRoot = ref<HTMLElement | null>(null);
+const mainScrollViewport = ref<HTMLElement | null>(null);
 const submittedQuery = ref("");
 const expandedSection = ref<OnlineSearchSection | null>(null);
 const activeTab = ref<"search" | "downloads">("search");
@@ -224,6 +232,8 @@ let playlistLibraryRequestId: string | null = null;
 let pendingPlaylistLibraryLoad: Promise<OnlinePlaylistsResult | null> | null = null;
 let trackActionMessageTimer: number | null = null;
 let pendingSearchEvents: OnlineSearchSectionEvent[] = [];
+let listEntryGeneration = 0;
+let pendingListEntryGeneration: number | null = null;
 const pendingRecommendationLoads = new Map<
   MusicRecommendationKind,
   Promise<OnlineRecommendationsResult | null>
@@ -244,6 +254,37 @@ const visibleDetailTitle = computed(() => {
 const activeRecommendationEntry = computed(() =>
   recommendationEntries.find((entry) => entry.id === activeRecommendation.value) ?? null,
 );
+const visibleSongListKey = computed(() => {
+  if (activeTab.value !== "search") return null;
+  if (detail.value) return `detail:${detail.value.kind}:${detail.value.entity.key}`;
+  if (activeRecommendation.value) return `recommendation:${activeRecommendation.value}`;
+  if (!hasSubmittedSearch.value || (expandedSection.value && expandedSection.value !== "songs")) {
+    return null;
+  }
+  return `search:${submittedQuery.value}:${expandedSection.value ?? "summary"}`;
+});
+const visibleSongTracks = computed(() => {
+  if (detail.value) return detailTracks.value;
+  if (activeRecommendation.value) return recommendationTracks.value;
+  if (hasSubmittedSearch.value && (!expandedSection.value || expandedSection.value === "songs")) {
+    return sectionItems<OnlineTrack>("songs");
+  }
+  return [];
+});
+const visibleSongListLoading = computed(() => {
+  if (detail.value) return detailLoading.value;
+  if (activeRecommendation.value) return recommendationLoading.value;
+  if (hasSubmittedSearch.value && (!expandedSection.value || expandedSection.value === "songs")) {
+    const state = sectionStates.value.songs;
+    return state.loading || state.loadingMore;
+  }
+  return false;
+});
+const songListFollow = useTrackListFollow({
+  viewport: mainScrollViewport,
+  locate: locateVisiblePlayingTrack,
+  isActive: () => props.isActive && visibleSongListKey.value !== null,
+});
 const playlistLibraryItems = computed(() => playlistLibraryResult.value?.items ?? []);
 const playlistLibraryFailures = computed(() => playlistLibraryResult.value?.failures ?? []);
 const playlistProviders = [
@@ -281,6 +322,7 @@ const playlistPickerActionId = computed(() => {
 });
 
 onMounted(async () => {
+  mainScrollViewport.value = workspaceRoot.value?.closest("main") ?? null;
   [
     unlistenSearch,
     unlistenDownloads,
@@ -314,12 +356,40 @@ watch(
   () => props.isActive,
   (isActive) => {
     if (isActive) {
+      mainScrollViewport.value = workspaceRoot.value?.closest("main") ?? null;
       void preloadForYou(true);
+      const entryGeneration = beginVisibleSongListEntry();
+      void finishVisibleSongListEntry(entryGeneration);
     } else if (playlistLibraryRequestId) {
       cancelPlaylistLibraryLoad();
+      songListFollow.cancelPending();
+    } else {
+      songListFollow.cancelPending();
     }
   },
 );
+
+watch(
+  () => props.activeOnlineTrack,
+  (track, previousTrack) => {
+    if (
+      !track
+      || (previousTrack && onlineTracksMatch(track, previousTrack))
+      || !props.isActive
+      || visibleSongListKey.value === null
+    ) {
+      return;
+    }
+    void songListFollow.followTrackChange();
+  },
+  { flush: "post" },
+);
+
+watch(visibleSongListLoading, (loading) => {
+  if (!loading && pendingListEntryGeneration !== null) {
+    void finishVisibleSongListEntry(pendingListEntryGeneration);
+  }
+});
 
 onBeforeUnmount(() => {
   unlistenSearch?.();
@@ -335,6 +405,64 @@ onBeforeUnmount(() => {
   if (searchId.value) void cancelSourceRequest(searchId.value);
   if (trackActionMessageTimer !== null) window.clearTimeout(trackActionMessageTimer);
 });
+
+function beginVisibleSongListEntry() {
+  if (visibleSongListKey.value === null) {
+    pendingListEntryGeneration = null;
+    songListFollow.cancelPending();
+    return null;
+  }
+  const generation = ++listEntryGeneration;
+  pendingListEntryGeneration = generation;
+  songListFollow.beginEntry();
+  return generation;
+}
+
+async function finishVisibleSongListEntry(generation: number | null) {
+  if (generation === null || generation !== pendingListEntryGeneration) {
+    return;
+  }
+  await nextTick();
+  if (
+    generation !== pendingListEntryGeneration
+    || !props.isActive
+    || visibleSongListKey.value === null
+    || visibleSongListLoading.value
+  ) {
+    return;
+  }
+  pendingListEntryGeneration = null;
+  await songListFollow.locateEntry();
+}
+
+async function locateVisiblePlayingTrack(
+  behavior: TrackListScrollBehavior,
+  isCurrent: () => boolean,
+) {
+  const activeTrack = props.activeOnlineTrack;
+  const viewport = mainScrollViewport.value;
+  const root = workspaceRoot.value;
+  if (!activeTrack || !viewport || !root) {
+    return false;
+  }
+  const tracks = visibleSongTracks.value;
+  const target = tracks.find((track) => track.key === activeTrack.key)
+    ?? tracks.find((track) => onlineTracksMatch(track, activeTrack));
+  if (!target || !isCurrent()) {
+    return false;
+  }
+  await nextTick();
+  if (!isCurrent()) {
+    return false;
+  }
+  const row = [...root.querySelectorAll<HTMLElement>("[data-online-track-key]")]
+    .find((element) => element.dataset.onlineTrackKey === target.key);
+  if (!row) {
+    return false;
+  }
+  centerElementInScrollViewport(viewport, row, behavior);
+  return true;
+}
 
 function newSectionStates(): Record<OnlineSearchSection, SectionState> {
   return {
@@ -818,12 +946,14 @@ async function openRecommendation(kind: MusicRecommendationKind, force = false) 
   recommendationLoading.value = true;
   activeTab.value = "search";
   globalError.value = null;
+  const listEntry = beginVisibleSongListEntry();
   const generation = recommendationGeneration;
   const result = await loadRecommendation(kind, force);
   if (generation !== recommendationGeneration || activeRecommendation.value !== kind) return;
   if (result) applyRecommendationResult(result);
   else recommendationError.value = recommendationPreviews.value[kind].error;
   recommendationLoading.value = false;
+  await finishVisibleSongListEntry(listEntry);
 }
 
 function abandonRecommendationRequest() {
@@ -838,6 +968,7 @@ function closeRecommendation() {
   recommendationTracks.value = [];
   recommendationFailures.value = [];
   recommendationError.value = null;
+  beginVisibleSongListEntry();
   void preloadForYou();
   void nextTick(() => {
     const main = document.querySelector("main");
@@ -869,6 +1000,7 @@ async function submitSearch(suggestion?: string) {
   submittedQuery.value = keyword;
   sectionStates.value = newSectionStates();
   for (const section of sections) sectionStates.value[section.id].loading = true;
+  const listEntry = beginVisibleSongListEntry();
   try {
     const id = await startOnlineMusicSearch(keyword);
     if (generation !== searchGeneration) {
@@ -883,6 +1015,7 @@ async function submitSearch(suggestion?: string) {
   } catch (error) {
     for (const section of sections) sectionStates.value[section.id].loading = false;
     globalError.value = normalizeError(error);
+    await finishVisibleSongListEntry(listEntry);
   }
 }
 
@@ -904,6 +1037,9 @@ function applySearchSection(event: OnlineSearchSectionEvent) {
     : event.result.completedChannels === event.result.failures.length
       ? "This section could not be loaded."
       : null;
+  if (event.result.section === "songs" && pendingListEntryGeneration !== null) {
+    void finishVisibleSongListEntry(pendingListEntryGeneration);
+  }
 }
 
 function sectionItems<T>(section: OnlineSearchSection): T[] {
@@ -957,6 +1093,7 @@ async function retrySection(section: OnlineSearchSection) {
   const state = sectionStates.value[section];
   state.loading = true;
   state.error = null;
+  const listEntry = section === "songs" ? beginVisibleSongListEntry() : null;
   try {
     state.result = await getOnlineMusicSearchPage(submittedQuery.value, section, 1, 20);
     state.page = 1;
@@ -964,6 +1101,7 @@ async function retrySection(section: OnlineSearchSection) {
     state.error = normalizeError(error);
   } finally {
     state.loading = false;
+    await finishVisibleSongListEntry(listEntry);
   }
 }
 
@@ -980,6 +1118,7 @@ async function openDetail(next: DetailState, rememberScroll = true) {
   globalError.value = null;
   loginRequiredPluginId.value = null;
   detailRetryAvailable.value = false;
+  const listEntry = beginVisibleSongListEntry();
   if (detailRequestId) void cancelSourceRequest(detailRequestId);
   const requestId = `online-detail-${Date.now()}-${++detailRequestGeneration}`;
   detailRequestId = requestId;
@@ -1005,6 +1144,7 @@ async function openDetail(next: DetailState, rememberScroll = true) {
     if (detailRequestId === requestId) {
       detailLoading.value = false;
       detailRequestId = null;
+      await finishVisibleSongListEntry(listEntry);
     }
   }
 }
@@ -1068,8 +1208,9 @@ async function playTrack(track: OnlineTrack, queue: OnlineTrack[], appendable = 
 
 function requestTrackPlayback(track: OnlineTrack, queue: OnlineTrack[]) {
   if (
-    props.activeOnlineTrackKey === track.key &&
-    props.resolvingOnlineTrackKey !== track.key
+    props.activeOnlineTrack !== null
+    && onlineTracksMatch(props.activeOnlineTrack, track)
+    && props.resolvingOnlineTrackKey !== track.key
   ) {
     emit("togglePlayback");
     return;
@@ -1081,6 +1222,7 @@ function requestTrackPlayback(track: OnlineTrack, queue: OnlineTrack[]) {
 async function openSection(section: OnlineSearchSection) {
   summaryScrollPosition.value = document.querySelector("main")?.scrollTop ?? 0;
   expandedSection.value = section;
+  const listEntry = beginVisibleSongListEntry();
   await nextTick();
   const state = sectionStates.value[section];
   if ((state.result?.data.items.length ?? 0) <= 5 && state.result?.hasMore) {
@@ -1088,14 +1230,16 @@ async function openSection(section: OnlineSearchSection) {
   }
   const main = document.querySelector("main");
   if (main) main.scrollTop = 0;
+  await finishVisibleSongListEntry(listEntry);
 }
 
-function closeSection() {
+async function closeSection() {
   expandedSection.value = null;
-  void nextTick(() => {
-    const main = document.querySelector("main");
-    if (main) main.scrollTop = summaryScrollPosition.value;
-  });
+  const listEntry = beginVisibleSongListEntry();
+  await nextTick();
+  const main = document.querySelector("main");
+  if (main) main.scrollTop = summaryScrollPosition.value;
+  await finishVisibleSongListEntry(listEntry);
 }
 
 async function playAllDetail() {
@@ -1366,7 +1510,7 @@ function downloadItemStateLabel(state: OnlineDownloadTask["items"][number]["stat
   }[state];
 }
 
-function backToResults() {
+async function backToResults() {
   detailAppendGeneration.value += 1;
   if (detailRequestId) void cancelSourceRequest(detailRequestId);
   detailRequestId = null;
@@ -1375,10 +1519,20 @@ function backToResults() {
   detail.value = null;
   loginRequiredPluginId.value = null;
   detailRetryAvailable.value = false;
-  void nextTick(() => {
-    const main = document.querySelector("main");
-    if (main) main.scrollTop = resultScrollPosition.value;
-  });
+  const listEntry = beginVisibleSongListEntry();
+  await nextTick();
+  const main = document.querySelector("main");
+  if (main) main.scrollTop = resultScrollPosition.value;
+  await finishVisibleSongListEntry(listEntry);
+}
+
+function selectTab(tab: "search" | "downloads") {
+  if (activeTab.value === tab) {
+    return;
+  }
+  activeTab.value = tab;
+  const listEntry = beginVisibleSongListEntry();
+  void finishVisibleSongListEntry(listEntry);
 }
 
 function dismissGlobalError() {
@@ -1428,6 +1582,7 @@ function showHome() {
   trackActionId.value = null;
   loginRequiredPluginId.value = null;
   detailRetryAvailable.value = false;
+  beginVisibleSongListEntry();
   void preloadForYou();
   void nextTick(() => {
     const main = document.querySelector("main");
@@ -1448,7 +1603,7 @@ defineExpose({
 </script>
 
 <template>
-  <div class="flex w-full min-w-0 flex-col gap-4">
+  <div ref="workspaceRoot" class="flex w-full min-w-0 flex-col gap-4">
     <div class="flex flex-col gap-3 border-b border-base-300 pb-4 sm:flex-row sm:items-center">
       <div class="relative min-w-0 flex-1">
         <form class="join flex w-full" role="search" @submit.prevent="submitSearch()">
@@ -1491,10 +1646,10 @@ defineExpose({
       </div>
 
       <div role="tablist" class="tabs tabs-border shrink-0">
-        <button role="tab" class="tab" :class="{ 'tab-active': activeTab === 'search' }" @click="activeTab = 'search'">
+        <button role="tab" class="tab" :class="{ 'tab-active': activeTab === 'search' }" @click="selectTab('search')">
           Search
         </button>
-        <button role="tab" class="tab" :class="{ 'tab-active': activeTab === 'downloads' }" @click="activeTab = 'downloads'">
+        <button role="tab" class="tab" :class="{ 'tab-active': activeTab === 'downloads' }" @click="selectTab('downloads')">
           Downloads
           <span v-if="downloadTasks.length" class="badge badge-sm ml-1">{{ downloadTasks.length }}</span>
         </button>
@@ -1678,7 +1833,8 @@ defineExpose({
       <OnlineTrackTable
         v-else
         :tracks="detailTracks"
-        :active-key="activeOnlineTrackKey"
+        :active-track="activeOnlineTrack"
+        :is-playing="isPlaying"
         :track-action-id="trackActionId"
         :supports-library-actions="supportsLibraryActions"
         :supports-playlist-selection="supportsPlaylistSelection"
@@ -1795,7 +1951,8 @@ defineExpose({
       <OnlineTrackTable
         v-else-if="recommendationTracks.length"
         :tracks="recommendationTracks"
-        :active-key="activeOnlineTrackKey"
+        :active-track="activeOnlineTrack"
+        :is-playing="isPlaying"
         :track-action-id="trackActionId"
         :supports-library-actions="supportsLibraryActions"
         :supports-playlist-selection="supportsPlaylistSelection"
@@ -2143,7 +2300,8 @@ defineExpose({
         <OnlineTrackTable
           v-else-if="section.id === 'songs'"
           :tracks="sectionItems<OnlineTrack>('songs')"
-          :active-key="activeOnlineTrackKey"
+          :active-track="activeOnlineTrack"
+          :is-playing="isPlaying"
           :track-action-id="trackActionId"
           :supports-library-actions="supportsLibraryActions"
           :supports-playlist-selection="supportsPlaylistSelection"

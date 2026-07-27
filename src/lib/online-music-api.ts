@@ -83,6 +83,41 @@ export type ResolveOnlineTrackOptions = {
   bypassResolvedCache?: boolean;
 };
 
+export function onlineTracksMatch(left: OnlineTrack, right: OnlineTrack) {
+  if (
+    normalizeTrackText(left.title) !== normalizeTrackText(right.title)
+    || artistSetKey(left.artist) !== artistSetKey(right.artist)
+  ) {
+    return false;
+  }
+  if (left.album === null || right.album === null) {
+    if (left.album !== right.album) return false;
+  } else if (normalizeTrackText(left.album) !== normalizeTrackText(right.album)) {
+    return false;
+  }
+  return !(
+    left.durationSeconds !== null
+    && right.durationSeconds !== null
+    && Math.abs(left.durationSeconds - right.durationSeconds) > 5
+  );
+}
+
+function normalizeTrackText(value: string) {
+  return value.normalize("NFKC").toLowerCase().trim().split(/\s+/u).join(" ");
+}
+
+function artistSetKey(value: string) {
+  const normalized = value
+    .replace(/[＆&、，,]/gu, "/")
+    .replace(/ feat\. | feat | ft\. | ft /gu, "/");
+  return [...new Set(
+    normalized
+      .split("/")
+      .map(normalizeTrackText)
+      .filter(Boolean),
+  )].sort().join("\u001f");
+}
+
 const defaultAudioSourceRouter = new AudioSourceRouter();
 const preloadedMedia = new Map<string, HTMLAudioElement>();
 

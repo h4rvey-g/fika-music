@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Download, Heart, ListPlus, Music2, RefreshCw } from "@lucide/vue";
-import type { OnlineTrack } from "../lib/online-music-api";
+import { Download, Heart, ListPlus, Music2, Pause, RefreshCw, Volume2 } from "@lucide/vue";
+import { onlineTracksMatch, type OnlineTrack } from "../lib/online-music-api";
 
 const props = defineProps<{
   tracks: OnlineTrack[];
-  activeKey: string | null;
+  activeTrack: OnlineTrack | null;
+  isPlaying: boolean;
   trackActionId: string | null;
   supportsLibraryActions: (track: OnlineTrack) => boolean;
   supportsPlaylistSelection: (tracks: OnlineTrack[]) => boolean;
@@ -82,6 +83,10 @@ function selectTrack(event: MouseEvent, index: number) {
   }
 }
 
+function isActiveTrack(track: OnlineTrack) {
+  return props.activeTrack !== null && onlineTracksMatch(track, props.activeTrack);
+}
+
 function openContextMenu(event: MouseEvent, index: number) {
   const track = props.tracks[index];
   if (!track) return;
@@ -148,13 +153,22 @@ function duration(seconds: number | null) {
             v-for="(track, index) in tracks"
             :key="track.key"
             :data-online-track-key="track.key"
-            class="cursor-default select-none"
-            :class="selectedKeys.has(track.key)
-              ? 'bg-neutral text-neutral-content'
-              : activeKey === track.key
-                ? 'bg-base-200'
-                : 'hover:bg-base-200/60'"
+            class="cursor-default select-none border-l-2 border-l-transparent"
+            :class="[
+              selectedKeys.has(track.key)
+                ? 'bg-neutral text-neutral-content'
+                : isActiveTrack(track)
+                  ? 'bg-primary/10 hover:bg-primary/15'
+                  : 'hover:bg-base-200/60',
+              isActiveTrack(track)
+                ? selectedKeys.has(track.key)
+                  ? 'border-l-primary ring-1 ring-inset ring-primary/40'
+                  : 'border-l-primary'
+                : '',
+            ]"
             :aria-selected="selectedKeys.has(track.key)"
+            :aria-current="isActiveTrack(track) ? 'true' : undefined"
+            :data-playing-track="isActiveTrack(track) ? '' : undefined"
             tabindex="0"
             @click="selectTrack($event, index)"
             @dblclick="$emit('play', track)"
@@ -163,6 +177,20 @@ function duration(seconds: number | null) {
           >
           <td class="max-w-56">
             <div class="flex min-w-0 items-center gap-2">
+              <span class="grid size-4 shrink-0 place-items-center">
+                <Volume2
+                  v-if="isActiveTrack(track) && isPlaying"
+                  :class="selectedKeys.has(track.key) ? 'text-neutral-content' : 'text-primary'"
+                  :size="13"
+                  aria-label="Playing"
+                />
+                <Pause
+                  v-else-if="isActiveTrack(track)"
+                  :class="selectedKeys.has(track.key) ? 'text-neutral-content' : 'text-primary'"
+                  :size="13"
+                  aria-label="Paused"
+                />
+              </span>
               <div
                 class="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded"
                 :class="selectedKeys.has(track.key) ? 'bg-neutral-content/15' : 'bg-base-200'"

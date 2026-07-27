@@ -1554,7 +1554,7 @@ function trackSubtitle(track: LocalTrack) {
             </button>
           </div>
 
-          <div class="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_20rem] gap-4">
+          <div class="grid min-h-0 flex-1 grid-cols-1 gap-4 min-[1000px]:grid-cols-[minmax(0,1fr)_20rem]">
             <LibraryBrowser
               ref="libraryBrowser"
               :active-track-id="activeTrack?.id ?? null"
@@ -1567,7 +1567,7 @@ function trackSubtitle(track: LocalTrack) {
               @error="showLibraryError"
             />
 
-          <aside class="flex min-h-0 flex-col">
+          <aside class="hidden min-h-0 flex-col min-[1000px]:flex">
           <NowPlayingPanel
             fill-height
             :title="nowPlayingTitle"
@@ -1632,7 +1632,7 @@ function trackSubtitle(track: LocalTrack) {
               :is-active="activeSection === 'online'"
               :audio-sources="audioSourceRecords"
               :selected-audio-source-id="playbackAudioSourceId"
-              :active-online-track-key="activeOnlineTrack?.key ?? null"
+              :active-online-track="activeOnlineTrack"
               :resolving-online-track-key="resolvingOnlineTrackKey"
               :is-playing="isPlaying"
               :local-music-folder="selectedFolder"

@@ -9,6 +9,7 @@ import type {
   MetadataLookupTaskStatus,
 } from "../generated/bindings";
 import { createLocalTrack, createScanStatus } from "../test/fixtures";
+import { virtualizerMocks } from "../test/vue-virtual.mock";
 
 const tauriMocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -120,11 +121,11 @@ const idleMetadataTask: MetadataLookupTaskStatus = {
   results: [],
 };
 
-function mountLibrary() {
+function mountLibrary(activeTrackId: number | null = null, isPlaying = false) {
   return mount(LibraryBrowser, {
     props: {
-      activeTrackId: null,
-      isPlaying: false,
+      activeTrackId,
+      isPlaying,
       density: "comfortable",
       scanStatus: idleScanStatus,
       scanMessage: null,
@@ -142,6 +143,10 @@ describe("LibraryBrowser", () => {
     tauriMocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "query_local_library") {
         return Promise.resolve(queryPage());
+      }
+      if (command === "local_library_track_position") {
+        const trackId = args?.trackId;
+        return Promise.resolve(trackId === 1 ? 2 : trackId === 2 ? 5 : null);
       }
       if (command === "get_album_art_settings") {
         return Promise.resolve({ networkEnabled: true });
@@ -210,6 +215,63 @@ describe("LibraryBrowser", () => {
       "Plays",
     ]);
     expect(wrapper.text()).toContain("2 tracks");
+  });
+
+  it("centers the active track when the virtual list is entered", async () => {
+    mountLibrary(2, true);
+    await flushPromises();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("local_library_track_position", {
+      snapshotId: "snapshot-1",
+      trackId: 2,
+    });
+    expect(virtualizerMocks.scrollToIndex).toHaveBeenCalledWith(5, {
+      align: "center",
+      behavior: "auto",
+    });
+  });
+
+  it("smoothly follows a changed active track", async () => {
+    const wrapper = mountLibrary();
+    await flushPromises();
+    virtualizerMocks.scrollToIndex.mockClear();
+
+    await wrapper.setProps({ activeTrackId: 2, isPlaying: true });
+    await flushPromises();
+
+    expect(virtualizerMocks.scrollToIndex).toHaveBeenCalledWith(5, {
+      align: "center",
+      behavior: "smooth",
+    });
+  });
+
+  it("pauses track following after user scrolling", async () => {
+    const wrapper = mountLibrary(1, true);
+    await flushPromises();
+    tauriMocks.invoke.mockClear();
+
+    await wrapper.get('[role="table"]').trigger("wheel");
+    await wrapper.setProps({ activeTrackId: 2 });
+    await flushPromises();
+
+    expect(
+      tauriMocks.invoke.mock.calls.some(([command]) =>
+        command === "local_library_track_position"
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps the active marker visible when the playing row is selected", async () => {
+    const wrapper = mountLibrary(1, true);
+    await flushPromises();
+    const firstTrack = wrapper.get("#library-row-2");
+
+    await firstTrack.trigger("click");
+
+    expect(firstTrack.attributes("aria-current")).toBe("true");
+    expect(firstTrack.classes()).toContain("border-l-primary");
+    expect(firstTrack.classes()).toContain("ring-primary/40");
+    expect(firstTrack.find('[aria-label="Playing"]').exists()).toBe(true);
   });
 
   it("does not expose manual refresh or re-index actions", async () => {

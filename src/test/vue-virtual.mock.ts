@@ -8,6 +8,11 @@ type VirtualizerOptions = {
   };
 };
 
+export const virtualizerMocks = {
+  measure: vi.fn(),
+  scrollToIndex: vi.fn(),
+};
+
 export function useVirtualizer(options: VirtualizerOptions) {
   return ref({
     getVirtualItems: () =>
@@ -20,7 +25,7 @@ export function useVirtualizer(options: VirtualizerOptions) {
         lane: 0,
       })),
     getTotalSize: () => options.value.count * options.value.estimateSize(),
-    measure: vi.fn(),
-    scrollToIndex: vi.fn(),
+    measure: virtualizerMocks.measure,
+    scrollToIndex: virtualizerMocks.scrollToIndex,
   });
 }

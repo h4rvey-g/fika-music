@@ -1,5 +1,5 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
 import OnlineMusic from "./OnlineMusic.vue";
 import type {
@@ -123,17 +123,65 @@ function failedDownloadTask(): OnlineDownloadTask {
   };
 }
 
-function mountOnlineMusic(isActive = true) {
+function mountOnlineMusic(
+  isActive = true,
+  activeOnlineTrack: OnlineTrack | null = null,
+  attachTo?: HTMLElement,
+) {
   return mount(OnlineMusic, {
+    attachTo,
     props: {
       isActive,
       audioSources: [],
       selectedAudioSourceId: "",
-      activeOnlineTrackKey: null,
+      activeOnlineTrack,
       resolvingOnlineTrackKey: null,
       isPlaying: false,
       localMusicFolder: "/music",
     },
+  });
+}
+
+function mountOnlineMusicInViewport(activeOnlineTrack: OnlineTrack) {
+  const main = document.createElement("main");
+  document.body.append(main);
+  Object.defineProperties(main, {
+    clientHeight: { configurable: true, value: 400 },
+    scrollHeight: { configurable: true, value: 2_000 },
+    scrollLeft: { configurable: true, writable: true, value: 23 },
+    scrollTop: { configurable: true, writable: true, value: 100 },
+  });
+  const scrollTo = vi.fn((options: ScrollToOptions) => {
+    if (typeof options.top === "number") main.scrollTop = options.top;
+  });
+  Object.defineProperty(main, "scrollTo", { configurable: true, value: scrollTo });
+  const wrapper = mountOnlineMusic(true, activeOnlineTrack, main);
+  return { main, scrollTo, wrapper };
+}
+
+function mockTrackGeometry(main: HTMLElement) {
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+    this: HTMLElement,
+  ) {
+    const top = this === main
+      ? 0
+      : this.dataset.onlineTrackKey === "song-2"
+        ? 700
+        : this.dataset.onlineTrackKey === "song-1"
+          ? 200
+          : 0;
+    const height = this === main ? 400 : 40;
+    return {
+      bottom: top + height,
+      height,
+      left: 0,
+      right: 800,
+      top,
+      width: 800,
+      x: 0,
+      y: top,
+      toJSON: () => ({}),
+    };
   });
 }
 
@@ -189,6 +237,12 @@ describe("Online Music workspace", () => {
     });
   });
 
+  afterEach(() => {
+    document.body.innerHTML = "";
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
   it("shows the three personalized entrances on the Online Music home", async () => {
     const wrapper = mountOnlineMusic();
     await flushPromises();
@@ -217,6 +271,128 @@ describe("Online Music workspace", () => {
     expect(
       tauriMocks.invoke.mock.calls.filter(([command]) => command === "online_music_playlists"),
     ).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("centers the active song after the entered list finishes loading", async () => {
+    const currentTrack = track(2);
+    const { main, scrollTo, wrapper } = mountOnlineMusicInViewport(currentTrack);
+    mockTrackGeometry(main);
+    await flushPromises();
+
+    await search(wrapper, "Song", "songs", [track(1), currentTrack]);
+    await flushPromises();
+
+    expect(scrollTo).toHaveBeenLastCalledWith({
+      behavior: "auto",
+      left: 23,
+      top: 620,
+    });
+    wrapper.unmount();
+  });
+
+  it("smoothly follows the latest active online song", async () => {
+    const { main, scrollTo, wrapper } = mountOnlineMusicInViewport(track(1));
+    mockTrackGeometry(main);
+    await flushPromises();
+    await search(wrapper, "Song", "songs", [track(1), track(2)]);
+    await flushPromises();
+    scrollTo.mockClear();
+
+    await wrapper.setProps({ activeOnlineTrack: track(2) });
+    await flushPromises();
+
+    expect(scrollTo).toHaveBeenLastCalledWith(
+      expect.objectContaining({ behavior: "smooth", left: 23 }),
+    );
+    wrapper.unmount();
+  });
+
+  it("uses instant positioning for track changes when reduced motion is requested", async () => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
+    const { main, scrollTo, wrapper } = mountOnlineMusicInViewport(track(1));
+    mockTrackGeometry(main);
+    await flushPromises();
+    await search(wrapper, "Song", "songs", [track(1), track(2)]);
+    await flushPromises();
+    scrollTo.mockClear();
+
+    await wrapper.setProps({ activeOnlineTrack: track(2) });
+    await flushPromises();
+
+    expect(scrollTo).toHaveBeenLastCalledWith(
+      expect.objectContaining({ behavior: "auto" }),
+    );
+    wrapper.unmount();
+  });
+
+  it("recenters after a viewport resize only while following is active", async () => {
+    const { main, scrollTo, wrapper } = mountOnlineMusicInViewport(track(1));
+    mockTrackGeometry(main);
+    await flushPromises();
+    await search(wrapper, "Song", "songs", [track(1)]);
+    await flushPromises();
+    scrollTo.mockClear();
+
+    window.dispatchEvent(new Event("resize"));
+    await flushPromises();
+    expect(scrollTo).toHaveBeenLastCalledWith(
+      expect.objectContaining({ behavior: "auto" }),
+    );
+
+    main.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
+    scrollTo.mockClear();
+    window.dispatchEvent(new Event("resize"));
+    await flushPromises();
+    expect(scrollTo).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("toggles playback from a normalized duplicate of the active online song", async () => {
+    const activeTrack = createOnlineTrack({
+      key: "active-song",
+      title: "Song",
+      artist: "A / B",
+      album: "Album",
+      durationSeconds: 180,
+    });
+    const duplicate = createOnlineTrack({
+      key: "duplicate-song",
+      title: " song ",
+      artist: "B & A",
+      album: " album ",
+      durationSeconds: 185,
+    });
+    const wrapper = mountOnlineMusic(true, activeTrack);
+    await flushPromises();
+    await search(wrapper, "Song", "songs", [duplicate]);
+
+    await wrapper.get('[data-online-track-key="duplicate-song"]').trigger("dblclick");
+
+    expect(wrapper.emitted("togglePlayback")).toHaveLength(1);
+    expect(wrapper.emitted("playRequest")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  it("pauses online following after user scrolling and restores it on re-entry", async () => {
+    const { main, scrollTo, wrapper } = mountOnlineMusicInViewport(track(1));
+    mockTrackGeometry(main);
+    await flushPromises();
+    await search(wrapper, "Song", "songs", [track(1), track(2)]);
+    await flushPromises();
+
+    main.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
+    scrollTo.mockClear();
+    await wrapper.setProps({ activeOnlineTrack: track(2) });
+    await flushPromises();
+    expect(scrollTo).not.toHaveBeenCalled();
+
+    await wrapper.setProps({ isActive: false });
+    await wrapper.setProps({ isActive: true });
+    await flushPromises();
+    expect(scrollTo).toHaveBeenLastCalledWith(
+      expect.objectContaining({ behavior: "auto", left: 23 }),
+    );
     wrapper.unmount();
   });
 
