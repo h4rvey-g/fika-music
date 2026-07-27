@@ -12,8 +12,8 @@ use fika_music_lib::online_download::{
     OnlineDownloadItem, OnlineDownloadItemState, OnlineDownloadState, OnlineDownloadTask,
 };
 use fika_music_lib::online_music::{
-    OnlineAlbum, OnlineArtist, OnlineChannel, OnlineMusicSettings, OnlinePlaylist,
-    OnlinePlaylistDetailError, OnlinePlaylistsResult, OnlineRecommendationsResult,
+    AudioSourceSelectionMode, OnlineAlbum, OnlineArtist, OnlineChannel, OnlineMusicSettings,
+    OnlinePlaylist, OnlinePlaylistDetailError, OnlinePlaylistsResult, OnlineRecommendationsResult,
     OnlineSearchData, OnlineSearchHistoryEntry, OnlineSearchSection, OnlineSearchSectionEvent,
     OnlineSearchSectionResult, OnlineSuggestionsResult, OnlineTrack, OnlineTrackPage,
 };
@@ -114,6 +114,7 @@ fn generate(output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     export_all::<KugouAccount>(&config)?;
     export_all::<KugouQrLoginStart>(&config)?;
     export_all::<KugouQrLoginPoll>(&config)?;
+    export_all::<AudioSourceSelectionMode>(&config)?;
     export_all::<OnlineMusicSettings>(&config)?;
     export_all::<OnlineSearchHistoryEntry>(&config)?;
     export_all::<OnlineChannel>(&config)?;

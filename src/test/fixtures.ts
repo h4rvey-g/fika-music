@@ -82,6 +82,7 @@ export function createOnlineMusicSettings(
   return {
     excludedChannels: [],
     channelPriority: [],
+    audioSourceSelectionMode: "automatic",
     audioSourcePriority: [],
     layerTimeoutSeconds: 8,
     playbackTimeoutSeconds: 20,

@@ -32,6 +32,7 @@ import {
 const props = defineProps<{
   playbackSource: AudioSourceId;
   audioSources: AudioSourceOption[];
+  automaticSourceSelection?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -209,7 +210,11 @@ async function refreshAccountStatuses() {
       </div>
 
       <div class="flex flex-wrap items-center gap-2">
+        <span v-if="automaticSourceSelection" class="badge badge-sm" aria-label="Automatic Audio Source selection">
+          Auto
+        </span>
         <select
+          v-else
           :value="playbackSource"
           class="select select-sm w-32 max-w-full"
           :disabled="!audioSources.length"

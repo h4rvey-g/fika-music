@@ -22,6 +22,10 @@ import type {
   SourceQuality,
 } from "../generated/bindings";
 import { dispatchAudioSourceRequest } from "./audio-source-api";
+import {
+  AudioSourceRouter,
+  playbackAttemptKey,
+} from "./audio-source-router";
 import { firstSuccessfulWithTimeout } from "./async-utils";
 import { ExpiringCache } from "./expiring-cache";
 import { cancelSourceRequest } from "./plugin-api";
@@ -71,7 +75,13 @@ export type ResolveOnlineTrackOptions = {
   probe?: typeof probeMediaUrl;
   excludedAttempts?: Set<string>;
   excludedUrls?: Set<string>;
+  router?: AudioSourceRouter;
+  cacheFailures?: boolean;
+  bypassResolvedCache?: boolean;
 };
+
+const defaultAudioSourceRouter = new AudioSourceRouter();
+const preloadedMedia = new Map<string, HTMLAudioElement>();
 
 export function getOnlineMusicSettings() {
   return invoke<OnlineMusicSettings>(TAURI_COMMANDS.getOnlineMusicSettings);
@@ -266,11 +276,17 @@ export function onlinePlaylistDetailError(error: unknown): OnlinePlaylistDetailE
 export async function resolveOnlineTrack(
   options: ResolveOnlineTrackOptions,
 ): Promise<OnlinePlayback> {
-  const sources = orderedAudioSources(
-    options.audioSources,
-    options.settings.audioSourcePriority,
-    options.selectedAudioSourceId,
-  );
+  const qualities = qualityFallback(options.quality ?? options.settings.preferredQuality);
+  const router = options.router ?? defaultAudioSourceRouter;
+  const mode = options.settings.audioSourceSelectionMode ?? "automatic";
+  const sources = router.order({
+    records: options.audioSources,
+    track: options.track,
+    qualities,
+    mode,
+    configuredPriority: options.settings.audioSourcePriority,
+    selectedAudioSourceId: options.selectedAudioSourceId,
+  });
   if (!sources.length) {
     throw new Error("No enabled Audio Source can resolve this track.");
   }
@@ -278,26 +294,44 @@ export async function resolveOnlineTrack(
   const deadline = Date.now() + options.settings.playbackTimeoutSeconds * 1_000;
   const probe = options.probe ?? probeMediaUrl;
   const failures: unknown[] = [];
-  for (const source of sources) {
-    throwIfAborted(options.signal);
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      break;
+  if (mode === "automatic") {
+    for (let index = 0; index < sources.length; index += 2) {
+      throwIfAborted(options.signal);
+      try {
+        return await raceAudioSourcePair({
+          options,
+          sources: sources.slice(index, index + 2),
+          qualities,
+          deadline,
+          probe,
+          router,
+        });
+      } catch (error) {
+        if (isAbortError(error)) throw error;
+        failures.push(error);
+      }
     }
-    const layerBudget = Math.min(
-      remaining,
-      options.settings.layerTimeoutSeconds * 1_000,
-    );
-    try {
-      return await resolveFromAudioSourceLayer({
-        ...options,
-        audioSource: source,
-        qualities: qualityFallback(options.quality ?? options.settings.preferredQuality),
-        timeoutMs: layerBudget,
-        probe,
-      });
-    } catch (error) {
-      failures.push(error);
+  } else {
+    for (const source of sources) {
+      throwIfAborted(options.signal);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      try {
+        return await resolveFromAudioSourceLayer({
+          ...options,
+          audioSource: source,
+          qualities,
+          timeoutMs: Math.min(
+            remaining,
+            options.settings.layerTimeoutSeconds * 1_000,
+          ),
+          probe,
+          router,
+        });
+      } catch (error) {
+        if (isAbortError(error)) throw error;
+        failures.push(error);
+      }
     }
   }
   throwIfAborted(options.signal);
@@ -308,11 +342,109 @@ export async function resolveOnlineTrack(
   );
 }
 
+type SourcePairOptions = {
+  options: ResolveOnlineTrackOptions;
+  sources: AudioSourceRecord[];
+  qualities: SourceQuality[];
+  deadline: number;
+  probe: typeof probeMediaUrl;
+  router: AudioSourceRouter;
+};
+
+async function raceAudioSourcePair(options: SourcePairOptions): Promise<OnlinePlayback> {
+  const [primary, secondary] = options.sources;
+  if (!primary) throw new Error("No Audio Source layer is available.");
+  const controllers = options.sources.map(() => new AbortController());
+  const onAbort = () => controllers.forEach((controller) => controller.abort());
+  options.options.signal?.addEventListener("abort", onAbort, { once: true });
+  if (options.options.signal?.aborted) onAbort();
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let settled = false;
+  let secondaryStarted = false;
+  let started = 0;
+  let failed = 0;
+
+  const result = new Promise<OnlinePlayback>((resolve, reject) => {
+    const finishWithFailure = (error: unknown) => {
+      if (settled) return;
+      failed += 1;
+      if (options.options.signal?.aborted) {
+        settled = true;
+        reject(abortError());
+        return;
+      }
+      if (!secondaryStarted && secondary) {
+        startSecondary();
+        return;
+      }
+      if (failed === started) {
+        settled = true;
+        reject(error);
+      }
+    };
+
+    const start = (source: AudioSourceRecord, index: number) => {
+      if (settled) return;
+      started += 1;
+      const remaining = options.deadline - Date.now();
+      if (remaining <= 0) {
+        finishWithFailure(new Error("Playback timed out before a source became available."));
+        return;
+      }
+      void resolveFromAudioSourceLayer({
+        ...options.options,
+        audioSource: source,
+        qualities: options.qualities,
+        timeoutMs: Math.min(
+          remaining,
+          options.options.settings.layerTimeoutSeconds * 1_000,
+        ),
+        signal: controllers[index].signal,
+        probe: options.probe,
+        router: options.router,
+      }).then((playback) => {
+        if (settled) return;
+        settled = true;
+        controllers.forEach((controller, controllerIndex) => {
+          if (controllerIndex !== index) controller.abort();
+        });
+        resolve(playback);
+      }).catch(finishWithFailure);
+    };
+
+    const startSecondary = () => {
+      if (secondaryStarted || !secondary || settled) return;
+      secondaryStarted = true;
+      if (timer !== undefined) clearTimeout(timer);
+      start(secondary, 1);
+    };
+
+    start(primary, 0);
+    if (secondary && !secondaryStarted && !settled) {
+      timer = setTimeout(
+        startSecondary,
+        options.router.hedgeDelayMs(primary, options.options.track, options.qualities),
+      );
+    }
+  });
+
+  try {
+    return await result;
+  } finally {
+    settled = true;
+    if (timer !== undefined) clearTimeout(timer);
+    controllers.forEach((controller) => controller.abort());
+    options.options.signal?.removeEventListener("abort", onAbort);
+  }
+}
+
 type LayerOptions = ResolveOnlineTrackOptions & {
   audioSource: AudioSourceRecord;
   qualities: SourceQuality[];
   timeoutMs: number;
   probe: typeof probeMediaUrl;
+  router: AudioSourceRouter;
 };
 
 async function resolveFromAudioSourceLayer(options: LayerOptions): Promise<OnlinePlayback> {
@@ -330,17 +462,13 @@ async function resolveFromAudioSourceLayer(options: LayerOptions): Promise<Onlin
   for (const [index, quality] of options.qualities.entries()) {
     throwIfAborted(options.signal);
     const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      break;
-    }
+    if (remaining <= 0) break;
     const remainingQualityCount = options.qualities.length - index;
     const qualityBudget = Math.max(1, Math.floor(remaining / remainingQualityCount));
     try {
       return await raceCandidates(options, supportedCandidates, quality, qualityBudget);
     } catch (error) {
-      if (isAbortError(error)) {
-        throw error;
-      }
+      if (isAbortError(error)) throw error;
     }
   }
   throw new Error("Audio Source layer did not produce a playable URL.");
@@ -352,41 +480,54 @@ async function raceCandidates(
   quality: SourceQuality,
   timeoutMs: number,
 ): Promise<OnlinePlayback> {
+  const attemptKeys = candidates.map((candidate) => playbackAttemptKey(
+    options.audioSource.id,
+    candidate.channelId,
+    quality,
+  ));
+  const hasHealthyAttempt = attemptKeys.some((attemptKey) =>
+    options.router.isAttemptAvailable(attemptKey)
+  );
+  const recoveryAttempt = hasHealthyAttempt ? null : options.router.recoveryAttempt(attemptKeys);
   const branchIds = candidates.map(
     (_, index) => `online-play-${uniqueRequestId()}-${index}`,
   );
   const branchAbort = new AbortController();
+  const startedAttempts = new Set<string>();
+  const settledAttempts = new Set<string>();
   const onAbort = () => branchAbort.abort();
   options.signal?.addEventListener("abort", onAbort, { once: true });
 
   try {
     const attempts = candidates.map(async (candidate, index) => {
-      const attemptKey = playbackAttemptKey(
-        options.audioSource.id,
-        candidate.channelId,
-        quality,
-      );
+      const attemptKey = attemptKeys[index];
       const failureKey = `${options.track.key}::${attemptKey}`;
       if (
         options.excludedAttempts?.has(attemptKey) ||
-        isCachedFailure(failureKey)
+        (options.cacheFailures !== false && isCachedFailure(failureKey)) ||
+        (hasHealthyAttempt && !options.router.isAttemptAvailable(attemptKey)) ||
+        (!hasHealthyAttempt && attemptKey !== recoveryAttempt)
       ) {
         throw new Error("Playback attempt is temporarily unavailable.");
       }
       const requestId = branchIds[index];
+      startedAttempts.add(attemptKey);
       const cacheKey = resolvedPlaybackCacheKey(
         options.audioSource.id,
         candidate.channelId,
         candidate.id,
         quality,
       );
+      const startedAt = Date.now();
       try {
-        const cached = cachedPlayback(cacheKey);
+        const cached = options.bypassResolvedCache ? null : cachedPlayback(cacheKey);
         if (cached && !options.excludedUrls?.has(cached.url)) {
           await options.probe(cached.url, {
             timeoutMs,
             signal: branchAbort.signal,
           });
+          settledAttempts.add(attemptKey);
+          options.router.reportSuccess(attemptKey, Date.now() - startedAt);
           return { ...cached, track: options.track };
         }
         const outcome = await dispatchAudioSourceRequest(
@@ -436,16 +577,31 @@ async function raceCandidates(
         } satisfies OnlinePlayback;
         resolvedPlaybackCache.set(cacheKey, playback);
         failedPlaybackCache.delete(failureKey);
+        settledAttempts.add(attemptKey);
+        options.router.reportSuccess(attemptKey, Date.now() - startedAt);
         return playback;
       } catch (error) {
         resolvedPlaybackCache.delete(cacheKey);
         if (!isAbortError(error) && !branchAbort.signal.aborted) {
-          failedPlaybackCache.set(failureKey, true);
+          settledAttempts.add(attemptKey);
+          if (options.cacheFailures !== false) failedPlaybackCache.set(failureKey, true);
+          options.router.reportFailure(attemptKey);
         }
         throw error;
       }
     });
-    return await firstSuccessfulWithTimeout(attempts, timeoutMs, options.signal);
+    try {
+      return await firstSuccessfulWithTimeout(attempts, timeoutMs, options.signal);
+    } catch (error) {
+      if (!isAbortError(error) && !options.signal?.aborted) {
+        for (const attemptKey of startedAttempts) {
+          if (settledAttempts.has(attemptKey)) continue;
+          settledAttempts.add(attemptKey);
+          options.router.reportFailure(attemptKey);
+        }
+      }
+      throw error;
+    }
   } finally {
     branchAbort.abort();
     options.signal?.removeEventListener("abort", onAbort);
@@ -453,13 +609,11 @@ async function raceCandidates(
   }
 }
 
-export function playbackAttemptKey(
-  audioSourceId: string,
-  channelId: string,
-  quality: SourceQuality,
-) {
-  return `${audioSourceId}::${channelId}::${quality}`;
+export function reportOnlinePlaybackFailure(attemptKey: string) {
+  defaultAudioSourceRouter.reportFailure(attemptKey);
 }
+
+export { playbackAttemptKey } from "./audio-source-router";
 
 const RESOLVED_URL_CACHE_MS = 2 * 60_000;
 const FAILED_ATTEMPT_CACHE_MS = 5 * 60_000;
@@ -496,6 +650,8 @@ export function clearOnlinePlaybackFailures(trackKey: string) {
 export function invalidateOnlinePlaybackCaches() {
   resolvedPlaybackCache.clear();
   failedPlaybackCache.clear();
+  defaultAudioSourceRouter.reset();
+  clearPreloadedMedia();
 }
 
 export function orderedAudioSources(
@@ -530,9 +686,33 @@ export function probeMediaUrl(
   url: string,
   options: { timeoutMs: number; signal?: AbortSignal },
 ): Promise<void> {
+  return loadMediaUrl(url, "metadata", options);
+}
+
+export function preloadMediaUrl(
+  url: string,
+  options: { timeoutMs: number; signal?: AbortSignal },
+): Promise<void> {
+  return loadMediaUrl(url, "auto", options, true);
+}
+
+export function clearPreloadedMedia(exceptUrl?: string): void {
+  for (const [url, audio] of preloadedMedia) {
+    if (url === exceptUrl) continue;
+    releaseMediaElement(audio);
+    preloadedMedia.delete(url);
+  }
+}
+
+function loadMediaUrl(
+  url: string,
+  preload: "auto" | "metadata",
+  options: { timeoutMs: number; signal?: AbortSignal },
+  retain = false,
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const audio = new Audio();
-    audio.preload = "metadata";
+    audio.preload = preload;
     const timer = window.setTimeout(() => finish(new Error("Media probe timed out.")), options.timeoutMs);
     const onCanPlay = () => finish();
     const onError = () => finish(new Error("Media URL is not playable."));
@@ -542,9 +722,13 @@ export function probeMediaUrl(
       audio.removeEventListener("canplay", onCanPlay);
       audio.removeEventListener("error", onError);
       options.signal?.removeEventListener("abort", onAbort);
-      audio.pause();
-      audio.removeAttribute("src");
-      audio.load();
+      if (error || !retain) {
+        releaseMediaElement(audio);
+      } else {
+        const previous = preloadedMedia.get(url);
+        if (previous && previous !== audio) releaseMediaElement(previous);
+        preloadedMedia.set(url, audio);
+      }
       error ? reject(error) : resolve();
     }
     audio.addEventListener("canplay", onCanPlay, { once: true });
@@ -557,6 +741,12 @@ export function probeMediaUrl(
     audio.src = url;
     audio.load();
   });
+}
+
+function releaseMediaElement(audio: HTMLAudioElement) {
+  audio.pause();
+  audio.removeAttribute("src");
+  audio.load();
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

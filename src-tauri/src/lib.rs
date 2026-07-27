@@ -1028,6 +1028,7 @@ fn download_online_item(
         audio_sources,
         &settings.audio_source_priority,
         task.selected_audio_source_id.as_deref(),
+        settings.audio_source_selection_mode,
     );
     let deadline = Instant::now() + Duration::from_secs(60);
     let resolved = resolve_online_download_url(
@@ -1150,6 +1151,7 @@ fn ordered_download_audio_sources(
     mut records: Vec<AudioSourceRecord>,
     priority: &[String],
     selected: Option<&str>,
+    selection_mode: online_music::AudioSourceSelectionMode,
 ) -> Vec<AudioSourceRecord> {
     records.retain(|record| {
         record.enabled
@@ -1160,17 +1162,28 @@ fn ordered_download_audio_sources(
                     .contains(&source_runtime::SourceAction::MusicUrl)
             })
     });
-    let order = selected
-        .into_iter()
-        .map(str::to_owned)
-        .chain(priority.iter().cloned())
-        .collect::<Vec<_>>();
+    let order = download_source_order(priority, selected, selection_mode);
     records.sort_by(|left, right| {
         download_source_rank(&left.id, &order)
             .cmp(&download_source_rank(&right.id, &order))
             .then_with(|| left.name.cmp(&right.name))
     });
     records
+}
+
+fn download_source_order(
+    priority: &[String],
+    selected: Option<&str>,
+    selection_mode: online_music::AudioSourceSelectionMode,
+) -> Vec<String> {
+    match selection_mode {
+        online_music::AudioSourceSelectionMode::Automatic => Vec::new(),
+        online_music::AudioSourceSelectionMode::Manual => selected
+            .into_iter()
+            .map(str::to_owned)
+            .chain(priority.iter().cloned())
+            .collect::<Vec<_>>(),
+    }
 }
 
 fn download_source_rank(id: &str, order: &[String]) -> usize {
@@ -4719,6 +4732,28 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn automatic_download_source_order_should_ignore_manual_preferences() {
+        let order = download_source_order(
+            &["second".to_owned()],
+            Some("first"),
+            online_music::AudioSourceSelectionMode::Automatic,
+        );
+
+        assert!(order.is_empty());
+    }
+
+    #[test]
+    fn manual_download_source_order_should_start_with_selected_source() {
+        let order = download_source_order(
+            &["second".to_owned()],
+            Some("first"),
+            online_music::AudioSourceSelectionMode::Manual,
+        );
+
+        assert_eq!(order, ["first", "second"]);
+    }
 
     static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
 

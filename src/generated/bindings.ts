@@ -16,6 +16,8 @@ export type AudioSourceDiagnostic = { code: string, level: DiagnosticLevel, sour
 
 export type AudioSourceRecord = { id: string, name: string, version: string | null, description: string | null, author: string | null, homepage: string | null, path: string, adapter: string | null, state: AudioSourceState, enabled: boolean, permissionsReviewed: boolean, declaredCapabilities: Array<SourceCapability>, grantedCapabilities: Array<SourceCapability>, sources: Array<SourceInfo>, diagnostics: Array<AudioSourceDiagnostic>, canRemove: boolean, canEnable: boolean, };
 
+export type AudioSourceSelectionMode = "automatic" | "manual";
+
 export type AudioSourceState = "disabled" | "needs-review" | "enabled" | "incompatible" | "error" | "invalid";
 
 export type DiagnosticLevel = "info" | "warn" | "error" | "security";
@@ -118,7 +120,7 @@ export type OnlineDownloadState = "queued" | "running" | "paused" | "completed" 
 
 export type OnlineDownloadTask = { taskId: string, kind: string, title: string, state: OnlineDownloadState, destination: string, selectedAudioSourceId: string | null, totalItems: number, completedItems: number, skippedItems: number, failedItems: number, createdAt: number, updatedAt: number, items: Array<OnlineDownloadItem>, };
 
-export type OnlineMusicSettings = { excludedChannels: Array<string>, channelPriority: Array<string>, audioSourcePriority: Array<string>, layerTimeoutSeconds: number, playbackTimeoutSeconds: number, preferredQuality: SourceQuality, searchHistoryEnabled: boolean, downloadDirectory: string | null, filenameTemplate: string, downloadConcurrency: number, batchNotifications: boolean, };
+export type OnlineMusicSettings = { excludedChannels: Array<string>, channelPriority: Array<string>, audioSourceSelectionMode: AudioSourceSelectionMode, audioSourcePriority: Array<string>, layerTimeoutSeconds: number, playbackTimeoutSeconds: number, preferredQuality: SourceQuality, searchHistoryEnabled: boolean, downloadDirectory: string | null, filenameTemplate: string, downloadConcurrency: number, batchNotifications: boolean, };
 
 export type OnlinePlaylist = { key: string, channelId: string, pluginId: string, sourceId: string, channelName: string, accountRef: string | null, id: string, name: string, description: string | null, coverUrl: string | null, trackCount: number | null, ownerName: string | null, canMutate: boolean, isFavorite: boolean, platformIds: Record<string, string | number>, rawInfo: Record<string, unknown>, rank: number, };
 

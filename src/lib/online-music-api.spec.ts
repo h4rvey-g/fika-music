@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AudioSourceRecord } from "../generated/bindings";
 import {
+  clearPreloadedMedia,
   orderedAudioSources,
   invalidateOnlinePlaybackCaches,
   onlinePlaylistDetailError,
   playbackAttemptKey,
+  preloadMediaUrl,
   qualityFallback,
   refreshOnlineDownloadItemCandidates,
   resolveOnlineTrack,
@@ -63,6 +65,25 @@ describe("online music playback routing", () => {
   beforeEach(() => {
     invoke.mockReset();
     invalidateOnlinePlaybackCaches();
+  });
+
+  it("retains preloaded media until the preload slot is cleared", async () => {
+    const loaded: HTMLAudioElement[] = [];
+    vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
+    vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(function (
+      this: HTMLMediaElement,
+    ) {
+      loaded.push(this as HTMLAudioElement);
+      if (this.getAttribute("src")) {
+        queueMicrotask(() => this.dispatchEvent(new Event("canplay")));
+      }
+    });
+
+    await preloadMediaUrl("https://cdn.test/next.mp3", { timeoutMs: 1_000 });
+
+    expect(loaded[0].getAttribute("src")).toBe("https://cdn.test/next.mp3");
+    clearPreloadedMedia();
+    expect(loaded[0].getAttribute("src")).toBeNull();
   });
 
   it("places the selected Audio Source before the persistent fallback order", () => {
@@ -235,5 +256,38 @@ describe("online music playback routing", () => {
     });
 
     expect(playback.candidate.channelName).toBe("KuGou");
+  });
+
+  it("starts one delayed fallback source when the automatic primary stalls", async () => {
+    vi.useFakeTimers();
+    invoke.mockImplementation((command: string, payload: { audioSourceId?: string }) => {
+      if (command === "dispatch_audio_source_request") {
+        if (payload.audioSourceId === "first") return new Promise(() => undefined);
+        return Promise.resolve({
+          response: { action: "musicUrl", data: "https://cdn.test/second.mp3" },
+          diagnostics: [],
+        });
+      }
+      return Promise.resolve(true);
+    });
+    const resolving = resolveOnlineTrack({
+      track,
+      audioSources: [audioSource("first", ["wy"]), audioSource("second", ["wy"])],
+      settings: {
+        ...settings,
+        audioSourceSelectionMode: "automatic",
+        preferredQuality: "320k",
+      },
+      probe: async () => undefined,
+    });
+
+    await vi.advanceTimersByTimeAsync(719);
+    expect(invoke.mock.calls.filter(([command]) => command === "dispatch_audio_source_request"))
+      .toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(resolving).resolves.toMatchObject({ audioSourceId: "second" });
+    expect(invoke.mock.calls.filter(([command]) => command === "dispatch_audio_source_request"))
+      .toHaveLength(2);
+    vi.useRealTimers();
   });
 });

@@ -55,12 +55,23 @@ pub enum OnlineMusicError {
     Serialization(#[from] serde_json::Error),
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub enum AudioSourceSelectionMode {
+    #[default]
+    Automatic,
+    Manual,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "bindings.ts")]
 pub struct OnlineMusicSettings {
     pub excluded_channels: Vec<String>,
     pub channel_priority: Vec<String>,
+    #[serde(default)]
+    pub audio_source_selection_mode: AudioSourceSelectionMode,
     pub audio_source_priority: Vec<String>,
     pub layer_timeout_seconds: u64,
     pub playback_timeout_seconds: u64,
@@ -77,6 +88,7 @@ impl Default for OnlineMusicSettings {
         Self {
             excluded_channels: Vec::new(),
             channel_priority: Vec::new(),
+            audio_source_selection_mode: AudioSourceSelectionMode::Automatic,
             audio_source_priority: Vec::new(),
             layer_timeout_seconds: 8,
             playback_timeout_seconds: 20,
@@ -1239,6 +1251,30 @@ fn first_non_empty<'a>(values: impl Iterator<Item = &'a str>) -> Option<&'a str>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_without_source_selection_mode_should_default_to_automatic() {
+        let value = serde_json::json!({
+            "excludedChannels": [],
+            "channelPriority": [],
+            "audioSourcePriority": [],
+            "layerTimeoutSeconds": 8,
+            "playbackTimeoutSeconds": 20,
+            "preferredQuality": "320k",
+            "searchHistoryEnabled": true,
+            "downloadDirectory": null,
+            "filenameTemplate": "{artist} - {title}",
+            "downloadConcurrency": 2,
+            "batchNotifications": true
+        });
+
+        let settings: OnlineMusicSettings = serde_json::from_value(value).unwrap();
+
+        assert_eq!(
+            settings.audio_source_selection_mode,
+            AudioSourceSelectionMode::Automatic
+        );
+    }
 
     fn candidate(
         channel_id: &str,

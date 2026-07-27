@@ -270,8 +270,38 @@ function previewTemplate(template: string, values: Record<string, string>) {
         </div>
 
         <div class="px-4 py-4">
-          <div class="mb-3 text-sm font-medium">Audio Source fallback priority</div>
-          <ul class="divide-y divide-base-300">
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div class="min-w-0">
+              <div class="text-sm font-medium">Audio Source selection</div>
+            </div>
+            <div class="join shrink-0" role="radiogroup" aria-label="Audio Source selection mode">
+              <input
+                class="btn btn-sm join-item"
+                type="radio"
+                name="audio-source-selection-mode"
+                value="automatic"
+                aria-label="Automatic"
+                :checked="settings.audioSourceSelectionMode === 'automatic'"
+                :disabled="Boolean(saving)"
+                @change="persist({ audioSourceSelectionMode: 'automatic' }, 'audio-source-mode')"
+              />
+              <input
+                class="btn btn-sm join-item"
+                type="radio"
+                name="audio-source-selection-mode"
+                value="manual"
+                aria-label="Manual"
+                :checked="settings.audioSourceSelectionMode === 'manual'"
+                :disabled="Boolean(saving)"
+                @change="persist({ audioSourceSelectionMode: 'manual' }, 'audio-source-mode')"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div v-if="settings.audioSourceSelectionMode === 'manual'" class="px-4 py-4">
+          <div class="mb-3 text-sm font-medium">Manual fallback priority</div>
+          <ul class="divide-y divide-base-300" data-testid="audio-source-priority">
             <li
               v-for="(source, index) in orderedAudioSources"
               :key="source.id"

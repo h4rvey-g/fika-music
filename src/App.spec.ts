@@ -27,6 +27,7 @@ const tauriMocks = vi.hoisted(() => ({
 
 let listedPlugins: PluginRecord[] = [];
 let listedAudioSources: AudioSourceRecord[] = [];
+let onlineMusicSettings = createOnlineMusicSettings();
 
 vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => path,
@@ -118,6 +119,7 @@ describe("application shell", () => {
     vi.clearAllMocks();
     listedPlugins = [];
     listedAudioSources = [];
+    onlineMusicSettings = createOnlineMusicSettings();
     localStorage.clear();
     document.documentElement.removeAttribute("data-theme");
     vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
@@ -137,7 +139,7 @@ describe("application shell", () => {
         return Promise.resolve(listedAudioSources);
       }
       if (command === "get_online_music_settings") {
-        return Promise.resolve(createOnlineMusicSettings());
+        return Promise.resolve(onlineMusicSettings);
       }
       if (command === "list_online_download_tasks") {
         return Promise.resolve([]);
@@ -405,6 +407,7 @@ describe("application shell", () => {
   });
 
   it("changes the default audio source and quality from the playback options menu", async () => {
+    onlineMusicSettings = createOnlineMusicSettings({ audioSourceSelectionMode: "manual" });
     listedAudioSources = [
       createAudioSourceRecord({ id: "source-one", name: "Source One" }),
       createAudioSourceRecord({ id: "source-two", name: "Source Two" }),
@@ -427,6 +430,7 @@ describe("application shell", () => {
   });
 
   it("re-resolves the current online track after changing its source or quality", async () => {
+    onlineMusicSettings = createOnlineMusicSettings({ audioSourceSelectionMode: "manual" });
     listedAudioSources = [
       createAudioSourceRecord({ id: "source-one", name: "Source One" }),
       createAudioSourceRecord({ id: "source-two", name: "Source Two" }),
@@ -694,6 +698,73 @@ describe("application shell", () => {
     wrapper.unmount();
   });
 
+  it("prepares the next online track and reuses it when playback ends", async () => {
+    vi.useFakeTimers();
+    listedAudioSources = [createAudioSourceRecord({ id: "source-one", name: "Source One" })];
+    const tracks = [
+      createOnlineTrack({ key: "track-one", title: "Track One" }),
+      createOnlineTrack({
+        key: "track-two",
+        title: "Track Two",
+        candidates: [createOnlineTrackCandidate({ id: "2", title: "Track Two" })],
+      }),
+    ];
+    const defaultInvoke = tauriMocks.invoke.getMockImplementation();
+    tauriMocks.invoke.mockImplementation((command: string, payload?: unknown) => {
+      if (command === "list_online_music_channels") {
+        return Promise.resolve([{
+          id: "netease",
+          pluginId: "fika.netease",
+          pluginName: "NetEase",
+          providerId: "netease",
+          sourceId: "wy",
+          sourceName: "NetEase",
+          excluded: false,
+          actions: ["musicUrl"],
+        }]);
+      }
+      if (command === "dispatch_audio_source_request") {
+        return Promise.resolve({
+          response: { action: "musicUrl", data: "https://cdn.example.test/track.mp3" },
+          diagnostics: [],
+        });
+      }
+      if (command === "resolve_remote_track_lyrics") return Promise.resolve(null);
+      return defaultInvoke?.(command, payload);
+    });
+    vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(function (
+      this: HTMLMediaElement,
+    ) {
+      queueMicrotask(() => this.dispatchEvent(new Event("canplay")));
+    });
+    const wrapper = mount(App);
+    await flushPromises();
+
+    wrapper.getComponent({ name: "OnlineMusic" }).vm.$emit(
+      "playRequest",
+      tracks[0],
+      tracks,
+      0,
+      true,
+    );
+    await flushPromises();
+    wrapper.get("audio").element.dispatchEvent(new Event("playing"));
+    await vi.advanceTimersByTimeAsync(750);
+    await flushPromises();
+
+    const playbackRequests = () => tauriMocks.invoke.mock.calls
+      .filter(([command]) => command === "dispatch_audio_source_request");
+    expect(playbackRequests()).toHaveLength(2);
+
+    wrapper.get("audio").element.dispatchEvent(new Event("ended"));
+    await flushPromises();
+
+    expect(playbackRequests()).toHaveLength(2);
+    expect(wrapper.get('footer[aria-label="Playback bar"]').text()).toContain("Track Two");
+    wrapper.unmount();
+    vi.useRealTimers();
+  });
+
   it("opens the dedicated KuGou workspace for the bundled plugin", async () => {
     listedPlugins = [
       createPluginRecord({
@@ -845,7 +916,7 @@ describe("application shell", () => {
       if (command === "list_plugins") return Promise.resolve([]);
       if (command === "list_audio_sources") return Promise.resolve([]);
       if (command === "get_online_music_settings") {
-        return Promise.resolve(createOnlineMusicSettings());
+        return Promise.resolve(onlineMusicSettings);
       }
       if (command === "list_online_download_tasks") return Promise.resolve([]);
       if (command === "list_online_music_channels") return Promise.resolve([]);
