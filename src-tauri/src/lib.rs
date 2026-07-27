@@ -1031,7 +1031,6 @@ enum OnlineItemDownloadError {
 #[derive(Debug)]
 struct ResolvedOnlineDownload {
     url: String,
-    quality: source_runtime::SourceQuality,
     channel_name: String,
     attempt: download_source_router::DownloadAttemptKey,
 }
@@ -1172,12 +1171,13 @@ fn download_online_item(
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok());
-    let Some(extension) = media_extension(content_type, &resolved.url, resolved.quality) else {
+    let extension_hint = media_extension(content_type, &resolved.url);
+    if extension_hint.is_none() && !is_generic_media_type(content_type) {
         report_download_route_failure(app, resolved.attempt.clone());
         return Err(OnlineItemDownloadError::Message(
             "media type is not a supported audio format".to_owned(),
         ));
-    };
+    }
     let filename = online_download::render_filename(
         &settings.filename_template,
         &item.track,
@@ -1185,8 +1185,6 @@ fn download_online_item(
     )
     .map_err(|error| OnlineItemDownloadError::Message(error.to_string()))?;
     let destination = PathBuf::from(&task.destination);
-    let target = destination.join(format!("{filename}.{extension}"));
-    validate_download_conflict(&target)?;
 
     const MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
     let total_bytes = response.content_length();
@@ -1195,9 +1193,12 @@ fn download_online_item(
             "media download is larger than 2 GiB".to_owned(),
         ));
     }
+    let temporary_suffix = extension_hint
+        .map(|extension| format!(".{extension}"))
+        .unwrap_or_else(|| ".audio".to_owned());
     let mut temporary = tempfile::Builder::new()
         .prefix(".fika-download-")
-        .suffix(&format!(".{extension}"))
+        .suffix(&temporary_suffix)
         .tempfile_in(&destination)?;
     let item_started = {
         let state = app.state::<AppState>();
@@ -1259,6 +1260,16 @@ fn download_online_item(
     persist_online_download_progress(app, task_id, &item.item_id, downloaded, total_bytes);
     temporary.flush()?;
     temporary.as_file().sync_all()?;
+
+    let extension = match online_download::downloaded_audio_extension(temporary.path()) {
+        Ok(extension) => extension,
+        Err(error) => {
+            report_download_route_failure(app, resolved.attempt.clone());
+            return Err(OnlineItemDownloadError::Message(error.to_string()));
+        }
+    };
+    let target = destination.join(format!("{filename}.{extension}"));
+    validate_download_conflict(&target)?;
 
     let cover = load_download_cover(&client, &item.track, cancellation);
     let warning = online_download::write_metadata(temporary.path(), &item.track, cover.as_deref())
@@ -1569,7 +1580,6 @@ fn race_download_candidates(
                     .filter(|url| probe_download_url(&client, url, deadline, &token))
                     .map(|url| ResolvedOnlineDownload {
                         url,
-                        quality,
                         channel_name,
                         attempt: attempt.clone(),
                     });
@@ -1693,25 +1703,16 @@ fn probe_download_url(
     response.read(&mut byte).is_ok_and(|count| count == 1)
 }
 
-fn media_extension(
-    content_type: Option<&str>,
-    url: &str,
-    quality: source_runtime::SourceQuality,
-) -> Option<&'static str> {
-    let media_type = content_type
-        .unwrap_or("")
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
+fn media_extension(content_type: Option<&str>, url: &str) -> Option<&'static str> {
+    let media_type = normalized_media_type(content_type);
     match media_type.as_str() {
         "audio/mpeg" | "audio/mp3" => return Some("mp3"),
         "audio/flac" | "audio/x-flac" => return Some("flac"),
         "audio/mp4" | "audio/x-m4a" => return Some("m4a"),
         "audio/aac" => return Some("aac"),
         "audio/ogg" | "audio/opus" => return Some("ogg"),
-        _ => {}
+        "" | "application/octet-stream" => {}
+        _ => return None,
     }
     let path = url
         .split(['?', '#'])
@@ -1727,13 +1728,24 @@ fn media_extension(
             });
         }
     }
-    match quality {
-        source_runtime::SourceQuality::Flac | source_runtime::SourceQuality::Flac24Bit => {
-            Some("flac")
-        }
-        _ if media_type == "application/octet-stream" || media_type.is_empty() => Some("mp3"),
-        _ => None,
-    }
+    None
+}
+
+fn is_generic_media_type(content_type: Option<&str>) -> bool {
+    matches!(
+        normalized_media_type(content_type).as_str(),
+        "" | "application/octet-stream"
+    )
+}
+
+fn normalized_media_type(content_type: Option<&str>) -> String {
+    content_type
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
 }
 
 fn validate_download_conflict(target: &Path) -> Result<(), OnlineItemDownloadError> {
@@ -5045,6 +5057,49 @@ mod tests {
             Duration::from_secs(1),
             Instant::now() + Duration::from_secs(2),
         ));
+    }
+
+    #[test]
+    fn media_extension_should_not_guess_format_for_generic_response() {
+        assert_eq!(
+            media_extension(
+                Some("application/octet-stream"),
+                "https://media.example/download",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn downloaded_audio_extension_should_use_content_instead_of_temporary_suffix() {
+        let directory = tempfile::tempdir().expect("temporary directory should open");
+        let path = directory.path().join("response.flac");
+        let mut mp3_frame = vec![0xff, 0xfb, 0x90, 0x64];
+        mp3_frame.resize(417, 0);
+        mp3_frame.extend_from_slice(&[0xff, 0xfb, 0x90, 0x64]);
+        mp3_frame.resize(834, 0);
+        fs::write(&path, mp3_frame).expect("test MP3 frame should write");
+
+        assert_eq!(
+            online_download::downloaded_audio_extension(&path)
+                .expect("MP3 content should be detected"),
+            "mp3"
+        );
+    }
+
+    #[test]
+    fn downloaded_audio_extension_should_reject_non_audio_response() {
+        let directory = tempfile::tempdir().expect("temporary directory should open");
+        let path = directory.path().join("response.flac");
+        fs::write(&path, br#"{"code":403,"message":"forbidden"}"#)
+            .expect("test response should write");
+
+        let error = online_download::downloaded_audio_extension(&path)
+            .expect_err("non-audio response should be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("downloaded audio metadata is unreadable"));
     }
 
     fn draft(file_path: &str, title: &str, artist: Option<&str>) -> LocalTrackDraft {

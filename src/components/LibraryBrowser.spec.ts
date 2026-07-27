@@ -327,6 +327,30 @@ describe("LibraryBrowser", () => {
     });
   });
 
+  it("visually distinguishes a lone track selection from its album selection", async () => {
+    const wrapper = mountLibrary();
+    await flushPromises();
+
+    const firstAlbum = wrapper.get("#library-row-0");
+    const firstTrack = wrapper.get("#library-row-2");
+
+    await firstTrack.trigger("click");
+
+    expect(firstAlbum.attributes("aria-selected")).toBe("false");
+    expect(firstTrack.attributes("aria-selected")).toBe("true");
+    expect(firstTrack.classes()).toContain("bg-neutral");
+
+    await firstAlbum.trigger("click");
+
+    expect(firstAlbum.attributes("aria-selected")).toBe("true");
+    expect(firstTrack.attributes("aria-selected")).toBe("true");
+    expect(firstAlbum.findAll("span").some((span) =>
+      span.classes().includes("text-neutral-content/60"))).toBe(true);
+    expect(firstTrack.classes()).toContain("bg-neutral/15");
+    expect(firstTrack.classes()).toContain("border-l-neutral");
+    expect(firstTrack.classes()).not.toContain("text-neutral-content");
+  });
+
   it("collapses an album without changing its track result indexes", async () => {
     const wrapper = mountLibrary();
     await flushPromises();

@@ -1,11 +1,13 @@
 use crate::online_music::OnlineTrack;
 use lofty::config::WriteOptions;
-use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::file::{AudioFile, FileType, TaggedFile, TaggedFileExt};
 use lofty::picture::{Picture, PictureType};
+use lofty::probe::Probe;
 use lofty::tag::{Accessor, Tag};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::io::Cursor;
+use std::fs::File;
+use std::io::{BufReader, Cursor};
 use std::path::Path;
 use uuid::Uuid;
 
@@ -639,9 +641,7 @@ pub fn write_metadata(
     track: &OnlineTrack,
     cover: Option<&[u8]>,
 ) -> Result<(), OnlineDownloadError> {
-    let mut tagged_file = lofty::read_from_path(path).map_err(|error| {
-        OnlineDownloadError::Invalid(format!("downloaded audio metadata is unreadable: {error}"))
-    })?;
+    let mut tagged_file = read_downloaded_audio(path)?;
     if tagged_file.primary_tag().is_none() {
         let tag_type = tagged_file.primary_tag_type();
         tagged_file.insert_tag(Tag::new(tag_type));
@@ -677,6 +677,32 @@ pub fn write_metadata(
             OnlineDownloadError::Invalid(format!("download metadata could not be written: {error}"))
         })?;
     Ok(())
+}
+
+pub fn downloaded_audio_extension(path: &Path) -> Result<&'static str, OnlineDownloadError> {
+    let file_type = read_downloaded_audio(path)?.file_type();
+    match file_type {
+        FileType::Aac => Ok("aac"),
+        FileType::Flac => Ok("flac"),
+        FileType::Mpeg => Ok("mp3"),
+        FileType::Mp4 => Ok("m4a"),
+        FileType::Opus | FileType::Vorbis => Ok("ogg"),
+        _ => Err(OnlineDownloadError::Invalid(format!(
+            "downloaded audio format is not supported: {file_type:?}"
+        ))),
+    }
+}
+
+fn read_downloaded_audio(path: &Path) -> Result<TaggedFile, OnlineDownloadError> {
+    let file = File::open(path)?;
+    Probe::new(BufReader::new(file))
+        .guess_file_type()?
+        .read()
+        .map_err(|error| {
+            OnlineDownloadError::Invalid(format!(
+                "downloaded audio metadata is unreadable: {error}"
+            ))
+        })
 }
 
 fn render_segment(
@@ -814,6 +840,28 @@ mod tests {
             )
             .expect("filename should render"),
             "Artist - A B Song [Album]"
+        );
+    }
+
+    #[test]
+    fn write_metadata_should_probe_content_when_file_extension_is_wrong() {
+        let directory = tempfile::tempdir().expect("temporary directory should open");
+        let path = directory.path().join("response.flac");
+        let mut mp3_frames = vec![0xff, 0xfb, 0x90, 0x64];
+        mp3_frames.resize(417, 0);
+        mp3_frames.extend_from_slice(&[0xff, 0xfb, 0x90, 0x64]);
+        mp3_frames.resize(834, 0);
+        std::fs::write(&path, mp3_frames).expect("test MP3 frames should write");
+
+        write_metadata(&path, &track(None), None).expect("metadata should write");
+
+        assert_eq!(
+            read_downloaded_audio(&path)
+                .expect("tagged MP3 should be readable")
+                .primary_tag()
+                .and_then(|tag| tag.title())
+                .as_deref(),
+            Some("A/B: Song")
         );
     }
 

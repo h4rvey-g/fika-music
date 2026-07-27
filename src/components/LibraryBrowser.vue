@@ -146,6 +146,7 @@ const pendingOffsets = new Set<number>();
 const collapsedGroupIds = ref(new Set<string>());
 const selectionRanges = ref<LibrarySelectionRange[]>([]);
 const excludedRanges = ref<LibrarySelectionRange[]>([]);
+const selectedAlbumRanges = shallowRef(new Map<string, LibrarySelectionRange>());
 const selectAll = ref(false);
 const selectionAnchor = ref<number | null>(null);
 const focusedVirtualIndex = ref<number | null>(null);
@@ -625,13 +626,21 @@ function selectTrack(event: MouseEvent, virtualIndex: number, trackIndex: number
     selectionRanges.value = event.metaKey || event.ctrlKey
       ? mergeRanges([...selectionRanges.value, range])
       : [range];
+    if (event.metaKey || event.ctrlKey) {
+      removeSelectedAlbumsIntersecting(range);
+    } else {
+      selectedAlbumRanges.value = new Map();
+    }
   } else if (event.metaKey || event.ctrlKey) {
-    toggleSelectedRange({ start: trackIndex, end: trackIndex });
+    const range = { start: trackIndex, end: trackIndex };
+    toggleSelectedRange(range);
+    removeSelectedAlbumsIntersecting(range);
     selectionAnchor.value = trackIndex;
   } else {
     selectAll.value = false;
     excludedRanges.value = [];
     selectionRanges.value = [{ start: trackIndex, end: trackIndex }];
+    selectedAlbumRanges.value = new Map();
     selectionAnchor.value = trackIndex;
   }
   scrollViewport.value?.focus({ preventScroll: true });
@@ -650,16 +659,39 @@ function selectGroup(event: MouseEvent, virtualIndex: number, group: LibraryAlbu
     selectionRanges.value = event.metaKey || event.ctrlKey
       ? mergeRanges([...selectionRanges.value, range])
       : [range];
+    markAlbumSelected(group, event.metaKey || event.ctrlKey);
   } else if (event.metaKey || event.ctrlKey) {
+    const wasSelected = isGroupRangeSelected(group);
     toggleSelectedRange(groupRange);
+    if (wasSelected) {
+      removeSelectedAlbumsIntersecting(groupRange);
+    } else {
+      markAlbumSelected(group, true);
+    }
     selectionAnchor.value = group.startIndex;
   } else {
     selectAll.value = false;
     excludedRanges.value = [];
     selectionRanges.value = [groupRange];
+    markAlbumSelected(group, false);
     selectionAnchor.value = group.startIndex;
   }
   scrollViewport.value?.focus({ preventScroll: true });
+}
+
+function markAlbumSelected(group: LibraryAlbumGroup, additive: boolean) {
+  const ranges = additive
+    ? new Map(selectedAlbumRanges.value)
+    : new Map<string, LibrarySelectionRange>();
+  ranges.set(group.id, { start: group.startIndex, end: group.endIndex });
+  selectedAlbumRanges.value = ranges;
+}
+
+function removeSelectedAlbumsIntersecting(range: LibrarySelectionRange) {
+  selectedAlbumRanges.value = new Map(
+    [...selectedAlbumRanges.value].filter(([, albumRange]) =>
+      !rangesIntersect([albumRange], range)),
+  );
 }
 
 function toggleSelectedRange(range: LibrarySelectionRange) {
@@ -680,6 +712,7 @@ function openRowMenu(event: MouseEvent, trackIndex: number, track: LocalTrack) {
     selectAll.value = false;
     excludedRanges.value = [];
     selectionRanges.value = [{ start: trackIndex, end: trackIndex }];
+    selectedAlbumRanges.value = new Map();
     selectionAnchor.value = trackIndex;
   }
   columnMenu.value = null;
@@ -689,12 +722,14 @@ function openRowMenu(event: MouseEvent, trackIndex: number, track: LocalTrack) {
 
 function openGroupMenu(event: MouseEvent, virtualIndex: number, group: LibraryAlbumGroup) {
   event.preventDefault();
-  if (!isGroupSelected(group)) {
+  const preserveSelection = isGroupRangeSelected(group);
+  if (!preserveSelection) {
     selectAll.value = false;
     excludedRanges.value = [];
     selectionRanges.value = [{ start: group.startIndex, end: group.endIndex }];
     selectionAnchor.value = group.startIndex;
   }
+  markAlbumSelected(group, preserveSelection);
   focusedVirtualIndex.value = virtualIndex;
   rowMenu.value = null;
   columnMenu.value = null;
@@ -711,11 +746,24 @@ function isTrackSelected(trackIndex: number) {
     : rangeContains(selectionRanges.value, trackIndex);
 }
 
-function isGroupSelected(group: LibraryAlbumGroup) {
+function isTrackIncludedBySelectedAlbum(trackIndex: number) {
+  if (!isTrackSelected(trackIndex)) {
+    return false;
+  }
+  return [...selectedAlbumRanges.value.values()].some((range) =>
+    rangeContains([range], trackIndex) && rangeFullyCovered(selectionRanges.value, range));
+}
+
+function isGroupRangeSelected(group: LibraryAlbumGroup) {
   const range = { start: group.startIndex, end: group.endIndex };
   return selectAll.value
     ? !rangesIntersect(excludedRanges.value, range)
     : rangeFullyCovered(selectionRanges.value, range);
+}
+
+function isGroupSelected(group: LibraryAlbumGroup) {
+  return isGroupRangeSelected(group)
+    && (selectAll.value || selectedAlbumRanges.value.has(group.id));
 }
 
 async function createPlaybackQueue(
@@ -833,6 +881,7 @@ async function handleGridKeydown(event: KeyboardEvent) {
     selectAll.value = true;
     selectionRanges.value = [];
     excludedRanges.value = [];
+    selectedAlbumRanges.value = new Map();
     selectionAnchor.value = 0;
     focusedVirtualIndex.value = virtualTotal.value ? 0 : null;
     return;
@@ -879,18 +928,28 @@ async function handleGridKeydown(event: KeyboardEvent) {
   if (item?.kind === "track" && item.trackIndex !== null) {
     updateKeyboardSelection(event, item.trackIndex);
   } else if (item?.kind === "albumHeader" && item.group) {
-    updateKeyboardSelection(event, item.group.startIndex, item.group.endIndex);
+    updateKeyboardSelection(event, item.group.startIndex, item.group.endIndex, item.group);
   }
   rowVirtualizer.value.scrollToIndex(nextIndex, { align: "auto" });
 }
 
-function updateKeyboardSelection(event: KeyboardEvent, start: number, end = start) {
+function updateKeyboardSelection(
+  event: KeyboardEvent,
+  start: number,
+  end = start,
+  group: LibraryAlbumGroup | null = null,
+) {
   const target = event.shiftKey && selectionAnchor.value !== null
     ? normalizedRange(selectionAnchor.value, start < selectionAnchor.value ? start : end)
     : { start, end };
   selectAll.value = false;
   excludedRanges.value = [];
   selectionRanges.value = [target];
+  if (group) {
+    markAlbumSelected(group, false);
+  } else {
+    selectedAlbumRanges.value = new Map();
+  }
   if (!event.shiftKey) {
     selectionAnchor.value = start;
   }
@@ -899,6 +958,7 @@ function updateKeyboardSelection(event: KeyboardEvent, start: number, end = star
 function clearSelection() {
   selectionRanges.value = [];
   excludedRanges.value = [];
+  selectedAlbumRanges.value = new Map();
   selectAll.value = false;
   selectionAnchor.value = null;
   focusedVirtualIndex.value = null;
@@ -1649,7 +1709,11 @@ defineExpose({ refresh: runQuery, startFirstTrack, updatePlayCount });
                 <span class="truncate text-sm font-semibold" :title="row.item.group.title || 'Ungrouped tracks'">
                   {{ row.item.group.title || "Ungrouped tracks" }}
                 </span>
-                <span v-if="row.item.group.year" class="shrink-0 tabular-nums text-base-content/55">
+                <span
+                  v-if="row.item.group.year"
+                  class="shrink-0 tabular-nums"
+                  :class="isGroupSelected(row.item.group) ? 'text-neutral-content/60' : 'text-base-content/55'"
+                >
                   {{ row.item.group.year }}
                 </span>
                 <span
@@ -1677,7 +1741,10 @@ defineExpose({ refresh: runQuery, startFirstTrack, updatePlayCount });
                   <Info :size="13" aria-hidden="true" />
                 </button>
               </div>
-              <div class="mt-0.5 flex min-w-0 items-center gap-2 text-base-content/60">
+              <div
+                class="mt-0.5 flex min-w-0 items-center gap-2"
+                :class="isGroupSelected(row.item.group) ? 'text-neutral-content/60' : 'text-base-content/60'"
+              >
                 <span class="truncate">{{ row.item.group.albumArtist || (row.item.group.isUngrouped ? 'Missing album metadata' : 'Unknown artist') }}</span>
                 <span class="shrink-0">·</span>
                 <span class="shrink-0 tabular-nums">
@@ -1708,7 +1775,9 @@ defineExpose({ refresh: runQuery, startFirstTrack, updatePlayCount });
             :class="[
               row.item.trackIndex % 2 === 1 ? 'bg-base-200/35' : 'bg-base-100',
               isTrackSelected(row.item.trackIndex)
-                ? 'bg-neutral text-neutral-content'
+                ? isTrackIncludedBySelectedAlbum(row.item.trackIndex)
+                  ? 'border-l-2 border-l-neutral bg-neutral/15 text-base-content'
+                  : 'bg-neutral text-neutral-content'
                 : 'hover:bg-base-200',
               activeTrackId === row.item.track.id && !isTrackSelected(row.item.trackIndex) ? 'bg-base-300' : '',
               focusedVirtualIndex === row.virtual.index ? 'outline outline-1 -outline-offset-1 outline-base-content/40' : '',
