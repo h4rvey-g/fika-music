@@ -116,6 +116,8 @@ export type OnlineDownloadItem = { itemId: string, position: number, state: Onli
 
 export type OnlineDownloadItemState = "queued" | "resolving" | "downloading" | "paused" | "completed" | "skipped" | "failed" | "cancelled";
 
+export type OnlineDownloadProgressEvent = { taskId: string, itemId: string, state: OnlineDownloadItemState, bytesDownloaded: number, totalBytes: number | null, };
+
 export type OnlineDownloadState = "queued" | "running" | "paused" | "completed" | "completedWithErrors" | "cancelled";
 
 export type OnlineDownloadTask = { taskId: string, kind: string, title: string, state: OnlineDownloadState, destination: string, selectedAudioSourceId: string | null, totalItems: number, completedItems: number, skippedItems: number, failedItems: number, createdAt: number, updatedAt: number, items: Array<OnlineDownloadItem>, };

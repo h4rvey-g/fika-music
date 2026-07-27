@@ -40,6 +40,7 @@ import {
   listOnlineMusicChannels,
   listOnlineDownloadTasks,
   listenOnlineDownloadCompletions,
+  listenOnlineDownloadProgress,
   listenOnlineDownloadTasks,
   listenOnlineMusicSearch,
   onlinePlaylistDetailError,
@@ -53,6 +54,7 @@ import {
   type OnlineAlbum,
   type OnlineArtist,
   type OnlineMusicSettings,
+  type OnlineDownloadProgressEvent,
   type OnlineDownloadTask,
   type MusicRecommendationKind,
   type OnlineRecommendationsResult,
@@ -205,6 +207,7 @@ const favoriteTrackIdentities = ref<Set<string>>(new Set());
 
 let unlistenSearch: (() => void) | null = null;
 let unlistenDownloads: (() => void) | null = null;
+let unlistenDownloadProgress: (() => void) | null = null;
 let unlistenDownloadCompletions: (() => void) | null = null;
 let searchGeneration = 0;
 let suggestionGeneration = 0;
@@ -278,9 +281,15 @@ const playlistPickerActionId = computed(() => {
 });
 
 onMounted(async () => {
-  [unlistenSearch, unlistenDownloads, unlistenDownloadCompletions] = await Promise.all([
+  [
+    unlistenSearch,
+    unlistenDownloads,
+    unlistenDownloadProgress,
+    unlistenDownloadCompletions,
+  ] = await Promise.all([
     listenOnlineMusicSearch(onSearchSection),
     listenOnlineDownloadTasks(upsertDownloadTask),
+    listenOnlineDownloadProgress(applyDownloadProgress),
     listenOnlineDownloadCompletions((task) => {
       completionMessage.value = `${task.title}: ${task.completedItems} downloaded`;
       window.setTimeout(() => {
@@ -315,6 +324,7 @@ watch(
 onBeforeUnmount(() => {
   unlistenSearch?.();
   unlistenDownloads?.();
+  unlistenDownloadProgress?.();
   unlistenDownloadCompletions?.();
   if (suggestionTimer !== null) window.clearTimeout(suggestionTimer);
   if (suggestionRequestId) void cancelSourceRequest(suggestionRequestId);
@@ -1209,6 +1219,27 @@ function upsertDownloadTask(task: OnlineDownloadTask) {
   }
 }
 
+function applyDownloadProgress(progress: OnlineDownloadProgressEvent) {
+  const taskIndex = downloadTasks.value.findIndex((task) => task.taskId === progress.taskId);
+  if (taskIndex < 0) return;
+  const task = downloadTasks.value[taskIndex];
+  if (task.state !== "running") return;
+  const itemIndex = task.items.findIndex((item) => item.itemId === progress.itemId);
+  if (itemIndex < 0) return;
+  const item = task.items[itemIndex];
+  if (["paused", "completed", "skipped", "failed", "cancelled"].includes(item.state)) return;
+  if (item.state === "downloading" && progress.state === "resolving") return;
+
+  const items = [...task.items];
+  items[itemIndex] = {
+    ...item,
+    state: progress.state,
+    bytesDownloaded: Math.max(0, progress.bytesDownloaded),
+    totalBytes: progress.totalBytes === null ? null : Math.max(0, progress.totalBytes),
+  };
+  downloadTasks.value[taskIndex] = { ...task, items };
+}
+
 async function runDownloadAction(
   task: OnlineDownloadTask,
   action: "start" | "pause" | "cancel",
@@ -1253,9 +1284,86 @@ async function refreshAndRetryDownloadItem(task: OnlineDownloadTask, itemId: str
 
 function taskProgress(task: OnlineDownloadTask) {
   if (!task.totalItems) return 0;
-  return Math.round(
-    ((task.completedItems + task.skippedItems + task.failedItems) / task.totalItems) * 100,
+  const terminalItems = task.completedItems + task.skippedItems + task.failedItems;
+  const activeProgress = task.items.reduce((total, item) => {
+    if (item.state !== "downloading" || !item.totalBytes) return total;
+    return total + Math.min(1, Math.max(0, item.bytesDownloaded / item.totalBytes));
+  }, 0);
+  return Math.round(Math.min(1, (terminalItems + activeProgress) / task.totalItems) * 100);
+}
+
+function taskProgressValue(task: OnlineDownloadTask) {
+  const indeterminate = task.items.some((item) =>
+    (item.state === "resolving")
+    || (item.state === "downloading" && !item.totalBytes)
   );
+  const progress = taskProgress(task);
+  return indeterminate && progress === 0 ? undefined : progress;
+}
+
+function taskProgressText(task: OnlineDownloadTask) {
+  const progress = taskProgress(task);
+  const isResolving = task.items.some((item) => item.state === "resolving");
+  const hasUnknownActiveSize = task.items.some((item) =>
+    item.state === "downloading" && !item.totalBytes
+  );
+  if (progress === 0 && isResolving) return "Resolving";
+  if (progress === 0 && hasUnknownActiveSize) return "Downloading";
+  return `${progress}%${isResolving || hasUnknownActiveSize ? "+" : ""}`;
+}
+
+function activeDownloadBytes(task: OnlineDownloadTask) {
+  const active = task.items.filter((item) => item.state === "downloading");
+  if (!active.length) return null;
+  const downloaded = active.reduce((total, item) => total + item.bytesDownloaded, 0);
+  const allSizesKnown = active.every((item) => item.totalBytes !== null && item.totalBytes > 0);
+  if (!allSizesKnown) {
+    return downloaded > 0 ? `${formatBytes(downloaded)} downloaded` : "Downloading";
+  }
+  const total = active.reduce((sum, item) => sum + (item.totalBytes ?? 0), 0);
+  return `${formatBytes(downloaded)} of ${formatBytes(total)} active`;
+}
+
+function itemProgressText(item: OnlineDownloadTask["items"][number]) {
+  if (item.totalBytes) {
+    const percentage = Math.round(
+      Math.min(1, Math.max(0, item.bytesDownloaded / item.totalBytes)) * 100,
+    );
+    return `${percentage}% · ${formatBytes(item.bytesDownloaded)} / ${formatBytes(item.totalBytes)}`;
+  }
+  return item.bytesDownloaded > 0 ? formatBytes(item.bytesDownloaded) : null;
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / (1024 ** exponent);
+  return `${value >= 10 || Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)} ${units[exponent]}`;
+}
+
+function downloadTaskStateLabel(state: OnlineDownloadTask["state"]) {
+  return {
+    queued: "Queued",
+    running: "Downloading",
+    paused: "Paused",
+    completed: "Complete",
+    completedWithErrors: "Finished with errors",
+    cancelled: "Cancelled",
+  }[state];
+}
+
+function downloadItemStateLabel(state: OnlineDownloadTask["items"][number]["state"]) {
+  return {
+    queued: "Waiting",
+    resolving: "Resolving",
+    downloading: "Downloading",
+    paused: "Paused",
+    completed: "Complete",
+    skipped: "Skipped",
+    failed: "Failed",
+    cancelled: "Cancelled",
+  }[state];
 }
 
 function backToResults() {
@@ -1440,16 +1548,24 @@ defineExpose({
               <div class="flex items-center gap-2">
                 <h3 class="min-w-0 flex-1 truncate text-sm font-medium">{{ task.title }}</h3>
                 <span class="badge badge-sm" :class="{ 'badge-error': task.state === 'completedWithErrors', 'badge-success': task.state === 'completed' }">
-                  {{ task.state }}
+                  {{ downloadTaskStateLabel(task.state) }}
                 </span>
               </div>
-              <div class="mt-1 flex items-center gap-2 text-xs text-base-content/55">
+              <div class="mt-1 flex min-w-0 items-center gap-2 text-xs text-base-content/55">
                 <span>{{ task.completedItems }} complete</span>
                 <span>{{ task.skippedItems }} skipped</span>
                 <span v-if="task.failedItems">{{ task.failedItems }} failed</span>
-                <span class="ml-auto tabular-nums">{{ taskProgress(task) }}%</span>
+                <span v-if="activeDownloadBytes(task)" class="hidden min-w-0 truncate sm:inline">
+                  {{ activeDownloadBytes(task) }}
+                </span>
+                <span class="ml-auto shrink-0 tabular-nums">{{ taskProgressText(task) }}</span>
               </div>
-              <progress class="progress progress-primary mt-1 h-1.5 w-full" :value="taskProgress(task)" max="100"></progress>
+              <progress
+                class="progress progress-primary mt-1 h-1.5 w-full"
+                :value="taskProgressValue(task)"
+                max="100"
+                :aria-label="`${task.title} progress`"
+              ></progress>
             </div>
             <div class="flex shrink-0 gap-1">
               <button
@@ -1489,35 +1605,41 @@ defineExpose({
             </div>
           </div>
           <ul class="mt-2 divide-y divide-base-300/70 pl-7">
-            <li v-for="item in task.items" :key="item.itemId" class="flex min-w-0 items-center gap-2 py-1.5 text-xs">
-              <span class="w-24 shrink-0 text-base-content/50">{{ item.state }}</span>
+            <li
+              v-for="item in task.items"
+              :key="item.itemId"
+              class="grid min-w-0 grid-cols-[6rem_minmax(0,1fr)] items-center gap-x-2 gap-y-1 py-1.5 text-xs sm:flex"
+            >
+              <span class="w-24 shrink-0 text-base-content/50">{{ downloadItemStateLabel(item.state) }}</span>
               <span class="min-w-0 flex-1 truncate">{{ item.track.artist }} - {{ item.track.title }}</span>
-              <span v-if="item.totalBytes" class="shrink-0 tabular-nums text-base-content/45">
-                {{ Math.round((item.bytesDownloaded / item.totalBytes) * 100) }}%
-              </span>
-              <span v-if="item.message" class="hidden max-w-56 truncate text-error lg:block" :title="item.message">{{ item.message }}</span>
-              <button
-                v-if="item.state === 'failed' && task.state !== 'running'"
-                class="btn btn-square btn-ghost btn-xs"
-                type="button"
-                :disabled="downloadActionId === item.itemId"
-                :aria-label="`Refresh candidates for ${item.track.title}`"
-                title="Refresh candidates"
-                @click="refreshAndRetryDownloadItem(task, item.itemId)"
-              >
-                <Search :class="{ 'animate-pulse': downloadActionId === item.itemId }" :size="13" aria-hidden="true" />
-              </button>
-              <button
-                v-if="(item.state === 'failed' || item.state === 'cancelled') && task.state !== 'running'"
-                class="btn btn-square btn-ghost btn-xs"
-                type="button"
-                :disabled="downloadActionId === item.itemId"
-                :aria-label="`Retry ${item.track.title}`"
-                title="Retry"
-                @click="retryDownloadItem(task, item.itemId)"
-              >
-                <RefreshCw :class="{ 'animate-spin': downloadActionId === item.itemId }" :size="13" aria-hidden="true" />
-              </button>
+              <div class="col-start-2 flex min-w-0 items-center justify-end gap-1 sm:contents">
+                <span v-if="itemProgressText(item)" class="shrink-0 tabular-nums text-base-content/45">
+                  {{ itemProgressText(item) }}
+                </span>
+                <span v-if="item.message" class="hidden max-w-56 truncate text-error lg:block" :title="item.message">{{ item.message }}</span>
+                <button
+                  v-if="item.state === 'failed' && task.state !== 'running'"
+                  class="btn btn-square btn-ghost btn-xs"
+                  type="button"
+                  :disabled="downloadActionId === item.itemId"
+                  :aria-label="`Refresh candidates for ${item.track.title}`"
+                  title="Refresh candidates"
+                  @click="refreshAndRetryDownloadItem(task, item.itemId)"
+                >
+                  <Search :class="{ 'animate-pulse': downloadActionId === item.itemId }" :size="13" aria-hidden="true" />
+                </button>
+                <button
+                  v-if="(item.state === 'failed' || item.state === 'cancelled') && task.state !== 'running'"
+                  class="btn btn-square btn-ghost btn-xs"
+                  type="button"
+                  :disabled="downloadActionId === item.itemId"
+                  :aria-label="`Retry ${item.track.title}`"
+                  title="Retry"
+                  @click="retryDownloadItem(task, item.itemId)"
+                >
+                  <RefreshCw :class="{ 'animate-spin': downloadActionId === item.itemId }" :size="13" aria-hidden="true" />
+                </button>
+              </div>
             </li>
           </ul>
         </section>

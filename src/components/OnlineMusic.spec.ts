@@ -867,6 +867,97 @@ describe("Online Music workspace", () => {
     wrapper.unmount();
   });
 
+  it("includes the active file bytes in task progress updates", async () => {
+    const activeTask: OnlineDownloadTask = {
+      taskId: "progress-task",
+      kind: "selection",
+      title: "2 selected tracks",
+      state: "running",
+      destination: "/downloads",
+      selectedAudioSourceId: null,
+      totalItems: 2,
+      completedItems: 0,
+      skippedItems: 0,
+      failedItems: 0,
+      createdAt: 1,
+      updatedAt: 1,
+      items: [
+        {
+          itemId: "active-item",
+          position: 0,
+          state: "resolving",
+          track: track(1),
+          targetPath: null,
+          message: null,
+          bytesDownloaded: 0,
+          totalBytes: null,
+        },
+        {
+          itemId: "queued-item",
+          position: 1,
+          state: "queued",
+          track: track(2),
+          targetPath: null,
+          message: null,
+          bytesDownloaded: 0,
+          totalBytes: null,
+        },
+      ],
+    };
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "get_online_music_settings") return Promise.resolve(settings);
+      if (command === "list_online_download_tasks") return Promise.resolve([activeTask]);
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+    await wrapper.findAll('[role="tab"]')[1].trigger("click");
+
+    eventListeners.get("online-music:download-progress")?.({
+      payload: {
+        taskId: "progress-task",
+        itemId: "active-item",
+        state: "downloading",
+        bytesDownloaded: 5 * 1024 * 1024,
+        totalBytes: 10 * 1024 * 1024,
+      },
+    });
+    await nextTick();
+
+    const progress = wrapper.get('progress[aria-label="2 selected tracks progress"]');
+    expect(progress.attributes("value")).toBe("25");
+    expect(wrapper.text()).toContain("5 MB / 10 MB");
+
+    eventListeners.get("online-music:download-task")?.({
+      payload: {
+        ...activeTask,
+        state: "completed",
+        completedItems: 2,
+        items: activeTask.items.map((item) => ({
+          ...item,
+          state: "completed",
+          bytesDownloaded: 10 * 1024 * 1024,
+          totalBytes: 10 * 1024 * 1024,
+        })),
+      },
+    });
+    eventListeners.get("online-music:download-progress")?.({
+      payload: {
+        taskId: "progress-task",
+        itemId: "active-item",
+        state: "downloading",
+        bytesDownloaded: 6 * 1024 * 1024,
+        totalBytes: 10 * 1024 * 1024,
+      },
+    });
+    await nextTick();
+
+    expect(wrapper.get('progress[aria-label="2 selected tracks progress"]').attributes("value"))
+      .toBe("100");
+    expect(wrapper.text()).toContain("Complete");
+    wrapper.unmount();
+  });
+
   it("refreshes a failed item snapshot before retrying it", async () => {
     const failed = failedDownloadTask();
     tauriMocks.invoke.mockImplementation((command: string) => {

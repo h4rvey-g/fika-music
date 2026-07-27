@@ -138,6 +138,17 @@ pub struct OnlineDownloadTask {
     pub items: Vec<OnlineDownloadItem>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct OnlineDownloadProgressEvent {
+    pub task_id: String,
+    pub item_id: String,
+    pub state: OnlineDownloadItemState,
+    pub bytes_downloaded: u64,
+    pub total_bytes: Option<u64>,
+}
+
 pub fn recover_interrupted_tasks(
     connection: &Connection,
     updated_at: i64,
@@ -166,7 +177,7 @@ pub fn recover_interrupted_tasks(
     connection.execute(
         "UPDATE online_download_items
          SET state = 'paused', message = 'Paused after application restart',
-             temporary_path = NULL, bytes_downloaded = 0
+             temporary_path = NULL, bytes_downloaded = 0, total_bytes = NULL
          WHERE state IN ('queued', 'resolving', 'downloading')",
         [],
     )?;
@@ -387,7 +398,8 @@ pub fn reset_resumable_items(
     task_id: &str,
 ) -> Result<(), OnlineDownloadError> {
     connection.execute(
-        "UPDATE online_download_items SET state = 'queued', message = NULL
+        "UPDATE online_download_items SET state = 'queued', message = NULL,
+                bytes_downloaded = 0, total_bytes = NULL, temporary_path = NULL
          WHERE task_id = ?1 AND state = 'paused'",
         [task_id],
     )?;
@@ -460,7 +472,8 @@ pub fn claim_next_item(
         return Ok(None);
     };
     transaction.execute(
-        "UPDATE online_download_items SET state = 'resolving', message = NULL
+        "UPDATE online_download_items SET state = 'resolving', message = NULL,
+                bytes_downloaded = 0, total_bytes = NULL, temporary_path = NULL
          WHERE item_id = ?1 AND state = 'queued'",
         [&item_id],
     )?;
@@ -491,29 +504,31 @@ pub fn set_item_downloading(
     item_id: &str,
     temporary_path: &Path,
     total_bytes: Option<u64>,
-) -> Result<(), OnlineDownloadError> {
-    connection.execute(
+) -> Result<bool, OnlineDownloadError> {
+    let changed = connection.execute(
         "UPDATE online_download_items SET state = 'downloading', temporary_path = ?2,
-                total_bytes = ?3, message = NULL WHERE item_id = ?1",
+                bytes_downloaded = 0, total_bytes = ?3, message = NULL
+         WHERE item_id = ?1 AND state = 'resolving'",
         params![
             item_id,
             temporary_path.to_string_lossy(),
             total_bytes.map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
         ],
     )?;
-    Ok(())
+    Ok(changed > 0)
 }
 
 pub fn update_item_progress(
     connection: &Connection,
     item_id: &str,
     bytes_downloaded: u64,
-) -> Result<(), OnlineDownloadError> {
-    connection.execute(
-        "UPDATE online_download_items SET bytes_downloaded = ?2 WHERE item_id = ?1",
+) -> Result<bool, OnlineDownloadError> {
+    let changed = connection.execute(
+        "UPDATE online_download_items SET bytes_downloaded = ?2
+         WHERE item_id = ?1 AND state = 'downloading'",
         params![item_id, i64::try_from(bytes_downloaded).unwrap_or(i64::MAX)],
     )?;
-    Ok(())
+    Ok(changed > 0)
 }
 
 pub fn mark_pending_items(
@@ -524,7 +539,7 @@ pub fn mark_pending_items(
 ) -> Result<(), OnlineDownloadError> {
     connection.execute(
         "UPDATE online_download_items SET state = ?2, message = ?3,
-                temporary_path = NULL, bytes_downloaded = 0
+                temporary_path = NULL, bytes_downloaded = 0, total_bytes = NULL
          WHERE task_id = ?1 AND state IN ('queued', 'resolving', 'downloading', 'paused')",
         params![task_id, state.as_db(), message],
     )?;
@@ -848,6 +863,15 @@ mod tests {
         let item = claim_next_item(&connection, &created.task_id)
             .expect("item should claim")
             .expect("item should exist");
+        assert!(set_item_downloading(
+            &connection,
+            &item.item_id,
+            &directory.path().join("partial.mp3"),
+            Some(100),
+        )
+        .expect("item should begin downloading"));
+        assert!(update_item_progress(&connection, &item.item_id, 50)
+            .expect("item progress should update"));
         mark_pending_items(
             &connection,
             &created.task_id,
@@ -855,6 +879,8 @@ mod tests {
             "Paused by user",
         )
         .expect("item should pause");
+        assert!(!update_item_progress(&connection, &item.item_id, 75)
+            .expect("late progress update should be ignored"));
 
         set_item_state(
             &connection,
@@ -871,6 +897,8 @@ mod tests {
             .expect("task should load")
             .expect("task should exist");
         assert_eq!(paused.items[0].state, OnlineDownloadItemState::Paused);
+        assert_eq!(paused.items[0].bytes_downloaded, 0);
+        assert_eq!(paused.items[0].total_bytes, None);
     }
 
     #[test]
@@ -938,11 +966,20 @@ mod tests {
         let item = claim_next_item(&connection, &created.task_id)
             .expect("item should claim")
             .expect("item should exist");
-        set_item_downloading(&connection, &item.item_id, &partial, Some(100))
-            .expect("item should begin downloading");
+        assert!(
+            set_item_downloading(&connection, &item.item_id, &partial, Some(100))
+                .expect("item should begin downloading")
+        );
+        assert!(update_item_progress(&connection, &item.item_id, 50)
+            .expect("item progress should persist"));
 
         recover_interrupted_tasks(&connection, 20).expect("task should recover");
 
         assert!(!partial.exists());
+        let recovered = task(&connection, &created.task_id)
+            .expect("task should load")
+            .expect("task should exist");
+        assert_eq!(recovered.items[0].bytes_downloaded, 0);
+        assert_eq!(recovered.items[0].total_bytes, None);
     }
 }

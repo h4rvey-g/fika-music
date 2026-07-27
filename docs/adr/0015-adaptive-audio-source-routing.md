@@ -1,4 +1,4 @@
-# Adaptive Audio Source routing and next-track preparation
+# Adaptive Audio Source routing, preparation, and downloads
 
 Status: accepted
 
@@ -13,6 +13,12 @@ Source had recently succeeded for the same channel and quality.
 
 Queue pagination was loaded ahead of time, but the next song's playback URL and
 media were not prepared until the current song ended.
+
+Online downloads used the same persisted selection mode but Automatic mode had
+no learned ordering: it fell back to source name order for every item. Download
+task events also contained only occasional full task snapshots, so the task bar
+counted terminal files and ignored the byte progress already stored for active
+files.
 
 Mature routing systems combine the following mechanisms:
 
@@ -90,6 +96,31 @@ playback recovery does not repeat the same URL.
   change.
 - Shuffle mode does not preload because there is no deterministic next item.
 
+### Download routing and progress
+
+- Download workers own a separate, process-scoped health router using the same
+  `Audio Source x channel x quality` key, EWMA latency, recent-success affinity,
+  and exponential temporary ejection policy as playback. Browser playback and
+  Rust download observations are not mixed because their probes, clients, and
+  cancellation lifecycles differ.
+- Automatic downloads start the highest-ranked source immediately and at most
+  one backup after a dynamic 400-1200 ms delay. A quick primary failure starts
+  the backup immediately; the first success cancels the other source layer.
+- Manual downloads preserve the selected Audio Source captured by the task,
+  followed by the configured fallback priority. Short-lived health does not
+  reorder that explicit task snapshot.
+- URL probe outcomes update route health. A failed media request, unsupported
+  response type, broken stream, or empty response also penalizes the winning
+  route, so a URL that probes successfully but cannot be downloaded does not
+  remain preferred indefinitely.
+- Workers emit a compact byte-progress event at most every 250 ms while keeping
+  full task events for state transitions. Database updates and events are
+  conditional on the item still being in `downloading`, preventing a late
+  network read from reviving progress after pause or cancellation.
+- Batch progress gives each item equal weight and includes the byte fraction of
+  every concurrent active item. Unknown content lengths remain indeterminate
+  and display transferred bytes without claiming an exact percentage.
+
 ## Consequences
 
 - A recently successful source for a channel is normally selected first on the
@@ -102,6 +133,10 @@ playback recovery does not repeat the same URL.
   Manual mode.
 - Browser media preloading is best effort. The resolved URL still removes most
   transition work when the browser declines to retain buffered bytes.
+- Download batches learn a working source after real traffic and expose smooth
+  progress without repeatedly serializing the complete task and every track.
+  The first unknown route can still be explored, while bounded hedging limits
+  the initial tail latency and additional provider load.
 - The current implementation does not persist or expose routing telemetry.
   Future tuning should be driven by measured startup latency, hedge rate,
   cancellation rate, and recovery success rather than by adding active probes

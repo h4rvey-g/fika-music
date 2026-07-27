@@ -7,6 +7,7 @@ import type {
   OnlineAlbum,
   OnlineArtist,
   OnlineChannel,
+  OnlineDownloadProgressEvent,
   OnlineDownloadTask,
   OnlineMusicSettings,
   OnlinePlaylist,
@@ -35,6 +36,7 @@ export type {
   OnlineAlbum,
   OnlineArtist,
   OnlineChannel,
+  OnlineDownloadProgressEvent,
   OnlineDownloadTask,
   OnlineMusicSettings,
   OnlinePlaylist,
@@ -51,6 +53,7 @@ export type {
 
 export const ONLINE_SEARCH_SECTION_EVENT = "online-music:search-section";
 export const ONLINE_DOWNLOAD_TASK_EVENT = "online-music:download-task";
+export const ONLINE_DOWNLOAD_PROGRESS_EVENT = "online-music:download-progress";
 export const ONLINE_DOWNLOAD_COMPLETED_EVENT = "online-music:download-completed";
 
 export type OnlinePlayback = {
@@ -172,6 +175,14 @@ export function listenOnlineDownloadTasks(
   handler: (task: OnlineDownloadTask) => void,
 ): Promise<UnlistenFn> {
   return listen<OnlineDownloadTask>(ONLINE_DOWNLOAD_TASK_EVENT, (event) => {
+    handler(event.payload);
+  });
+}
+
+export function listenOnlineDownloadProgress(
+  handler: (progress: OnlineDownloadProgressEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<OnlineDownloadProgressEvent>(ONLINE_DOWNLOAD_PROGRESS_EVENT, (event) => {
     handler(event.payload);
   });
 }

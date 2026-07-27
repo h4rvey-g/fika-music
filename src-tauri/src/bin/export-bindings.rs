@@ -9,7 +9,8 @@ use fika_music_lib::netease::{
     NeteaseAccount, NeteaseMutationAudit, NeteaseQrLoginPoll, NeteaseQrLoginStart,
 };
 use fika_music_lib::online_download::{
-    OnlineDownloadItem, OnlineDownloadItemState, OnlineDownloadState, OnlineDownloadTask,
+    OnlineDownloadItem, OnlineDownloadItemState, OnlineDownloadProgressEvent, OnlineDownloadState,
+    OnlineDownloadTask,
 };
 use fika_music_lib::online_music::{
     AudioSourceSelectionMode, OnlineAlbum, OnlineArtist, OnlineChannel, OnlineMusicSettings,
@@ -134,6 +135,7 @@ fn generate(output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     export_all::<OnlineDownloadState>(&config)?;
     export_all::<OnlineDownloadItemState>(&config)?;
     export_all::<OnlineDownloadItem>(&config)?;
+    export_all::<OnlineDownloadProgressEvent>(&config)?;
     export_all::<OnlineDownloadTask>(&config)?;
     append_command_names(&output_file)?;
     Ok(())

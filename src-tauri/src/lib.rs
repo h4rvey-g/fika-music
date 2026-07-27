@@ -23,6 +23,7 @@ mod account_commands;
 mod album_art;
 pub mod audio_source_system;
 mod database;
+mod download_source_router;
 pub mod kugou;
 mod library;
 mod library_watcher;
@@ -73,6 +74,7 @@ const ALBUM_ART_PROGRESS_EVENT: &str = "library:album-art-progress";
 const METADATA_LOOKUP_PROGRESS_EVENT: &str = "library:metadata-lookup-progress";
 const ONLINE_SEARCH_SECTION_EVENT: &str = "online-music:search-section";
 const ONLINE_DOWNLOAD_TASK_EVENT: &str = "online-music:download-task";
+const ONLINE_DOWNLOAD_PROGRESS_EVENT: &str = "online-music:download-progress";
 const ONLINE_DOWNLOAD_COMPLETED_EVENT: &str = "online-music:download-completed";
 const LIBRARY_METADATA_VERSION: i64 = 1;
 const LIBRARY_FOLDER_SETTING_KEY: &str = "local_music_folder";
@@ -333,6 +335,7 @@ struct AppState {
     library_watcher: Mutex<Option<LibraryWatcher>>,
     source_requests: source_request_registry::SourceRequestRegistry,
     online_download_requests: Mutex<BTreeMap<String, source_runtime::SourceCancellationToken>>,
+    download_source_router: Mutex<download_source_router::DownloadSourceRouter>,
     online_music_cache: Arc<online_music::OnlineMusicCache>,
     online_executor: Arc<online_execution::OnlineExecutor>,
     audio_source_registry: Mutex<AudioSourceRegistry>,
@@ -477,6 +480,9 @@ impl AppState {
             library_watcher: Mutex::new(None),
             source_requests: source_request_registry::SourceRequestRegistry::default(),
             online_download_requests: Mutex::new(BTreeMap::new()),
+            download_source_router: Mutex::new(
+                download_source_router::DownloadSourceRouter::default(),
+            ),
             online_music_cache: Arc::new(online_music::OnlineMusicCache::default()),
             online_executor,
             audio_source_registry: Mutex::new(audio_source_registry),
@@ -830,6 +836,50 @@ fn emit_online_download_task(app: &AppHandle, task: &online_download::OnlineDown
     let _ = app.emit(ONLINE_DOWNLOAD_TASK_EVENT, task);
 }
 
+fn emit_online_download_progress(
+    app: &AppHandle,
+    task_id: &str,
+    item_id: &str,
+    state: online_download::OnlineDownloadItemState,
+    bytes_downloaded: u64,
+    total_bytes: Option<u64>,
+) {
+    let _ = app.emit(
+        ONLINE_DOWNLOAD_PROGRESS_EVENT,
+        online_download::OnlineDownloadProgressEvent {
+            task_id: task_id.to_owned(),
+            item_id: item_id.to_owned(),
+            state,
+            bytes_downloaded,
+            total_bytes,
+        },
+    );
+}
+
+fn persist_online_download_progress(
+    app: &AppHandle,
+    task_id: &str,
+    item_id: &str,
+    bytes_downloaded: u64,
+    total_bytes: Option<u64>,
+) {
+    let state = app.state::<AppState>();
+    let persisted = state.db.lock().is_ok_and(|db| {
+        online_download::update_item_progress(&db, item_id, bytes_downloaded)
+            .is_ok_and(|updated| updated)
+    });
+    if persisted {
+        emit_online_download_progress(
+            app,
+            task_id,
+            item_id,
+            online_download::OnlineDownloadItemState::Downloading,
+            bytes_downloaded,
+            total_bytes,
+        );
+    }
+}
+
 fn run_online_download_task(
     app: AppHandle,
     task_id: String,
@@ -901,6 +951,14 @@ fn online_download_worker(
             }
         };
         let Some(item) = item else { return };
+        emit_online_download_progress(
+            &app,
+            task_id,
+            &item.item_id,
+            online_download::OnlineDownloadItemState::Resolving,
+            0,
+            None,
+        );
         let outcome = download_online_item(&app, task_id, &item, &cancellation);
         let state = app.state::<AppState>();
         if let Ok(db) = state.db.lock() {
@@ -975,6 +1033,43 @@ struct ResolvedOnlineDownload {
     url: String,
     quality: source_runtime::SourceQuality,
     channel_name: String,
+    attempt: download_source_router::DownloadAttemptKey,
+}
+
+#[derive(Debug)]
+struct DownloadCandidateOutcome {
+    attempt: download_source_router::DownloadAttemptKey,
+    resolved: Option<ResolvedOnlineDownload>,
+    latency: Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DownloadResolutionPolicy<'a> {
+    qualities: &'a [source_runtime::SourceQuality],
+    selection_mode: online_music::AudioSourceSelectionMode,
+    layer_timeout: Duration,
+    deadline: Instant,
+}
+
+fn report_download_route_success(
+    app: &AppHandle,
+    attempt: download_source_router::DownloadAttemptKey,
+    latency: Duration,
+) {
+    let state = app.state::<AppState>();
+    if let Ok(mut router) = state.download_source_router.lock() {
+        router.report_success(attempt, latency, Instant::now());
+    };
+}
+
+fn report_download_route_failure(
+    app: &AppHandle,
+    attempt: download_source_router::DownloadAttemptKey,
+) {
+    let state = app.state::<AppState>();
+    if let Ok(mut router) = state.download_source_router.lock() {
+        router.report_failure(attempt, Instant::now());
+    };
 }
 
 fn download_online_item(
@@ -1024,44 +1119,65 @@ fn download_online_item(
             "No enabled search channel remains available for this track.".to_owned(),
         ));
     }
-    let sources = ordered_download_audio_sources(
-        audio_sources,
-        &settings.audio_source_priority,
-        task.selected_audio_source_id.as_deref(),
-        settings.audio_source_selection_mode,
-    );
+    let qualities = quality_fallback(settings.preferred_quality);
+    let sources = {
+        let state = app.state::<AppState>();
+        let mut router = state.download_source_router.lock().map_err(|_| {
+            OnlineItemDownloadError::Message("download source router lock was poisoned".to_owned())
+        })?;
+        router.order_sources(
+            audio_sources,
+            download_source_router::DownloadSourceOrder {
+                candidates: &candidates,
+                qualities: &qualities,
+                mode: settings.audio_source_selection_mode,
+                configured_priority: &settings.audio_source_priority,
+                selected_audio_source_id: task.selected_audio_source_id.as_deref(),
+                now: Instant::now(),
+            },
+        )
+    };
     let deadline = Instant::now() + Duration::from_secs(60);
     let resolved = resolve_online_download_url(
         app,
         &sources,
         &candidates,
-        settings.preferred_quality,
-        Duration::from_secs(settings.layer_timeout_seconds),
-        deadline,
+        DownloadResolutionPolicy {
+            qualities: &qualities,
+            selection_mode: settings.audio_source_selection_mode,
+            layer_timeout: Duration::from_secs(settings.layer_timeout_seconds),
+            deadline,
+        },
         cancellation,
     )?;
     if cancellation.is_cancelled() {
         return Err(OnlineItemDownloadError::Cancelled);
     }
 
-    let mut response = client
+    let response_result = client
         .get(&resolved.url)
         .timeout(Duration::from_secs(15 * 60))
         .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .map_err(|error| {
-            OnlineItemDownloadError::Message(format!("media download failed: {error}"))
-        })?;
+        .and_then(reqwest::blocking::Response::error_for_status);
+    let mut response = match response_result {
+        Ok(response) => response,
+        Err(error) => {
+            report_download_route_failure(app, resolved.attempt.clone());
+            return Err(OnlineItemDownloadError::Message(format!(
+                "media download failed: {error}"
+            )));
+        }
+    };
     let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok());
-    let extension =
-        media_extension(content_type, &resolved.url, resolved.quality).ok_or_else(|| {
-            OnlineItemDownloadError::Message(
-                "media type is not a supported audio format".to_owned(),
-            )
-        })?;
+    let Some(extension) = media_extension(content_type, &resolved.url, resolved.quality) else {
+        report_download_route_failure(app, resolved.attempt.clone());
+        return Err(OnlineItemDownloadError::Message(
+            "media type is not a supported audio format".to_owned(),
+        ));
+    };
     let filename = online_download::render_filename(
         &settings.filename_template,
         &item.track,
@@ -1073,10 +1189,8 @@ fn download_online_item(
     validate_download_conflict(&target)?;
 
     const MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_DOWNLOAD_BYTES)
-    {
+    let total_bytes = response.content_length();
+    if total_bytes.is_some_and(|length| length > MAX_DOWNLOAD_BYTES) {
         return Err(OnlineItemDownloadError::Message(
             "media download is larger than 2 GiB".to_owned(),
         ));
@@ -1085,27 +1199,42 @@ fn download_online_item(
         .prefix(".fika-download-")
         .suffix(&format!(".{extension}"))
         .tempfile_in(&destination)?;
-    {
+    let item_started = {
         let state = app.state::<AppState>();
-        if let Ok(db) = state.db.lock() {
-            let _ = online_download::set_item_downloading(
-                &db,
-                &item.item_id,
-                temporary.path(),
-                response.content_length(),
-            );
-        };
+        let db = state.db.lock().map_err(|_| {
+            OnlineItemDownloadError::Message("database lock was poisoned".to_owned())
+        })?;
+        online_download::set_item_downloading(&db, &item.item_id, temporary.path(), total_bytes)
+            .map_err(|error| OnlineItemDownloadError::Message(error.to_string()))?
+    };
+    if !item_started {
+        return Err(OnlineItemDownloadError::Cancelled);
     }
+    emit_online_download_progress(
+        app,
+        task_id,
+        &item.item_id,
+        online_download::OnlineDownloadItemState::Downloading,
+        0,
+        total_bytes,
+    );
     let mut buffer = [0_u8; 64 * 1024];
     let mut downloaded = 0_u64;
-    let mut last_persisted = 0_u64;
+    let mut last_progress_update = Instant::now();
+    const PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(250);
     loop {
         if cancellation.is_cancelled() {
             return Err(OnlineItemDownloadError::Cancelled);
         }
-        let count = response.read(&mut buffer).map_err(|error| {
-            OnlineItemDownloadError::Message(format!("media stream failed: {error}"))
-        })?;
+        let count = match response.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) => {
+                report_download_route_failure(app, resolved.attempt.clone());
+                return Err(OnlineItemDownloadError::Message(format!(
+                    "media stream failed: {error}"
+                )));
+            }
+        };
         if count == 0 {
             break;
         }
@@ -1116,19 +1245,18 @@ fn download_online_item(
             ));
         }
         temporary.write_all(&buffer[..count])?;
-        if downloaded.saturating_sub(last_persisted) >= 512 * 1024 {
-            let state = app.state::<AppState>();
-            if let Ok(db) = state.db.lock() {
-                let _ = online_download::update_item_progress(&db, &item.item_id, downloaded);
-            }
-            last_persisted = downloaded;
+        if last_progress_update.elapsed() >= PROGRESS_UPDATE_INTERVAL {
+            persist_online_download_progress(app, task_id, &item.item_id, downloaded, total_bytes);
+            last_progress_update = Instant::now();
         }
     }
     if downloaded == 0 {
+        report_download_route_failure(app, resolved.attempt);
         return Err(OnlineItemDownloadError::Message(
             "media download returned an empty file".to_owned(),
         ));
     }
+    persist_online_download_progress(app, task_id, &item.item_id, downloaded, total_bytes);
     temporary.flush()?;
     temporary.as_file().sync_all()?;
 
@@ -1147,59 +1275,11 @@ fn download_online_item(
     Ok((target, final_bytes, warning))
 }
 
-fn ordered_download_audio_sources(
-    mut records: Vec<AudioSourceRecord>,
-    priority: &[String],
-    selected: Option<&str>,
-    selection_mode: online_music::AudioSourceSelectionMode,
-) -> Vec<AudioSourceRecord> {
-    records.retain(|record| {
-        record.enabled
-            && record.state == audio_source_system::AudioSourceState::Enabled
-            && record.sources.iter().any(|source| {
-                source
-                    .actions
-                    .contains(&source_runtime::SourceAction::MusicUrl)
-            })
-    });
-    let order = download_source_order(priority, selected, selection_mode);
-    records.sort_by(|left, right| {
-        download_source_rank(&left.id, &order)
-            .cmp(&download_source_rank(&right.id, &order))
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    records
-}
-
-fn download_source_order(
-    priority: &[String],
-    selected: Option<&str>,
-    selection_mode: online_music::AudioSourceSelectionMode,
-) -> Vec<String> {
-    match selection_mode {
-        online_music::AudioSourceSelectionMode::Automatic => Vec::new(),
-        online_music::AudioSourceSelectionMode::Manual => selected
-            .into_iter()
-            .map(str::to_owned)
-            .chain(priority.iter().cloned())
-            .collect::<Vec<_>>(),
-    }
-}
-
-fn download_source_rank(id: &str, order: &[String]) -> usize {
-    order
-        .iter()
-        .position(|value| value == id)
-        .unwrap_or(order.len())
-}
-
 fn resolve_online_download_url(
     app: &AppHandle,
     sources: &[AudioSourceRecord],
     candidates: &[online_music::OnlineTrackCandidate],
-    preferred_quality: source_runtime::SourceQuality,
-    layer_timeout: Duration,
-    deadline: Instant,
+    policy: DownloadResolutionPolicy<'_>,
     cancellation: &source_runtime::SourceCancellationToken,
 ) -> Result<ResolvedOnlineDownload, OnlineItemDownloadError> {
     if sources.is_empty() {
@@ -1207,46 +1287,200 @@ fn resolve_online_download_url(
             "No enabled Audio Source can resolve this track.".to_owned(),
         ));
     }
-    for source in sources {
-        let layer_deadline = deadline.min(Instant::now() + layer_timeout);
-        for quality in quality_fallback(preferred_quality) {
-            if cancellation.is_cancelled() {
-                return Err(OnlineItemDownloadError::Cancelled);
-            }
-            if Instant::now() >= layer_deadline || Instant::now() >= deadline {
-                break;
-            }
-            let supported = candidates
-                .iter()
-                .filter(|candidate| {
-                    source.sources.iter().any(|info| {
-                        info.id == candidate.source_id
-                            && info
-                                .actions
-                                .contains(&source_runtime::SourceAction::MusicUrl)
-                            && (info.qualities.is_empty() || info.qualities.contains(&quality))
-                    })
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            if supported.is_empty() {
-                continue;
-            }
-            if let Some(resolved) = race_download_candidates(
-                app,
-                source,
-                &supported,
-                quality,
-                layer_deadline.min(deadline),
-                cancellation,
-            )? {
-                return Ok(resolved);
-            }
+    let mut remaining_sources = sources;
+    if policy.selection_mode == online_music::AudioSourceSelectionMode::Automatic
+        && sources.len() > 1
+    {
+        let hedge_delay = {
+            let state = app.state::<AppState>();
+            let router = state.download_source_router.lock().map_err(|_| {
+                OnlineItemDownloadError::Message(
+                    "download source router lock was poisoned".to_owned(),
+                )
+            })?;
+            router.hedge_delay(&sources[0], candidates, policy.qualities)
+        };
+        if let Some(resolved) = race_download_source_layers(
+            app,
+            (&sources[0], &sources[1]),
+            candidates,
+            policy,
+            hedge_delay,
+            cancellation,
+        )? {
+            return Ok(resolved);
+        }
+        remaining_sources = &sources[2..];
+    }
+
+    for source in remaining_sources {
+        if let Some(resolved) =
+            resolve_download_source_layer(app, source, candidates, policy, cancellation)?
+        {
+            return Ok(resolved);
         }
     }
     Err(OnlineItemDownloadError::Message(
         "Download is unavailable from the configured Audio Sources.".to_owned(),
     ))
+}
+
+fn race_download_source_layers(
+    app: &AppHandle,
+    sources: (&AudioSourceRecord, &AudioSourceRecord),
+    candidates: &[online_music::OnlineTrackCandidate],
+    policy: DownloadResolutionPolicy<'_>,
+    hedge_delay: Duration,
+    cancellation: &source_runtime::SourceCancellationToken,
+) -> Result<Option<ResolvedOnlineDownload>, OnlineItemDownloadError> {
+    let (primary, secondary) = sources;
+    let race_cancellation = source_runtime::SourceCancellationToken::default();
+    // Only a failed primary releases the delay; primary success cancels the backup.
+    let primary_unavailable = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (sender, receiver) = std::sync::mpsc::channel();
+
+    std::thread::scope(|scope| {
+        let primary_sender = sender.clone();
+        let primary_token = race_cancellation.clone();
+        let primary_unavailable_worker = Arc::clone(&primary_unavailable);
+        scope.spawn(move || {
+            let result =
+                resolve_download_source_layer(app, primary, candidates, policy, &primary_token);
+            if !matches!(&result, Ok(Some(_))) {
+                primary_unavailable_worker.store(true, std::sync::atomic::Ordering::Release);
+            }
+            let _ = primary_sender.send(result);
+        });
+
+        let secondary_sender = sender.clone();
+        let secondary_token = race_cancellation.clone();
+        let primary_unavailable_worker = Arc::clone(&primary_unavailable);
+        scope.spawn(move || {
+            let should_start = wait_for_download_hedge(
+                &primary_unavailable_worker,
+                &secondary_token,
+                hedge_delay,
+                policy.deadline,
+            );
+            let result = if secondary_token.is_cancelled() {
+                Err(OnlineItemDownloadError::Cancelled)
+            } else if !should_start {
+                Ok(None)
+            } else {
+                resolve_download_source_layer(app, secondary, candidates, policy, &secondary_token)
+            };
+            let _ = secondary_sender.send(result);
+        });
+        drop(sender);
+
+        let mut completed = 0;
+        let mut first_error = None;
+        while completed < 2 {
+            if cancellation.is_cancelled() {
+                race_cancellation.cancel();
+                return Err(OnlineItemDownloadError::Cancelled);
+            }
+            if Instant::now() >= policy.deadline {
+                race_cancellation.cancel();
+                return Ok(None);
+            }
+            match receiver.recv_timeout(Duration::from_millis(50)) {
+                Ok(Ok(Some(resolved))) => {
+                    race_cancellation.cancel();
+                    return Ok(Some(resolved));
+                }
+                Ok(Ok(None)) => completed += 1,
+                Ok(Err(OnlineItemDownloadError::Cancelled)) => completed += 1,
+                Ok(Err(error)) => {
+                    completed += 1;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        first_error.map_or(Ok(None), Err)
+    })
+}
+
+fn wait_for_download_hedge(
+    primary_unavailable: &std::sync::atomic::AtomicBool,
+    cancellation: &source_runtime::SourceCancellationToken,
+    hedge_delay: Duration,
+    deadline: Instant,
+) -> bool {
+    let wait_started_at = Instant::now();
+    while wait_started_at.elapsed() < hedge_delay
+        && Instant::now() < deadline
+        && !primary_unavailable.load(std::sync::atomic::Ordering::Acquire)
+        && !cancellation.is_cancelled()
+    {
+        let remaining = hedge_delay.saturating_sub(wait_started_at.elapsed());
+        std::thread::sleep(remaining.min(Duration::from_millis(20)));
+    }
+    !cancellation.is_cancelled() && Instant::now() < deadline
+}
+
+fn resolve_download_source_layer(
+    app: &AppHandle,
+    source: &AudioSourceRecord,
+    candidates: &[online_music::OnlineTrackCandidate],
+    policy: DownloadResolutionPolicy<'_>,
+    cancellation: &source_runtime::SourceCancellationToken,
+) -> Result<Option<ResolvedOnlineDownload>, OnlineItemDownloadError> {
+    let layer_deadline = policy.deadline.min(Instant::now() + policy.layer_timeout);
+    for quality in policy.qualities.iter().copied() {
+        if cancellation.is_cancelled() {
+            return Err(OnlineItemDownloadError::Cancelled);
+        }
+        if Instant::now() >= layer_deadline || Instant::now() >= policy.deadline {
+            break;
+        }
+        let supported = candidates
+            .iter()
+            .filter(|candidate| {
+                source.sources.iter().any(|info| {
+                    info.id == candidate.source_id
+                        && info
+                            .actions
+                            .contains(&source_runtime::SourceAction::MusicUrl)
+                        && (info.qualities.is_empty() || info.qualities.contains(&quality))
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let supported = {
+            let state = app.state::<AppState>();
+            let router = state.download_source_router.lock().map_err(|_| {
+                OnlineItemDownloadError::Message(
+                    "download source router lock was poisoned".to_owned(),
+                )
+            })?;
+            router.available_candidates(
+                &source.id,
+                supported,
+                quality,
+                policy.selection_mode,
+                Instant::now(),
+            )
+        };
+        if supported.is_empty() {
+            continue;
+        }
+        if let Some(resolved) = race_download_candidates(
+            app,
+            source,
+            &supported,
+            quality,
+            layer_deadline.min(policy.deadline),
+            cancellation,
+        )? {
+            return Ok(Some(resolved));
+        }
+    }
+    Ok(None)
 }
 
 fn quality_fallback(
@@ -1269,40 +1503,63 @@ fn race_download_candidates(
     deadline: Instant,
     cancellation: &source_runtime::SourceCancellationToken,
 ) -> Result<Option<ResolvedOnlineDownload>, OnlineItemDownloadError> {
-    let (prepared, executor) = {
+    let (prepared, preparation_failures, executor) = {
         let state = app.state::<AppState>();
         let registry = state.audio_source_registry.lock().map_err(|_| {
             OnlineItemDownloadError::Message("audio source lock was poisoned".to_owned())
         })?;
-        let prepared = candidates
-            .iter()
-            .filter_map(|candidate| {
-                let request = download_music_url_request(candidate, quality);
-                registry
-                    .prepare_dispatch(&source.id, &request)
-                    .ok()
-                    .map(|dispatch| (dispatch, request, candidate.channel_name.clone()))
-            })
-            .collect::<Vec<_>>();
-        (prepared, Arc::clone(&state.online_executor))
+        let mut prepared = Vec::new();
+        let mut preparation_failures = Vec::new();
+        for candidate in candidates {
+            let request = download_music_url_request(candidate, quality);
+            let attempt = download_source_router::DownloadAttemptKey::new(
+                &source.id,
+                &candidate.channel_id,
+                quality,
+            );
+            match registry.prepare_dispatch(&source.id, &request) {
+                Ok(dispatch) => {
+                    prepared.push((dispatch, request, candidate.channel_name.clone(), attempt))
+                }
+                Err(_) => preparation_failures.push(attempt),
+            }
+        }
+        (
+            prepared,
+            preparation_failures,
+            Arc::clone(&state.online_executor),
+        )
     };
+    for attempt in preparation_failures {
+        report_download_route_failure(app, attempt);
+    }
     if prepared.is_empty() {
         return Ok(None);
     }
     let (sender, receiver) = std::sync::mpsc::channel();
     let candidate_count = prepared.len();
+    let mut pending_attempts = prepared
+        .iter()
+        .map(|(_, _, _, attempt)| attempt.clone())
+        .collect::<BTreeSet<_>>();
     let race_cancellation = source_runtime::SourceCancellationToken::default();
     let client = executor.http_client();
-    for (dispatch, request, channel_name) in prepared {
+    for (dispatch, request, channel_name, attempt) in prepared {
         let sender = sender.clone();
         let token = race_cancellation.clone();
         let client = client.clone();
+        let failed_attempt = attempt.clone();
         executor.spawn(
             move || {
+                let started_at = Instant::now();
                 if token.is_cancelled() {
-                    return None;
+                    return DownloadCandidateOutcome {
+                        attempt,
+                        resolved: None,
+                        latency: Duration::ZERO,
+                    };
                 }
-                dispatch
+                let resolved = dispatch
                     .execute(request, token.clone())
                     .ok()
                     .and_then(|outcome| match outcome.response {
@@ -1314,10 +1571,21 @@ fn race_download_candidates(
                         url,
                         quality,
                         channel_name,
-                    })
+                        attempt: attempt.clone(),
+                    });
+                DownloadCandidateOutcome {
+                    attempt,
+                    resolved,
+                    latency: started_at.elapsed(),
+                }
             },
             move |result| {
-                let _ = sender.send(result.ok().flatten());
+                let outcome = result.unwrap_or(DownloadCandidateOutcome {
+                    attempt: failed_attempt,
+                    resolved: None,
+                    latency: Duration::ZERO,
+                });
+                let _ = sender.send(outcome);
             },
         );
     }
@@ -1329,16 +1597,31 @@ fn race_download_candidates(
             return Err(OnlineItemDownloadError::Cancelled);
         }
         match receiver.recv_timeout(Duration::from_millis(50)) {
-            Ok(Some(result)) => {
-                race_cancellation.cancel();
-                return Ok(Some(result));
+            Ok(outcome) => {
+                if cancellation.is_cancelled() {
+                    race_cancellation.cancel();
+                    return Err(OnlineItemDownloadError::Cancelled);
+                }
+                pending_attempts.remove(&outcome.attempt);
+                if let Some(result) = outcome.resolved {
+                    report_download_route_success(app, outcome.attempt, outcome.latency);
+                    race_cancellation.cancel();
+                    return Ok(Some(result));
+                }
+                report_download_route_failure(app, outcome.attempt);
+                completed += 1;
             }
-            Ok(None) => completed += 1,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
     race_cancellation.cancel();
+    if cancellation.is_cancelled() {
+        return Err(OnlineItemDownloadError::Cancelled);
+    }
+    for attempt in pending_attempts {
+        report_download_route_failure(app, attempt);
+    }
     Ok(None)
 }
 
@@ -4733,29 +5016,36 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    #[test]
-    fn automatic_download_source_order_should_ignore_manual_preferences() {
-        let order = download_source_order(
-            &["second".to_owned()],
-            Some("first"),
-            online_music::AudioSourceSelectionMode::Automatic,
-        );
-
-        assert!(order.is_empty());
-    }
-
-    #[test]
-    fn manual_download_source_order_should_start_with_selected_source() {
-        let order = download_source_order(
-            &["second".to_owned()],
-            Some("first"),
-            online_music::AudioSourceSelectionMode::Manual,
-        );
-
-        assert_eq!(order, ["first", "second"]);
-    }
-
     static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn failed_primary_bypasses_the_download_hedge_delay() {
+        let primary_unavailable = AtomicBool::new(true);
+        let cancellation = source_runtime::SourceCancellationToken::default();
+        let started_at = Instant::now();
+
+        assert!(wait_for_download_hedge(
+            &primary_unavailable,
+            &cancellation,
+            Duration::from_secs(10),
+            Instant::now() + Duration::from_secs(11),
+        ));
+        assert!(started_at.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn cancelled_download_race_does_not_start_the_hedged_source() {
+        let primary_unavailable = AtomicBool::new(false);
+        let cancellation = source_runtime::SourceCancellationToken::default();
+        cancellation.cancel();
+
+        assert!(!wait_for_download_hedge(
+            &primary_unavailable,
+            &cancellation,
+            Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(2),
+        ));
+    }
 
     fn draft(file_path: &str, title: &str, artist: Option<&str>) -> LocalTrackDraft {
         LocalTrackDraft {
