@@ -82,7 +82,7 @@ import type {
 } from "./generated/bindings";
 import {
   DEFAULT_UI_PREFERENCES,
-  THEME_OPTIONS,
+  THEME_GROUPS,
   loadUiPreferences,
   saveUiPreferences,
   type PlaybackMode,
@@ -1733,13 +1733,20 @@ function trackSubtitle(track: LocalTrack) {
                 <select
                   id="theme-preference"
                   v-model="themePreference"
-          class="select select-sm w-full sm:w-44"
-        >
-          <option v-for="theme in THEME_OPTIONS" :key="theme.value" :value="theme.value">
-            {{ theme.label }}
-          </option>
-        </select>
-      </div>
+                  class="select select-sm w-full sm:w-44"
+                >
+                  <option value="system">System</option>
+                  <optgroup
+                    v-for="group in THEME_GROUPS"
+                    :key="group.value"
+                    :label="group.label"
+                  >
+                    <option v-for="theme in group.options" :key="theme.value" :value="theme.value">
+                      {{ theme.label }}
+                    </option>
+                  </optgroup>
+                </select>
+              </div>
 
               <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <label for="layout-density" class="flex min-w-0 items-start gap-3">

@@ -5,7 +5,7 @@ import App from "./App.vue";
 import type { PluginRecord } from "./lib/plugin-api";
 import type { AudioSourceRecord } from "./lib/audio-source-api";
 import type { OnlineTrack } from "./lib/online-music-api";
-import { THEME_OPTIONS, UI_PREFERENCES_STORAGE_KEY } from "./lib/ui-preferences";
+import { THEME_GROUPS, THEME_OPTIONS, UI_PREFERENCES_STORAGE_KEY } from "./lib/ui-preferences";
 import { DESKTOP_LYRICS_STORAGE_KEY } from "./lib/desktop-lyrics";
 import {
   createAudioSourceRecord,
@@ -851,8 +851,22 @@ describe("application shell", () => {
     await settingsButton?.trigger("click");
 
     const themeSelect = wrapper.get<HTMLSelectElement>("#theme-preference");
+    expect(
+      themeSelect.findAll("optgroup").map((group) => ({
+        label: group.attributes("label"),
+        themes: group.findAll("option").map((option) => option.text()),
+      })),
+    ).toEqual(
+      THEME_GROUPS.map((group) => ({
+        label: group.label,
+        themes: group.options.map((theme) => theme.label),
+      })),
+    );
     expect(themeSelect.findAll("option").map((option) => option.text())).toEqual(
-      THEME_OPTIONS.map((theme) => theme.label),
+      [
+        THEME_OPTIONS.find((theme) => theme.value === "system")?.label,
+        ...THEME_GROUPS.flatMap((group) => group.options.map((theme) => theme.label)),
+      ],
     );
 
     await themeSelect.setValue("dracula");

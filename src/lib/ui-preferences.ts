@@ -1,45 +1,65 @@
 import { isAudioSourceId, type AudioSourceId } from "./audio-source-api";
 
+export type ThemeCategory = "bright" | "dark";
+
 export const THEME_OPTIONS = [
-  { value: "system", label: "System" },
-  { value: "light", label: "Light" },
-  { value: "dark", label: "Dark" },
-  { value: "cupcake", label: "Cupcake" },
-  { value: "bumblebee", label: "Bumblebee" },
-  { value: "emerald", label: "Emerald" },
-  { value: "corporate", label: "Corporate" },
-  { value: "synthwave", label: "Synthwave" },
-  { value: "retro", label: "Retro" },
-  { value: "cyberpunk", label: "Cyberpunk" },
-  { value: "valentine", label: "Valentine" },
-  { value: "halloween", label: "Halloween" },
-  { value: "garden", label: "Garden" },
-  { value: "forest", label: "Forest" },
-  { value: "aqua", label: "Aqua" },
-  { value: "lofi", label: "Lo-Fi" },
-  { value: "pastel", label: "Pastel" },
-  { value: "fantasy", label: "Fantasy" },
-  { value: "wireframe", label: "Wireframe" },
-  { value: "black", label: "Black" },
-  { value: "luxury", label: "Luxury" },
-  { value: "dracula", label: "Dracula" },
-  { value: "cmyk", label: "CMYK" },
-  { value: "autumn", label: "Autumn" },
-  { value: "business", label: "Business" },
-  { value: "acid", label: "Acid" },
-  { value: "lemonade", label: "Lemonade" },
-  { value: "night", label: "Night" },
-  { value: "coffee", label: "Coffee" },
-  { value: "winter", label: "Winter" },
-  { value: "dim", label: "Dim" },
-  { value: "nord", label: "Nord" },
-  { value: "sunset", label: "Sunset" },
-  { value: "caramellatte", label: "Caramellatte" },
-  { value: "abyss", label: "Abyss" },
-  { value: "silk", label: "Silk" },
+  { value: "system", label: "System", category: null },
+  { value: "light", label: "Light", category: "bright" },
+  { value: "dark", label: "Dark", category: "dark" },
+  { value: "cupcake", label: "Cupcake", category: "bright" },
+  { value: "bumblebee", label: "Bumblebee", category: "bright" },
+  { value: "emerald", label: "Emerald", category: "bright" },
+  { value: "corporate", label: "Corporate", category: "bright" },
+  { value: "synthwave", label: "Synthwave", category: "dark" },
+  { value: "retro", label: "Retro", category: "bright" },
+  { value: "cyberpunk", label: "Cyberpunk", category: "bright" },
+  { value: "valentine", label: "Valentine", category: "bright" },
+  { value: "halloween", label: "Halloween", category: "dark" },
+  { value: "garden", label: "Garden", category: "bright" },
+  { value: "forest", label: "Forest", category: "dark" },
+  { value: "aqua", label: "Aqua", category: "dark" },
+  { value: "lofi", label: "Lo-Fi", category: "bright" },
+  { value: "pastel", label: "Pastel", category: "bright" },
+  { value: "fantasy", label: "Fantasy", category: "bright" },
+  { value: "wireframe", label: "Wireframe", category: "bright" },
+  { value: "black", label: "Black", category: "dark" },
+  { value: "luxury", label: "Luxury", category: "dark" },
+  { value: "dracula", label: "Dracula", category: "dark" },
+  { value: "cmyk", label: "CMYK", category: "bright" },
+  { value: "autumn", label: "Autumn", category: "bright" },
+  { value: "business", label: "Business", category: "dark" },
+  { value: "acid", label: "Acid", category: "bright" },
+  { value: "lemonade", label: "Lemonade", category: "bright" },
+  { value: "night", label: "Night", category: "dark" },
+  { value: "coffee", label: "Coffee", category: "dark" },
+  { value: "winter", label: "Winter", category: "bright" },
+  { value: "dim", label: "Dim", category: "dark" },
+  { value: "nord", label: "Nord", category: "bright" },
+  { value: "sunset", label: "Sunset", category: "dark" },
+  { value: "caramellatte", label: "Caramellatte", category: "bright" },
+  { value: "abyss", label: "Abyss", category: "dark" },
+  { value: "silk", label: "Silk", category: "bright" },
 ] as const;
 
 export type ThemePreference = (typeof THEME_OPTIONS)[number]["value"];
+
+export const THEME_GROUPS: ReadonlyArray<{
+  value: ThemeCategory;
+  label: string;
+  options: ReadonlyArray<(typeof THEME_OPTIONS)[number]>;
+}> = [
+  {
+    value: "bright",
+    label: "Bright",
+    options: THEME_OPTIONS.filter((option) => option.category === "bright"),
+  },
+  {
+    value: "dark",
+    label: "Dark",
+    options: THEME_OPTIONS.filter((option) => option.category === "dark"),
+  },
+];
+
 export type LayoutDensity = "comfortable" | "compact";
 export type StreamQuality = "128k" | "320k" | "flac" | "flac24bit";
 export type PlaybackMode = "sequential" | "shuffle" | "repeat";

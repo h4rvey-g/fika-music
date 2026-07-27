@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_UI_PREFERENCES,
+  THEME_GROUPS,
   THEME_OPTIONS,
   UI_PREFERENCES_STORAGE_KEY,
   loadUiPreferences,
@@ -41,6 +42,15 @@ describe("UI preferences", () => {
     for (const theme of THEME_OPTIONS) {
       expect(parseUiPreferences({ theme: theme.value }).theme).toBe(theme.value);
     }
+  });
+
+  it("divides override themes into bright and dark groups", () => {
+    const groupedThemes = THEME_GROUPS.flatMap((group) => group.options);
+    const overrideThemes = THEME_OPTIONS.filter((theme) => theme.category !== null);
+
+    expect(THEME_GROUPS.map((group) => group.value)).toEqual(["bright", "dark"]);
+    expect(new Set(groupedThemes)).toEqual(new Set(overrideThemes));
+    expect(groupedThemes).toHaveLength(overrideThemes.length);
   });
 
   it("migrates the legacy audio source preference to a standalone source id", () => {
