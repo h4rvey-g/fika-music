@@ -61,6 +61,7 @@ const tracks = [
     fileSizeBytes: 2048,
   }),
 ];
+let queryNeedsReindex = false;
 
 function queryPage(): LibraryQueryPage {
   const groups: LibraryAlbumGroup[] = tracks.map((track, index) => ({
@@ -88,7 +89,7 @@ function queryPage(): LibraryQueryPage {
     total: tracks.length,
     libraryTotal: tracks.length,
     totalDurationSeconds: 361,
-    needsReindex: false,
+    needsReindex: queryNeedsReindex,
     groupTotal: groups.length,
     virtualTotal: items.length,
     offset: 0,
@@ -127,7 +128,6 @@ function mountLibrary() {
       density: "comfortable",
       scanStatus: idleScanStatus,
       scanMessage: null,
-      canIndex: true,
     },
   });
 }
@@ -137,6 +137,7 @@ describe("LibraryBrowser", () => {
     vi.clearAllMocks();
     vi.useFakeTimers();
     localStorage.clear();
+    queryNeedsReindex = false;
     tauriMocks.listen.mockResolvedValue(vi.fn());
     tauriMocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "query_local_library") {
@@ -209,6 +210,15 @@ describe("LibraryBrowser", () => {
       "Plays",
     ]);
     expect(wrapper.text()).toContain("2 tracks");
+  });
+
+  it("does not expose manual refresh or re-index actions", async () => {
+    queryNeedsReindex = true;
+    const wrapper = mountLibrary();
+    await flushPromises();
+
+    expect(wrapper.find('[aria-label="Refresh library"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("Re-index");
   });
 
   it("debounces pinyin search and keeps all selected search fields", async () => {

@@ -31,16 +31,21 @@ describe("library scan", () => {
     expect(tauri.listen).toHaveBeenCalledWith("library:scan-progress", expect.any(Function));
   });
 
-  it("starts a rescan when a download lands inside the library", async () => {
+  it("starts indexing immediately after a folder is selected", async () => {
     const scan = useLibraryScan(vi.fn());
     await scan.initialize();
     tauri.invoke.mockClear();
+    tauri.invoke.mockResolvedValueOnce("/new-music").mockResolvedValueOnce({
+      ...status,
+      folderPath: "/new-music",
+      isRunning: true,
+    });
 
-    scan.handleDownloadCompleted("/music/Artist/Album");
-    await vi.waitFor(() => {
-      expect(tauri.invoke).toHaveBeenCalledWith("start_library_scan", {
-        folderPath: "/music",
-      });
+    await scan.chooseFolder();
+
+    expect(tauri.invoke).toHaveBeenNthCalledWith(1, "select_music_folder");
+    expect(tauri.invoke).toHaveBeenNthCalledWith(2, "start_library_scan", {
+      folderPath: "/new-music",
     });
   });
 

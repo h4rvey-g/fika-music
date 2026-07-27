@@ -27,6 +27,7 @@ serde_json = "1"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 lofty = "0.24.0"
 walkdir = "2.5.0"
+notify = "8.2.0"
 thiserror = "2.0.18"
 rfd = "0.17.2"
 oxc_allocator = "0.138.0"

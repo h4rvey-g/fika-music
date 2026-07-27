@@ -9,7 +9,7 @@ use plugin_system::{PluginDiagnostic, PluginRecord, PluginRegistry, PluginSystem
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::convert::TryFrom;
 use std::fs;
 use std::io::{Read, Write};
@@ -25,6 +25,7 @@ pub mod audio_source_system;
 mod database;
 pub mod kugou;
 mod library;
+mod library_watcher;
 pub mod lx_js_importer;
 mod lx_js_runtime;
 pub mod lyrics;
@@ -57,6 +58,7 @@ pub use library::{
     LibrarySortDirection, LibrarySortField, LibraryTextField, LibraryViewItem, LibraryViewItemKind,
     LibraryViewRange,
 };
+use library_watcher::{BatchDisposition, LibraryChangeBatch, LibraryWatcher};
 use online_settings_commands::{
     clear_online_search_history, get_online_music_settings, select_online_download_directory,
     update_online_music_settings,
@@ -66,12 +68,14 @@ use playback_commands::{
 };
 
 const SCAN_PROGRESS_EVENT: &str = "library:scan-progress";
+const LIBRARY_CHANGED_EVENT: &str = "library:changed";
 const ALBUM_ART_PROGRESS_EVENT: &str = "library:album-art-progress";
 const METADATA_LOOKUP_PROGRESS_EVENT: &str = "library:metadata-lookup-progress";
 const ONLINE_SEARCH_SECTION_EVENT: &str = "online-music:search-section";
 const ONLINE_DOWNLOAD_TASK_EVENT: &str = "online-music:download-task";
 const ONLINE_DOWNLOAD_COMPLETED_EVENT: &str = "online-music:download-completed";
 const LIBRARY_METADATA_VERSION: i64 = 1;
+const LIBRARY_FOLDER_SETTING_KEY: &str = "local_music_folder";
 
 macro_rules! with_tauri_commands {
     ($consumer:ident) => {
@@ -207,6 +211,8 @@ enum AppError {
     TrackFileMissing(String),
     #[error("library error: {0}")]
     Library(#[from] library::LibraryError),
+    #[error("library watcher error: {0}")]
+    LibraryWatcher(#[from] library_watcher::LibraryWatcherError),
     #[error("album-art error: {0}")]
     AlbumArt(#[from] album_art::AlbumArtError),
     #[error("online music error: {0}")]
@@ -310,11 +316,21 @@ pub struct ScanProgressEvent {
     message: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct LibraryChangedEvent {
+    added_or_updated: usize,
+    removed: usize,
+}
+
 struct AppState {
     db: Arc<Mutex<Connection>>,
     library: Arc<Mutex<library::LibraryService>>,
     album_art: Arc<album_art::AlbumArtService>,
     scan_status: Mutex<ScanStatus>,
+    library_sync: Mutex<()>,
+    library_watcher: Mutex<Option<LibraryWatcher>>,
     source_requests: source_request_registry::SourceRequestRegistry,
     online_download_requests: Mutex<BTreeMap<String, source_runtime::SourceCancellationToken>>,
     online_music_cache: Arc<online_music::OnlineMusicCache>,
@@ -329,6 +345,34 @@ struct AppState {
 struct DiscoveredAudioFiles {
     files: Vec<PathBuf>,
     errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalTrackSignature {
+    file_size_bytes: i64,
+    modified_at: Option<i64>,
+    metadata_version: i64,
+}
+
+#[derive(Debug, Default)]
+struct LibraryReconcileResult {
+    added_or_updated: usize,
+    removed: usize,
+    errors: Vec<String>,
+}
+
+#[derive(Debug)]
+struct LibraryReconcileScope {
+    root: PathBuf,
+    complete: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct LibraryReconcileProgress {
+    discovered_files: usize,
+    scanned_files: usize,
+    indexed_tracks: usize,
+    skipped_files: usize,
 }
 
 impl AppState {
@@ -359,10 +403,11 @@ impl AppState {
         restrict_path_to_current_user(db_path, 0o600)?;
         database::initialize(&mut connection)?;
         let db = Arc::new(Mutex::new(connection));
-        {
+        let configured_music_folder = {
             let connection = db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
             online_download::recover_interrupted_tasks(&connection, now_timestamp())?;
-        }
+            load_library_folder(&connection)?
+        };
         let library = {
             let connection = db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
             library::LibraryService::load(&connection)?
@@ -424,7 +469,12 @@ impl AppState {
             db,
             library,
             album_art,
-            scan_status: Mutex::new(ScanStatus::default()),
+            scan_status: Mutex::new(ScanStatus {
+                folder_path: configured_music_folder.as_deref().map(path_to_string),
+                ..ScanStatus::default()
+            }),
+            library_sync: Mutex::new(()),
+            library_watcher: Mutex::new(None),
             source_requests: source_request_registry::SourceRequestRegistry::default(),
             online_download_requests: Mutex::new(BTreeMap::new()),
             online_music_cache: Arc::new(online_music::OnlineMusicCache::default()),
@@ -3387,14 +3437,44 @@ fn start_library_scan(
         return Err(AppError::InvalidMusicFolder(folder_path).to_string());
     }
 
+    configure_library_folder(&state, &folder).map_err(|error| error.to_string())?;
+    begin_library_scan(&app, &state, folder, true, "Started indexing local tracks.")
+        .map_err(|error| error.to_string())
+}
+
+fn configure_library_folder(state: &AppState, folder: &Path) -> AppResult<()> {
+    if let Some(watcher) = state
+        .library_watcher
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("library_watcher"))?
+        .as_ref()
+    {
+        watcher.set_folder(folder.to_path_buf())?;
+    }
+
+    let db = state.db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
+    save_library_folder(&db, folder)
+}
+
+fn begin_library_scan(
+    app: &AppHandle,
+    state: &AppState,
+    folder: PathBuf,
+    force_reindex: bool,
+    message: &str,
+) -> AppResult<ScanStatus> {
+    if !folder.is_dir() {
+        return Err(AppError::InvalidMusicFolder(path_to_string(&folder)));
+    }
+
     let initial_status = {
         let mut status = state
             .scan_status
             .lock()
-            .map_err(|_| AppError::StatePoisoned("scan_status").to_string())?;
+            .map_err(|_| AppError::StatePoisoned("scan_status"))?;
 
         if status.is_running {
-            return Err(AppError::ScanAlreadyRunning.to_string());
+            return Err(AppError::ScanAlreadyRunning);
         }
 
         *status = ScanStatus {
@@ -3407,13 +3487,10 @@ fn start_library_scan(
         status.clone()
     };
 
-    emit_scan_status(
-        &app,
-        initial_status.clone(),
-        Some("Started indexing local tracks.".into()),
-    );
+    emit_scan_status(app, initial_status.clone(), Some(message.to_owned()));
 
-    std::thread::spawn(move || run_library_scan(app, folder));
+    let scan_app = app.clone();
+    std::thread::spawn(move || run_library_scan(scan_app, folder, force_reindex));
 
     Ok(initial_status)
 }
@@ -3687,11 +3764,15 @@ fn increment_local_track_play_count(
     Ok(play_count)
 }
 
-fn run_library_scan(app: AppHandle, folder: PathBuf) {
-    let result = {
+fn run_library_scan(app: AppHandle, folder: PathBuf, force_reindex: bool) {
+    let result = (|| {
         let state = app.state::<AppState>();
-        scan_folder(&app, &state, &folder)
-    };
+        let _sync = state
+            .library_sync
+            .lock()
+            .map_err(|_| AppError::StatePoisoned("library_sync"))?;
+        scan_folder(&app, &state, &folder, force_reindex)
+    })();
 
     if let Err(error) = result {
         let state = app.state::<AppState>();
@@ -3709,73 +3790,360 @@ fn run_library_scan(app: AppHandle, folder: PathBuf) {
     }
 }
 
-fn scan_folder(app: &AppHandle, state: &AppState, folder: &Path) -> AppResult<()> {
-    let discovery = collect_supported_audio_files(folder);
-
-    update_scan_status(
-        app,
-        state,
-        Some(format!(
-            "Discovered {} supported audio files.",
-            discovery.files.len()
-        )),
-        |status| {
-            status.discovered_files = discovery.files.len();
-        },
-    );
-
-    for error in discovery.errors {
-        let message = format!("Failed to inspect library path: {error}");
-        update_scan_status(app, state, Some(message.clone()), |status| {
-            status.error_count += 1;
-            status.last_error = Some(message);
+fn scan_folder(
+    app: &AppHandle,
+    state: &AppState,
+    folder: &Path,
+    force_reindex: bool,
+) -> AppResult<()> {
+    let mut last_progress_emit = Instant::now();
+    let mut report_progress = |progress: LibraryReconcileProgress| {
+        let should_emit = progress.scanned_files == 0
+            || progress.scanned_files == progress.discovered_files
+            || progress.scanned_files.is_multiple_of(32)
+            || last_progress_emit.elapsed() >= Duration::from_millis(100);
+        if !should_emit {
+            return;
+        }
+        last_progress_emit = Instant::now();
+        let message = (progress.scanned_files == 0).then(|| {
+            format!(
+                "Discovered {} supported audio files.",
+                progress.discovered_files
+            )
         });
+        update_scan_status(app, state, message, |status| {
+            status.discovered_files = progress.discovered_files;
+            status.scanned_files = progress.scanned_files;
+            status.indexed_tracks = progress.indexed_tracks;
+            status.skipped_files = progress.skipped_files;
+        });
+    };
+
+    let result = reconcile_library_paths(
+        state,
+        &[folder.to_path_buf()],
+        force_reindex,
+        true,
+        Some(&mut report_progress),
+    )?;
+
+    if result.added_or_updated > 0 || result.removed > 0 {
+        emit_library_changed(app, result.added_or_updated, result.removed);
     }
 
-    for path in discovery.files {
-        match extract_local_track(&path) {
-            Ok(draft) => {
-                {
-                    let db = state.db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
-                    upsert_local_track(&db, &draft)?;
-                }
+    let last_error = result.errors.last().cloned();
+    let message = format!(
+        "Finished indexing local tracks: {} added or updated, {} removed.",
+        result.added_or_updated, result.removed
+    );
 
-                update_scan_status(app, state, None, |status| {
-                    status.scanned_files += 1;
-                    status.indexed_tracks += 1;
-                });
+    update_scan_status(app, state, Some(message), |status| {
+        status.is_running = false;
+        status.finished_at = Some(now_timestamp());
+        status.error_count = result.errors.len();
+        status.last_error = last_error;
+    });
+
+    Ok(())
+}
+
+fn reconcile_library_paths(
+    state: &AppState,
+    paths: &[PathBuf],
+    force_reindex: bool,
+    prune_outside_scopes: bool,
+    mut progress: Option<&mut dyn FnMut(LibraryReconcileProgress)>,
+) -> AppResult<LibraryReconcileResult> {
+    let roots = minimal_reconcile_paths(paths);
+    let mut scopes = Vec::with_capacity(roots.len());
+    let mut candidates = HashSet::new();
+    let mut current_paths = HashSet::new();
+    let mut errors = Vec::new();
+
+    for root in roots {
+        if root.is_dir() {
+            let discovery = collect_supported_audio_files(&root);
+            let complete = discovery.errors.is_empty();
+            for error in discovery.errors {
+                errors.push(format!("Failed to inspect {}: {error}", root.display()));
             }
-            Err(error) => {
-                let message = format!("Skipped {}: {error}", path.display());
-                update_scan_status(app, state, Some(message.clone()), |status| {
-                    status.scanned_files += 1;
-                    status.skipped_files += 1;
-                    status.error_count += 1;
-                    status.last_error = Some(message);
-                });
+            for path in discovery.files {
+                current_paths.insert(path_to_string(&path));
+                candidates.insert(path);
             }
+            scopes.push(LibraryReconcileScope { root, complete });
+        } else if root.is_file() && is_supported_audio_file(&root) {
+            let file_path = path_to_string(&root);
+            current_paths.insert(file_path);
+            candidates.insert(root.clone());
+            scopes.push(LibraryReconcileScope {
+                root,
+                complete: true,
+            });
+        } else {
+            scopes.push(LibraryReconcileScope {
+                root,
+                complete: true,
+            });
         }
     }
 
-    {
+    let existing = {
         let db = state.db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
+        if prune_outside_scopes {
+            local_track_signatures(&db)?
+        } else {
+            local_track_signatures_for_scopes(&db, &scopes)?
+        }
+    };
+    let mut candidates = candidates.into_iter().collect::<Vec<_>>();
+    candidates.sort_unstable();
+    let mut drafts = Vec::new();
+    let mut reconcile_progress = LibraryReconcileProgress {
+        discovered_files: candidates.len(),
+        ..LibraryReconcileProgress::default()
+    };
+    if let Some(report) = progress.as_deref_mut() {
+        report(reconcile_progress);
+    }
+
+    for path in candidates {
+        let file_path = path_to_string(&path);
+        let signature = match local_file_signature(&path) {
+            Ok(signature) => signature,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                current_paths.remove(&file_path);
+                reconcile_progress.scanned_files += 1;
+                reconcile_progress.skipped_files += 1;
+                if let Some(report) = progress.as_deref_mut() {
+                    report(reconcile_progress);
+                }
+                continue;
+            }
+            Err(error) => {
+                errors.push(format!("Failed to inspect {}: {error}", path.display()));
+                reconcile_progress.scanned_files += 1;
+                reconcile_progress.skipped_files += 1;
+                if let Some(report) = progress.as_deref_mut() {
+                    report(reconcile_progress);
+                }
+                continue;
+            }
+        };
+
+        if !force_reindex && existing.get(&file_path) == Some(&signature) {
+            reconcile_progress.scanned_files += 1;
+            reconcile_progress.indexed_tracks += 1;
+            if let Some(report) = progress.as_deref_mut() {
+                report(reconcile_progress);
+            }
+            continue;
+        }
+
+        match extract_local_track(&path) {
+            Ok(draft) => {
+                drafts.push(draft);
+                reconcile_progress.indexed_tracks += 1;
+            }
+            Err(error) => {
+                errors.push(format!("Skipped {}: {error}", path.display()));
+                reconcile_progress.skipped_files += 1;
+            }
+        }
+        reconcile_progress.scanned_files += 1;
+        if let Some(report) = progress.as_deref_mut() {
+            report(reconcile_progress);
+        }
+    }
+
+    let all_scopes_complete = scopes.iter().all(|scope| scope.complete);
+    let stale_paths = existing
+        .keys()
+        .filter(|file_path| {
+            let path = Path::new(file_path);
+            let should_reconcile = (prune_outside_scopes && all_scopes_complete)
+                || scopes
+                    .iter()
+                    .any(|scope| scope.complete && path.starts_with(&scope.root));
+            should_reconcile && !current_paths.contains(file_path.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let added_or_updated = drafts.len();
+    let mut removed = 0;
+    if added_or_updated > 0 || !stale_paths.is_empty() {
+        let mut db = state.db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
+        let transaction = db.transaction()?;
+        let mut upserted_tracks = Vec::with_capacity(drafts.len());
+        for draft in &drafts {
+            upserted_tracks.push(upsert_local_track(&transaction, draft)?);
+        }
+        let removed_paths = stale_paths.into_iter().collect::<HashSet<_>>();
+        {
+            let mut delete =
+                transaction.prepare("DELETE FROM local_tracks WHERE file_path = ?1")?;
+            for file_path in &removed_paths {
+                removed += delete.execute([file_path])?;
+            }
+        }
+        let needs_reindex = transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM local_tracks WHERE metadata_version < ?1 LIMIT 1
+            )",
+            [LIBRARY_METADATA_VERSION],
+            |row| row.get(0),
+        )?;
+        transaction.commit()?;
+
         let mut library = state
             .library
             .lock()
             .map_err(|_| AppError::StatePoisoned("library"))?;
-        library.reload(&db)?;
+        library.apply_changes(upserted_tracks, &removed_paths, needs_reindex);
     }
 
-    update_scan_status(
-        app,
-        state,
-        Some("Finished indexing local tracks.".into()),
-        |status| {
-            status.is_running = false;
-            status.finished_at = Some(now_timestamp());
-        },
-    );
+    Ok(LibraryReconcileResult {
+        added_or_updated,
+        removed,
+        errors,
+    })
+}
 
+fn minimal_reconcile_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut paths = paths.to_vec();
+    paths.sort_unstable_by(|left, right| {
+        left.components()
+            .count()
+            .cmp(&right.components().count())
+            .then_with(|| left.cmp(right))
+    });
+    paths.dedup();
+
+    let mut roots = Vec::<PathBuf>::new();
+    for path in paths {
+        if roots.iter().any(|root| path.starts_with(root)) {
+            continue;
+        }
+        roots.push(path);
+    }
+    roots
+}
+
+fn local_file_signature(path: &Path) -> std::io::Result<LocalTrackSignature> {
+    let metadata = fs::metadata(path)?;
+    Ok(LocalTrackSignature {
+        file_size_bytes: u64_to_i64(metadata.len()),
+        modified_at: metadata.modified().ok().and_then(system_time_to_timestamp),
+        metadata_version: LIBRARY_METADATA_VERSION,
+    })
+}
+
+fn local_track_signatures(
+    connection: &Connection,
+) -> rusqlite::Result<HashMap<String, LocalTrackSignature>> {
+    let mut statement = connection.prepare(
+        "SELECT file_path, file_size_bytes, modified_at, metadata_version FROM local_tracks",
+    )?;
+    let signatures = statement
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                LocalTrackSignature {
+                    file_size_bytes: row.get(1)?,
+                    modified_at: row.get(2)?,
+                    metadata_version: row.get(3)?,
+                },
+            ))
+        })?
+        .collect();
+    signatures
+}
+
+fn local_track_signatures_for_scopes(
+    connection: &Connection,
+    scopes: &[LibraryReconcileScope],
+) -> rusqlite::Result<HashMap<String, LocalTrackSignature>> {
+    let mut exact_statement = connection.prepare(
+        "SELECT file_path, file_size_bytes, modified_at, metadata_version
+         FROM local_tracks
+         WHERE file_path = ?1",
+    )?;
+    let mut subtree_statement = connection.prepare(
+        "SELECT file_path, file_size_bytes, modified_at, metadata_version
+         FROM local_tracks
+         WHERE file_path = ?1 OR substr(file_path, 1, length(?2)) = ?2",
+    )?;
+    let mut signatures = HashMap::new();
+    for scope in scopes {
+        let root = path_to_string(&scope.root);
+        if scope.root.is_file() || is_supported_audio_file(&scope.root) {
+            let row = exact_statement
+                .query_row([&root], |row| {
+                    Ok((
+                        row.get(0)?,
+                        LocalTrackSignature {
+                            file_size_bytes: row.get(1)?,
+                            modified_at: row.get(2)?,
+                            metadata_version: row.get(3)?,
+                        },
+                    ))
+                })
+                .optional()?;
+            if let Some((file_path, signature)) = row {
+                signatures.insert(file_path, signature);
+            }
+            continue;
+        }
+        let prefix = if root.ends_with(std::path::MAIN_SEPARATOR) {
+            root.clone()
+        } else {
+            format!("{root}{}", std::path::MAIN_SEPARATOR)
+        };
+        let rows = subtree_statement.query_map(params![root, prefix], |row| {
+            Ok((
+                row.get(0)?,
+                LocalTrackSignature {
+                    file_size_bytes: row.get(1)?,
+                    modified_at: row.get(2)?,
+                    metadata_version: row.get(3)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (file_path, signature) = row?;
+            signatures.insert(file_path, signature);
+        }
+    }
+    Ok(signatures)
+}
+
+fn load_library_folder(connection: &Connection) -> AppResult<Option<PathBuf>> {
+    connection
+        .query_row(
+            "SELECT setting_value FROM app_settings WHERE setting_key = ?1",
+            [LIBRARY_FOLDER_SETTING_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map(|folder| folder.map(PathBuf::from))
+        .map_err(AppError::from)
+}
+
+fn save_library_folder(connection: &Connection, folder: &Path) -> AppResult<()> {
+    connection.execute(
+        "INSERT INTO app_settings (setting_key, setting_value, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(setting_key) DO UPDATE SET
+             setting_value = excluded.setting_value,
+             updated_at = excluded.updated_at",
+        params![
+            LIBRARY_FOLDER_SETTING_KEY,
+            path_to_string(folder),
+            now_timestamp()
+        ],
+    )?;
     Ok(())
 }
 
@@ -4120,6 +4488,134 @@ fn local_track_from_row(row: &Row<'_>) -> rusqlite::Result<LocalTrack> {
     })
 }
 
+fn initialize_library_watcher(app: &AppHandle) -> AppResult<()> {
+    let watcher_app = app.clone();
+    let watcher =
+        LibraryWatcher::new(move |batch| handle_library_change_batch(&watcher_app, batch))?;
+    let configured_folder = {
+        let state = app.state::<AppState>();
+        let folder = state
+            .scan_status
+            .lock()
+            .map_err(|_| AppError::StatePoisoned("scan_status"))?
+            .folder_path
+            .as_deref()
+            .map(PathBuf::from);
+        folder
+    };
+
+    if let Some(folder) = configured_folder.as_ref().filter(|folder| folder.is_dir()) {
+        watcher.set_folder(folder.clone())?;
+    }
+
+    {
+        let state = app.state::<AppState>();
+        *state
+            .library_watcher
+            .lock()
+            .map_err(|_| AppError::StatePoisoned("library_watcher"))? = Some(watcher);
+    }
+
+    if let Some(folder) = configured_folder {
+        if folder.is_dir() {
+            let state = app.state::<AppState>();
+            begin_library_scan(
+                app,
+                &state,
+                folder,
+                false,
+                "Checking the local music folder for changes.",
+            )?;
+        } else {
+            let state = app.state::<AppState>();
+            let message = format!(
+                "The configured music folder is unavailable: {}",
+                folder.display()
+            );
+            if let Ok(mut status) = state.scan_status.lock() {
+                status.error_count = 1;
+                status.last_error = Some(message);
+            };
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_library_change_batch(app: &AppHandle, batch: &LibraryChangeBatch) -> BatchDisposition {
+    let state = app.state::<AppState>();
+    let active_folder_matches = state
+        .scan_status
+        .lock()
+        .map(|status| {
+            !status.is_running
+                && status.folder_path.as_deref() == Some(path_to_string(&batch.folder).as_str())
+        })
+        .unwrap_or(false);
+    if !active_folder_matches {
+        let scan_is_running = state
+            .scan_status
+            .lock()
+            .map(|status| status.is_running)
+            .unwrap_or(false);
+        return if scan_is_running {
+            BatchDisposition::Retry
+        } else {
+            BatchDisposition::Complete
+        };
+    }
+
+    let _sync = match state.library_sync.try_lock() {
+        Ok(sync) => sync,
+        Err(std::sync::TryLockError::WouldBlock) => return BatchDisposition::Retry,
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            update_scan_status(
+                app,
+                &state,
+                Some("Automatic indexing failed: library sync lock was poisoned.".to_owned()),
+                |status| {
+                    status.error_count = 1;
+                    status.last_error = Some("library sync lock was poisoned".to_owned());
+                },
+            );
+            return BatchDisposition::Complete;
+        }
+    };
+
+    let roots = if batch.force_full_rescan || batch.paths.is_empty() {
+        vec![batch.folder.clone()]
+    } else {
+        batch.paths.clone()
+    };
+    match reconcile_library_paths(&state, &roots, false, batch.force_full_rescan, None) {
+        Ok(mut result) => {
+            result.errors.extend(batch.errors.iter().cloned());
+            if result.added_or_updated > 0 || result.removed > 0 {
+                emit_library_changed(app, result.added_or_updated, result.removed);
+            }
+            let error_count = result.errors.len();
+            let last_error = result.errors.last().cloned();
+            let message = (error_count > 0)
+                .then(|| format!("Automatic indexing skipped {error_count} file system changes."));
+            update_scan_status(app, &state, message, |status| {
+                status.error_count = error_count;
+                status.last_error = last_error;
+                status.finished_at = Some(now_timestamp());
+            });
+        }
+        Err(error) => {
+            let message = format!("Automatic indexing failed: {error}");
+            update_scan_status(app, &state, Some(message.clone()), |status| {
+                status.error_count = 1;
+                status.last_error = Some(message);
+                status.finished_at = Some(now_timestamp());
+            });
+        }
+    }
+
+    BatchDisposition::Complete
+}
+
 fn update_scan_status(
     app: &AppHandle,
     state: &AppState,
@@ -4143,6 +4639,16 @@ fn update_scan_status(
 fn emit_scan_status(app: &AppHandle, status: ScanStatus, message: Option<String>) {
     let event = ScanProgressEvent { status, message };
     let _ = app.emit(SCAN_PROGRESS_EVENT, event);
+}
+
+fn emit_library_changed(app: &AppHandle, added_or_updated: usize, removed: usize) {
+    let _ = app.emit(
+        LIBRARY_CHANGED_EVENT,
+        LibraryChangedEvent {
+            added_or_updated,
+            removed,
+        },
+    );
 }
 
 fn path_to_string(path: &Path) -> String {
@@ -4191,6 +4697,7 @@ pub fn run() {
                 bundled_plugins_dir,
             )?;
             app.manage(state);
+            initialize_library_watcher(app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -4438,11 +4945,13 @@ mod tests {
     #[test]
     fn upsert_local_track_should_insert_new_track() {
         let connection = initialized_connection();
-        let track = upsert_local_track(
+        upsert_local_track(
             &connection,
             &draft("/library/alpha.mp3", "Alpha", Some("Artist A")),
         )
         .expect("track should insert");
+        let tracks = list_tracks(&connection).expect("inserted track should load");
+        let track = &tracks[0];
 
         assert_eq!(
             (
@@ -4478,6 +4987,75 @@ mod tests {
             ),
             (1, "Alpha Revised", Some("Artist B"))
         );
+    }
+
+    #[test]
+    fn library_folder_setting_should_persist() {
+        let connection = initialized_connection();
+
+        save_library_folder(&connection, Path::new("/music/library"))
+            .expect("library folder should save");
+        let folder = load_library_folder(&connection).expect("library folder should load");
+
+        assert_eq!(folder.as_deref(), Some(Path::new("/music/library")));
+    }
+
+    #[test]
+    fn minimal_reconcile_paths_should_drop_descendants() {
+        let roots = minimal_reconcile_paths(&[
+            PathBuf::from("/music/artist/album/song.mp3"),
+            PathBuf::from("/music/artist"),
+            PathBuf::from("/music/artist/album"),
+        ]);
+
+        assert_eq!(roots, vec![PathBuf::from("/music/artist")]);
+    }
+
+    #[test]
+    fn reconcile_library_paths_should_remove_deleted_tracks() {
+        let root = temp_dir("reconcile-deleted");
+        let state =
+            AppState::new(&root.join("library.sqlite3")).expect("test app state should initialize");
+        let missing_track = root.join("deleted.mp3");
+        {
+            let db = state.db.lock().expect("database should not be poisoned");
+            upsert_local_track(
+                &db,
+                &draft(&path_to_string(&missing_track), "Deleted", Some("Artist")),
+            )
+            .expect("track should insert");
+        }
+
+        let result =
+            reconcile_library_paths(&state, std::slice::from_ref(&root), false, false, None)
+                .expect("folder should reconcile");
+
+        assert_eq!((result.removed, result.added_or_updated), (1, 0));
+        fs::remove_dir_all(root).expect("test temp directory should be removed");
+    }
+
+    #[test]
+    fn reconcile_library_paths_should_skip_unchanged_audio_metadata() {
+        let root = temp_dir("reconcile-unchanged");
+        let state =
+            AppState::new(&root.join("library.sqlite3")).expect("test app state should initialize");
+        let track_path = root.join("unchanged.mp3");
+        fs::write(&track_path, b"not real audio").expect("test audio file should be written");
+        let signature = local_file_signature(&track_path).expect("file signature should load");
+        let mut unchanged = draft(&path_to_string(&track_path), "Unchanged", Some("Artist"));
+        unchanged.file_size_bytes = signature.file_size_bytes;
+        unchanged.modified_at = signature.modified_at;
+        {
+            let db = state.db.lock().expect("database should not be poisoned");
+            upsert_local_track(&db, &unchanged).expect("track should insert");
+        }
+
+        let result =
+            reconcile_library_paths(&state, std::slice::from_ref(&root), false, false, None)
+                .expect("folder should reconcile");
+
+        assert_eq!((result.added_or_updated, result.errors.len()), (0, 0));
+        fs::remove_dir_all(root).expect("test temp directory should be removed");
     }
 
     #[test]

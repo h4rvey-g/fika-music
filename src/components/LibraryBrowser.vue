@@ -43,6 +43,7 @@ import type {
   AlbumCoverResult,
   LibraryAlbumGroup,
   LibraryGroupToggleResult,
+  LibraryChangedEvent,
   LibraryPlaybackQueue,
   LibraryQueryPage,
   LibraryQueryRequest,
@@ -76,14 +77,12 @@ const props = defineProps<{
   density: LayoutDensity;
   scanStatus: ScanStatus;
   scanMessage: string | null;
-  canIndex: boolean;
 }>();
 
 const emit = defineEmits<{
   playbackQueue: [queue: LibraryPlaybackQueue, autoplay: boolean];
   error: [message: string];
   summary: [summary: LibrarySummary];
-  index: [];
 }>();
 
 const columnDefinitions: ReadonlyArray<ColumnDefinition> = [
@@ -142,7 +141,6 @@ const virtualTotal = ref(0);
 const groupTotal = ref(0);
 const libraryTotal = ref(0);
 const totalDurationSeconds = ref(0);
-const needsReindex = ref(false);
 const isQuerying = ref(false);
 const pendingOffsets = new Set<number>();
 const collapsedGroupIds = ref(new Set<string>());
@@ -185,6 +183,7 @@ let temporaryRelevanceSort = false;
 let isPumpingCovers = false;
 let unlistenAlbumArt: (() => void) | null = null;
 let unlistenMetadata: (() => void) | null = null;
+let unlistenLibraryChanged: (() => void) | null = null;
 
 const rowHeight = computed(() => (props.density === "compact" ? 32 : 34));
 const albumCoverSize = computed(() => rowHeight.value * 2 - 8);
@@ -282,20 +281,11 @@ watch(searchInput, (value) => {
   searchTimer = setTimeout(() => void runQuery(), 120);
 });
 
-watch(
-  () => props.scanStatus.isRunning,
-  (running, wasRunning) => {
-    if (wasRunning && !running) {
-      void runQuery();
-    }
-  },
-);
-
 onMounted(() => {
   window.addEventListener("pointerdown", handleWindowPointerDown);
   window.addEventListener("keydown", handleWindowKeydown);
   void initializeOnlineFeatures();
-  void runQuery();
+  void initializeLibraryUpdates();
 });
 
 onBeforeUnmount(() => {
@@ -304,6 +294,7 @@ onBeforeUnmount(() => {
   stopResize();
   unlistenAlbumArt?.();
   unlistenMetadata?.();
+  unlistenLibraryChanged?.();
   if (searchTimer) {
     clearTimeout(searchTimer);
   }
@@ -352,6 +343,17 @@ async function initializeOnlineFeatures() {
   }
 }
 
+async function initializeLibraryUpdates() {
+  try {
+    unlistenLibraryChanged = await listen<LibraryChangedEvent>("library:changed", () => {
+      void runQuery();
+    });
+    await runQuery();
+  } catch (error) {
+    emit("error", normalizeError(error));
+  }
+}
+
 async function runQuery() {
   const generation = ++queryGeneration;
   isQuerying.value = true;
@@ -372,11 +374,10 @@ async function runQuery() {
     snapshotId.value = page.snapshotId;
     total.value = page.total;
     virtualTotal.value = page.virtualTotal;
-    groupTotal.value = page.groupTotal;
-    libraryTotal.value = page.libraryTotal;
-    totalDurationSeconds.value = page.totalDurationSeconds;
-    needsReindex.value = page.needsReindex;
-    itemsByIndex.value = new Map(page.items.map((item) => [item.index, item]));
+  groupTotal.value = page.groupTotal;
+  libraryTotal.value = page.libraryTotal;
+  totalDurationSeconds.value = page.totalDurationSeconds;
+  itemsByIndex.value = new Map(page.items.map((item) => [item.index, item]));
     pendingOffsets.clear();
     clearSelection();
     emit("summary", { libraryTotal: page.libraryTotal, filteredTotal: page.total });
@@ -1436,17 +1437,6 @@ defineExpose({ refresh: runQuery, startFirstTrack, updatePlayCount });
         </button>
       </div>
 
-      <div class="tooltip tooltip-left" data-tip="Refresh library">
-        <button
-          class="btn btn-square btn-ghost btn-sm"
-          type="button"
-          :disabled="isQuerying"
-          aria-label="Refresh library"
-          @click="runQuery"
-        >
-          <RefreshCw :class="{ 'animate-spin': isQuerying }" :size="16" aria-hidden="true" />
-        </button>
-      </div>
     </div>
 
     <div
@@ -1465,19 +1455,6 @@ defineExpose({ refresh: runQuery, startFirstTrack, updatePlayCount });
         </span>
       </div>
       <progress class="progress mt-1.5 h-1" :value="scanPercent" max="100"></progress>
-    </div>
-
-    <div
-      v-else-if="needsReindex"
-      class="flex shrink-0 items-center gap-3 border-b border-base-300 bg-base-200 px-3 py-2 text-xs"
-      role="status"
-    >
-      <Info :size="14" aria-hidden="true" />
-      <span class="min-w-0 flex-1 truncate">Re-index to add year, genre and audio properties.</span>
-      <button class="btn btn-xs" type="button" :disabled="!canIndex" @click="emit('index')">
-        <RefreshCw :size="13" aria-hidden="true" />
-        Re-index
-      </button>
     </div>
 
     <div

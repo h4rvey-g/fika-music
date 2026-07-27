@@ -21,12 +21,13 @@ use fika_music_lib::plugin_system::PluginRecord;
 use fika_music_lib::source_runtime::{SourceRequest, SourceRequestOutcome};
 use fika_music_lib::{
     AlbumArtSettings, AlbumArtTaskStatus, AlbumCoverCandidate, AlbumCoverResult, AlbumCoverStatus,
-    KugouCommandError, LibraryAlbumGroup, LibraryGroupToggleResult, LibraryPlaybackQueue,
-    LibraryQueryPage, LibraryQueryRequest, LibraryQueueTrack, LibrarySelectionRange,
-    LibrarySelectionRequest, LibrarySortDirection, LibrarySortField, LibraryTaskState,
-    LibraryTextField, LibraryViewItem, LibraryViewItemKind, LibraryViewRange, LocalTrack,
-    MediaSource, MetadataLookupItemResult, MetadataLookupTaskStatus, NeteaseCommandError,
-    PluginCommandError, RemoteCommandError, ScanProgressEvent, ScanStatus, TAURI_COMMAND_NAMES,
+    KugouCommandError, LibraryAlbumGroup, LibraryChangedEvent, LibraryGroupToggleResult,
+    LibraryPlaybackQueue, LibraryQueryPage, LibraryQueryRequest, LibraryQueueTrack,
+    LibrarySelectionRange, LibrarySelectionRequest, LibrarySortDirection, LibrarySortField,
+    LibraryTaskState, LibraryTextField, LibraryViewItem, LibraryViewItemKind, LibraryViewRange,
+    LocalTrack, MediaSource, MetadataLookupItemResult, MetadataLookupTaskStatus,
+    NeteaseCommandError, PluginCommandError, RemoteCommandError, ScanProgressEvent, ScanStatus,
+    TAURI_COMMAND_NAMES,
 };
 use ts_rs::{Config, TS};
 
@@ -97,6 +98,7 @@ fn generate(output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     export_all::<RemoteCommandError>(&config)?;
     export_all::<ScanStatus>(&config)?;
     export_all::<ScanProgressEvent>(&config)?;
+    export_all::<LibraryChangedEvent>(&config)?;
     export_all::<PluginCommandError>(&config)?;
     export_all::<AudioSourceCommandError>(&config)?;
     export_all::<NeteaseCommandError>(&config)?;

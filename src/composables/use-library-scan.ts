@@ -1,4 +1,4 @@
-import { computed, ref } from "vue";
+import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { TAURI_COMMANDS } from "../generated/bindings";
@@ -23,10 +23,6 @@ export function useLibraryScan(updateError: (message: string | null) => void) {
   const selectedFolder = ref<string | null>(null);
   const scanMessage = ref<string | null>(null);
   const isChoosingFolder = ref(false);
-  const isStartingScan = ref(false);
-  const canScan = computed(
-    () => Boolean(selectedFolder.value) && !scanStatus.value.isRunning && !isStartingScan.value,
-  );
   let unlistenScanProgress: UnlistenFn | null = null;
   let disposed = false;
 
@@ -53,7 +49,8 @@ export function useLibraryScan(updateError: (message: string | null) => void) {
           scanMessage.value = event.payload.message;
           if (
             !event.payload.status.isRunning &&
-            event.payload.message?.startsWith("Indexing failed:")
+            (event.payload.message?.startsWith("Indexing failed:") ||
+              event.payload.message?.startsWith("Automatic indexing failed:"))
           ) {
             updateError(event.payload.message);
           }
@@ -74,7 +71,10 @@ export function useLibraryScan(updateError: (message: string | null) => void) {
     updateError(null);
     try {
       const folder = await invoke<string | null>(TAURI_COMMANDS.selectMusicFolder);
-      if (folder) selectedFolder.value = folder;
+      if (folder) {
+        selectedFolder.value = folder;
+        await startScan();
+      }
     } catch (error) {
       updateError(normalizeError(error));
     } finally {
@@ -84,7 +84,6 @@ export function useLibraryScan(updateError: (message: string | null) => void) {
 
   async function startScan(): Promise<void> {
     if (!selectedFolder.value) return;
-    isStartingScan.value = true;
     updateError(null);
     scanMessage.value = null;
     try {
@@ -93,22 +92,6 @@ export function useLibraryScan(updateError: (message: string | null) => void) {
       });
     } catch (error) {
       updateError(normalizeError(error));
-    } finally {
-      isStartingScan.value = false;
-    }
-  }
-
-  function handleDownloadCompleted(destination: string): void {
-    if (!selectedFolder.value || scanStatus.value.isRunning) return;
-    const normalize = (path: string) => path.replace(/[\\/]+$/, "");
-    const library = normalize(selectedFolder.value);
-    const downloaded = normalize(destination);
-    if (
-      downloaded === library ||
-      downloaded.startsWith(`${library}/`) ||
-      downloaded.startsWith(`${library}\\`)
-    ) {
-      void startScan();
     }
   }
 
@@ -123,12 +106,8 @@ export function useLibraryScan(updateError: (message: string | null) => void) {
     selectedFolder,
     scanMessage,
     isChoosingFolder,
-    isStartingScan,
-    canScan,
     initialize,
     chooseFolder,
-    startScan,
-    handleDownloadCompleted,
     dispose,
   };
 }

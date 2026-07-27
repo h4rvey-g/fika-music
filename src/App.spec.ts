@@ -61,7 +61,7 @@ vi.mock("./components/AudioSourceManager.vue", () => ({
 vi.mock("./components/LibraryBrowser.vue", () => ({
   default: defineComponent({
     name: "LibraryBrowser",
-    emits: ["playbackQueue", "summary", "error", "index"],
+    emits: ["playbackQueue", "summary", "error"],
     setup(_, { emit }) {
       function playSecond() {
         emit(
@@ -200,6 +200,17 @@ describe("application shell", () => {
     await sourcesButton?.trigger("click");
     expect(wrapper.find('[data-testid="audio-source-manager"]').exists()).toBe(true);
     expect(wrapper.findComponent({ name: "NowPlayingPanel" }).exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("keeps folder selection without exposing a manual index action", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const header = wrapper.get("header");
+    expect(header.text()).toContain("Folder");
+    expect(header.text()).not.toContain("Index");
+
     wrapper.unmount();
   });
 

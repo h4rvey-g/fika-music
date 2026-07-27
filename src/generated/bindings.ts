@@ -34,6 +34,8 @@ export type KugouQrLoginStatus = "waitingForScan" | "waitingForConfirmation" | "
 
 export type LibraryAlbumGroup = { id: string, title: string | null, albumArtist: string | null, year: number | null, matchedTracks: number, totalTracks: number, totalDurationSeconds: number, startIndex: number, endIndex: number, isUngrouped: boolean, };
 
+export type LibraryChangedEvent = { addedOrUpdated: number, removed: number, };
+
 export type LibraryGroupToggleResult = { snapshotId: string, groupId: string, collapsed: boolean, virtualTotal: number, groupVirtualIndex: number, offset: number, items: Array<LibraryViewItem>, };
 
 export type LibraryPlaybackQueue = { queueId: string, total: number, currentIndex: number, track: LocalTrack, };

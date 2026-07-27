@@ -384,6 +384,27 @@ impl LibraryService {
         Ok(())
     }
 
+    pub fn apply_changes(
+        &mut self,
+        upserts: Vec<LocalTrack>,
+        removed_paths: &HashSet<String>,
+        needs_reindex: bool,
+    ) {
+        let upsert_paths = upserts
+            .iter()
+            .map(|track| track.file_path.as_str())
+            .collect::<HashSet<_>>();
+        self.tracks.retain(|track| {
+            !removed_paths.contains(&track.track.file_path)
+                && !upsert_paths.contains(track.track.file_path.as_str())
+        });
+        drop(upsert_paths);
+        self.tracks
+            .extend(upserts.into_iter().map(IndexedTrack::new));
+        self.needs_reindex = needs_reindex;
+        self.rebuild_indices();
+    }
+
     pub fn query(&mut self, mut request: LibraryQueryRequest) -> LibraryQueryPage {
         if request.search_fields.is_empty() {
             request.search_fields = default_search_fields();
@@ -708,6 +729,10 @@ impl LibraryService {
             .into_par_iter()
             .map(IndexedTrack::new)
             .collect::<Vec<_>>();
+        self.rebuild_indices();
+    }
+
+    fn rebuild_indices(&mut self) {
         self.track_by_id = self
             .tracks
             .iter()
@@ -1559,6 +1584,25 @@ mod tests {
             .expect("queue should resolve through the reloaded id index");
         assert_eq!(queued_track.track.id, 2);
         assert_eq!(queued_track.track.title, "Updated 2");
+    }
+
+    #[test]
+    fn apply_changes_should_replace_updated_tracks_and_remove_deleted_paths() {
+        let mut service = service(vec![
+            track(1, "Removed", "Artist", "Album"),
+            track(2, "Original", "Artist", "Album"),
+        ]);
+        let removed_paths = HashSet::from(["/music/1.flac".to_owned()]);
+
+        service.apply_changes(
+            vec![track(2, "Updated", "Artist", "Album")],
+            &removed_paths,
+            false,
+        );
+        let page = service.query(request(""));
+
+        assert_eq!(page_track_ids(&page), vec![2]);
+        assert_eq!(page.items[2].track.as_ref().unwrap().title, "Updated");
     }
 
     #[test]

@@ -177,10 +177,7 @@ const {
   selectedFolder,
   scanMessage,
   isChoosingFolder,
-  canScan,
   chooseFolder,
-  startScan,
-  handleDownloadCompleted: handleOnlineDownloadCompleted,
 } = libraryScan;
 const activeSection = ref<ActiveSection>("local");
 const activePluginId = ref<string | null>(null);
@@ -1348,24 +1345,15 @@ function trackSubtitle(track: LocalTrack) {
         </div>
 
         <div v-if="activeSection === 'local'" class="navbar-end w-auto gap-2">
-        <button
-          class="btn btn-sm"
-          type="button"
-          :disabled="isChoosingFolder || scanStatus.isRunning"
-          @click="chooseFolder"
-        >
-          <FolderOpen :size="16" aria-hidden="true" />
-          Folder
-        </button>
-        <button
-          class="btn btn-primary btn-sm"
-          type="button"
-          :disabled="!canScan"
-          @click="startScan"
-        >
-          <RefreshCw :class="{ 'animate-spin': scanStatus.isRunning }" :size="16" aria-hidden="true" />
-          Index
-        </button>
+          <button
+            class="btn btn-sm"
+            type="button"
+            :disabled="isChoosingFolder || scanStatus.isRunning"
+            @click="chooseFolder"
+          >
+            <FolderOpen :size="16" aria-hidden="true" />
+            Folder
+          </button>
         </div>
 
         <div v-else-if="activeSection === 'settings'" class="navbar-end w-auto">
@@ -1407,11 +1395,9 @@ function trackSubtitle(track: LocalTrack) {
               :density="layoutDensity"
               :scan-status="scanStatus"
               :scan-message="scanMessage"
-              :can-index="canScan"
               @playback-queue="handleLibraryPlaybackQueue"
               @summary="updateLibrarySummary"
               @error="showLibraryError"
-              @index="startScan"
             />
 
           <aside class="flex min-h-0 flex-col">
@@ -1486,8 +1472,7 @@ function trackSubtitle(track: LocalTrack) {
               @play-request="handleOnlinePlayRequest"
               @open-audio-sources="selectSection('sources')"
               @open-plugin="selectPlugin"
-              @download-completed="handleOnlineDownloadCompleted"
-              @toggle-playback="togglePlayback"
+          @toggle-playback="togglePlayback"
             />
             <NowPlayingPanel
               v-if="activeSection === 'online'"
