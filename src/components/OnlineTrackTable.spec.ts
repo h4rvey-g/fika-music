@@ -18,6 +18,7 @@ function mountTable(
       trackActionId: null,
       supportsLibraryActions: () => supportsLibraryActions,
       supportsPlaylistSelection: () => supportsLibraryActions,
+      supportsComments: () => supportsLibraryActions,
       isFavorite: () => isFavorite,
     },
   });
@@ -116,6 +117,21 @@ describe("OnlineTrackTable", () => {
     expect(rows.every((row) => row.attributes("aria-selected") === "true")).toBe(true);
   });
 
+  it("opens comments for the single track selected from its context menu", async () => {
+    const wrapper = mountTable();
+    await wrapper.get('[data-online-track-key="song-1"]').trigger("contextmenu", {
+      clientX: 100,
+      clientY: 100,
+    });
+
+    const viewComments = wrapper
+      .findAll("[data-online-track-menu] button")
+      .find((button) => button.text().includes("View Comments"));
+    await viewComments?.trigger("click");
+
+    expect(wrapper.emitted("viewComments")?.[0]).toEqual([track]);
+  });
+
   it("emits favorite and playlist actions for an available track", async () => {
     const wrapper = mountTable();
 
@@ -166,6 +182,19 @@ describe("OnlineTrackTable", () => {
 
     expect(wrapper.get('button[aria-label="Add Song 1 to My Favorite Music"]').attributes("disabled")).toBeDefined();
     expect(wrapper.get('button[aria-label="Add Song 1 to a Playlist"]').attributes("disabled")).toBeDefined();
+  });
+
+  it("keeps the comments option visible but disabled without a supported source", async () => {
+    const wrapper = mountTable(false);
+    await wrapper.get('[data-online-track-key="song-1"]').trigger("contextmenu", {
+      clientX: 100,
+      clientY: 100,
+    });
+
+    const viewComments = wrapper
+      .findAll("[data-online-track-menu] button")
+      .find((button) => button.text().includes("View Comments"));
+    expect(viewComments?.attributes("disabled")).toBeDefined();
   });
 
   it("renders a filled error heart for a favorited track", () => {

@@ -2,8 +2,8 @@
   "manifestVersion": 1,
   "id": "fika.kugou",
   "name": "KuGou Music",
-  "version": "0.1.0",
-  "description": "Bundled KuGou search, QR login, playback, recommendations, and Playlist integration.",
+  "version": "0.2.0",
+  "description": "Bundled KuGou search, comments, QR login, playback, recommendations, and Playlist integration.",
   "author": "Fika Music",
   "homepage": "https://github.com/MakcRe/KuGouMusicApi",
   "providerEntrypoints": [
@@ -22,7 +22,7 @@
   "compatibilityTarget": "fika-music",
   "supportedApiVersion": {
     "major": 1,
-    "minor": 4
+    "minor": 5
   },
   "requiredHostBridges": ["kugou-music-api"]
 }

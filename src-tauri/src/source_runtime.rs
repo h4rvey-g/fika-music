@@ -30,7 +30,7 @@ pub const LX_SOURCE_WY: &str = "wy";
 pub const LX_SOURCE_MG: &str = "mg";
 pub const LX_SOURCE_LOCAL: &str = "local";
 
-pub const SOURCE_RUNTIME_API_VERSION: SourceRuntimeApiVersion = SourceRuntimeApiVersion::new(1, 4);
+pub const SOURCE_RUNTIME_API_VERSION: SourceRuntimeApiVersion = SourceRuntimeApiVersion::new(1, 5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -129,6 +129,7 @@ pub enum SourceAction {
     MusicUrl,
     Lyric,
     Pic,
+    MusicComments,
     MusicRecommendations,
     PlaylistList,
     PlaylistRead,
@@ -303,6 +304,15 @@ pub enum SourceRequest {
         #[ts(type = "Record<string, unknown>")]
         music_info: JsonValue,
     },
+    MusicComments {
+        source: String,
+        #[serde(rename = "musicInfo")]
+        #[ts(type = "Record<string, unknown>")]
+        music_info: JsonValue,
+        page: u64,
+        #[serde(rename = "pageSize")]
+        page_size: u64,
+    },
     MusicRecommendations {
         source: String,
         #[serde(rename = "accountRef")]
@@ -357,6 +367,7 @@ impl SourceRequest {
             | Self::MusicUrl { source, .. }
             | Self::Lyric { source, .. }
             | Self::Pic { source, .. }
+            | Self::MusicComments { source, .. }
             | Self::MusicRecommendations { source, .. }
             | Self::PlaylistList { source, .. }
             | Self::PlaylistRead { source, .. }
@@ -380,6 +391,7 @@ impl SourceRequest {
             Self::MusicUrl { .. } => SourceAction::MusicUrl,
             Self::Lyric { .. } => SourceAction::Lyric,
             Self::Pic { .. } => SourceAction::Pic,
+            Self::MusicComments { .. } => SourceAction::MusicComments,
             Self::MusicRecommendations { .. } => SourceAction::MusicRecommendations,
             Self::PlaylistList { .. } => SourceAction::PlaylistList,
             Self::PlaylistRead { .. } => SourceAction::PlaylistRead,
@@ -482,6 +494,22 @@ impl SourceRequest {
             | Self::Pic { music_info, .. } => {
                 if !music_info.is_object() {
                     return Err("musicInfo must be a JSON object".to_owned());
+                }
+            }
+            Self::MusicComments {
+                music_info,
+                page,
+                page_size,
+                ..
+            } => {
+                if !music_info.is_object() {
+                    return Err("musicComments musicInfo must be a JSON object".to_owned());
+                }
+                if *page == 0 {
+                    return Err("musicComments page must be at least 1".to_owned());
+                }
+                if !(1..=50).contains(page_size) {
+                    return Err("musicComments pageSize must be between 1 and 50".to_owned());
                 }
             }
             Self::MusicRecommendations {
@@ -653,6 +681,31 @@ pub struct LyricResponse {
     pub tlyric: Option<String>,
     pub rlyric: Option<String>,
     pub lxlyric: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct SourceComment {
+    pub id: String,
+    pub user_name: String,
+    pub avatar_url: Option<String>,
+    pub content: String,
+    pub timestamp_ms: Option<u64>,
+    pub time_label: Option<String>,
+    pub liked_count: u64,
+    pub reply_count: u64,
+    pub location: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct SourceCommentsResponse {
+    pub hot_comments: Vec<SourceComment>,
+    pub comments: Vec<SourceComment>,
+    pub total: Option<u64>,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
@@ -864,6 +917,7 @@ pub enum SourceResponse {
     MusicUrl(String),
     Lyric(LyricResponse),
     Pic(String),
+    MusicComments(SourceCommentsResponse),
     MusicRecommendations(SourceRecommendationsResponse),
     PlaylistList(Vec<SourcePlaylist>),
     PlaylistRead(SourcePlaylistDetail),
@@ -2569,6 +2623,10 @@ fn validate_response(
             | (SourceAction::Lyric, SourceResponse::Lyric(_))
             | (SourceAction::Pic, SourceResponse::Pic(_))
             | (
+                SourceAction::MusicComments,
+                SourceResponse::MusicComments(_)
+            )
+            | (
                 SourceAction::MusicRecommendations,
                 SourceResponse::MusicRecommendations(_)
             )
@@ -2669,6 +2727,16 @@ fn validate_response(
         SourceResponse::PlaylistReadPublic(search) => {
             validate_track_page(source_key, search, "playlistReadPublic", context)?;
         }
+        SourceResponse::MusicComments(response) => {
+            if response
+                .hot_comments
+                .iter()
+                .chain(&response.comments)
+                .any(invalid_source_comment)
+            {
+                return Err(context.provider_error("musicComments returned an invalid comment"));
+            }
+        }
         SourceResponse::MusicRecommendations(recommendations) => {
             if recommendations
                 .list
@@ -2742,6 +2810,24 @@ fn validate_response(
         SourceResponse::Lyric(_) => {}
     }
     Ok(())
+}
+
+fn invalid_source_comment(comment: &SourceComment) -> bool {
+    comment.id.trim().is_empty()
+        || comment.user_name.trim().is_empty()
+        || comment.content.trim().is_empty()
+        || comment
+            .avatar_url
+            .as_deref()
+            .is_some_and(|url| !url.starts_with("http://") && !url.starts_with("https://"))
+        || comment
+            .time_label
+            .as_deref()
+            .is_some_and(|label| label.trim().is_empty())
+        || comment
+            .location
+            .as_deref()
+            .is_some_and(|location| location.trim().is_empty())
 }
 
 fn validate_track_page(
@@ -3666,6 +3752,36 @@ mod tests {
         assert_eq!(serialized["action"], "musicUrl");
         assert_eq!(serialized["quality"], "128k");
         assert_eq!(serialized["musicInfo"]["id"], "track-1");
+    }
+
+    #[test]
+    fn music_comments_request_should_validate_and_serialize_pagination() {
+        let request = SourceRequest::MusicComments {
+            source: LX_SOURCE_WY.to_owned(),
+            music_info: json!({ "id": "track-1" }),
+            page: 2,
+            page_size: 20,
+        };
+
+        request.validate().expect("comment request should be valid");
+        let serialized = serde_json::to_value(&request).expect("comment request should serialize");
+        assert_eq!(serialized["action"], "musicComments");
+        assert_eq!(serialized["musicInfo"]["id"], "track-1");
+        assert_eq!(serialized["page"], 2);
+        assert_eq!(serialized["pageSize"], 20);
+
+        let invalid = SourceRequest::MusicComments {
+            source: LX_SOURCE_WY.to_owned(),
+            music_info: json!({ "id": "track-1" }),
+            page: 0,
+            page_size: 51,
+        };
+        assert_eq!(
+            invalid
+                .validate()
+                .expect_err("zero comment page should be rejected"),
+            "musicComments page must be at least 1"
+        );
     }
 
     #[test]

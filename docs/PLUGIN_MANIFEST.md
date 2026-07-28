@@ -36,8 +36,8 @@ This is the complete bundled KuGou manifest:
   "manifestVersion": 1,
   "id": "fika.kugou",
   "name": "KuGou Music",
-  "version": "0.1.0",
-  "description": "Bundled KuGou search, QR login, playback, recommendations, and Playlist integration.",
+  "version": "0.2.0",
+  "description": "Bundled KuGou search, comments, QR login, playback, recommendations, and Playlist integration.",
   "author": "Fika Music",
   "homepage": "https://github.com/MakcRe/KuGouMusicApi",
   "providerEntrypoints": [
@@ -56,7 +56,7 @@ This is the complete bundled KuGou manifest:
   "compatibilityTarget": "fika-music",
   "supportedApiVersion": {
     "major": 1,
-    "minor": 4
+    "minor": 5
   },
   "requiredHostBridges": ["kugou-music-api"]
 }
@@ -115,8 +115,8 @@ duplicate actions or qualities.
 
 | Entrypoint | Plugin ID | Provider ID | Runtime API | Required host bridge |
 | --- | --- | --- | --- | --- |
-| `builtin:netease` | `fika.netease` | `fika-netease` | `1.4` | `netease-api-enhanced` |
-| `builtin:kugou` | `fika.kugou` | `fika-kugou` | `1.4` | `kugou-music-api` |
+| `builtin:netease` | `fika.netease` | `fika-netease` | `1.5` | `netease-api-enhanced` |
+| `builtin:kugou` | `fika.kugou` | `fika-kugou` | `1.5` | `kugou-music-api` |
 
 Both production entrypoints are reserved for their listed Plugin and Provider
 IDs. `builtin:runtime-demo` exists only in Rust tests. Legacy
@@ -149,7 +149,7 @@ and clears the previous grants until it is enabled again.
 ## Runtime versions
 
 Compatibility requires the same major version and a package minor version less
-than or equal to the host minor version. The current host is `1.4`.
+than or equal to the host minor version. The current host is `1.5`.
 
 | Version | Contract introduced |
 | --- | --- |
@@ -158,6 +158,7 @@ than or equal to the host minor version. The current host is `1.4`.
 | `1.2` | `artistSearch`, `albumSearch`, `playlistSearch`, `searchSuggestions`, `artistTopTracks`, `albumRead`, `playlistReadPublic` |
 | `1.3` | Recommendation kinds: `daily`, `roaming`, and `radar`; omitted `kind` defaults to `daily`. |
 | `1.4` | `artistAlbums`, `artistBiography` |
+| `1.5` | Paginated `musicComments` and normalized comment responses. |
 
 The serialized request and response DTOs are generated from Rust into
 `src/generated/bindings.ts`. Do not maintain a second handwritten type list.

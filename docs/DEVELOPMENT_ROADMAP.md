@@ -462,9 +462,10 @@ Implementation notes for the completed Slice 4 NetEase Plugin:
   Playlist read/write, and bridge capability declarations remain inspectable
   and are granted together when the Plugin is enabled.
 - Runtime API 1.1 added typed recommendation and Playlist requests. The current
-  1.4 contract also includes expanded artist, album, Playlist, suggestion, and
-  biography actions. The Provider normalizes upstream song objects into Remote
-  Tracks and rejects non-NetEase tracks before Playlist mutations.
+  1.5 contract also includes expanded artist, album, Playlist, suggestion,
+  biography, and paginated music comment actions. The Provider normalizes
+  upstream song objects into Remote Tracks and rejects non-NetEase tracks
+  before Playlist mutations.
 - The Node-free Rust bridge implements the selected v4.32.1 QR login,
   recommendation, user Playlist, Playlist detail, playable song URL, and
   Playlist manipulation behavior. No Express server, dynamic module loading,

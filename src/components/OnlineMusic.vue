@@ -23,6 +23,7 @@ import {
   X,
 } from "@lucide/vue";
 import type { AudioSourceRecord } from "../generated/bindings";
+import OnlineCommentsDialog from "./OnlineCommentsDialog.vue";
 import OnlineTrackTable from "./OnlineTrackTable.vue";
 import {
   centerElementInScrollViewport,
@@ -79,6 +80,7 @@ import {
 } from "../lib/online-music-api";
 import { addNeteasePlaylistTrack, NETEASE_PLUGIN_ID } from "../lib/netease-api";
 import { addKugouPlaylistTrack, KUGOU_PLUGIN_ID } from "../lib/kugou-api";
+import { onlineTrackSupportsComments } from "../lib/online-comment-api";
 
 type SectionState = {
   loading: boolean;
@@ -261,6 +263,7 @@ const trackActionMessage = ref<string | null>(null);
 const favoriteTrackKeys = ref<Set<string>>(new Set());
 const favoriteTrackIdentities = ref<Set<string>>(new Set());
 const optimisticFavoriteTrackIdentities = ref<Set<string>>(new Set());
+const commentTrack = ref<OnlineTrack | null>(null);
 
 let unlistenSearch: (() => void) | null = null;
 let unlistenDownloads: (() => void) | null = null;
@@ -447,6 +450,7 @@ watch(
       const entryGeneration = beginVisibleSongListEntry();
       void finishVisibleSongListEntry(entryGeneration);
     } else {
+      commentTrack.value = null;
       if (playlistLibraryRequestId) cancelPlaylistLibraryLoad();
       cancelFavoriteTrackLoad();
       cancelTrackEntityResolution();
@@ -867,6 +871,10 @@ function supportsLibraryActions(track: OnlineTrack) {
   return track.candidates.some((candidate) =>
     candidate.pluginId === NETEASE_PLUGIN_ID || candidate.pluginId === KUGOU_PLUGIN_ID
   );
+}
+
+function openTrackComments(track: OnlineTrack) {
+  if (onlineTrackSupportsComments(track)) commentTrack.value = track;
 }
 
 function supportsPlaylistSelection(tracks: OnlineTrack[]) {
@@ -2518,6 +2526,7 @@ defineExpose({
           :entity-action-id="entityActionId"
           :supports-library-actions="supportsLibraryActions"
           :supports-playlist-selection="supportsPlaylistSelection"
+          :supports-comments="onlineTrackSupportsComments"
           :is-favorite="isTrackFavorite"
           @play="playTrack($event, detailTracks)"
           @download="downloadTrack"
@@ -2525,6 +2534,7 @@ defineExpose({
           @favorite="addToFavorites"
           @add-to-playlist="openPlaylistPicker"
           @add-selection-to-playlist="openPlaylistPicker"
+          @view-comments="openTrackComments"
           @open-artist="openTrackArtist"
           @open-album="openTrackAlbum"
         />
@@ -2734,6 +2744,7 @@ defineExpose({
         :entity-action-id="entityActionId"
         :supports-library-actions="supportsLibraryActions"
         :supports-playlist-selection="supportsPlaylistSelection"
+        :supports-comments="onlineTrackSupportsComments"
         :is-favorite="isTrackFavorite"
         @play="requestTrackPlayback($event, recommendationTracks)"
         @download="downloadTrack"
@@ -2741,6 +2752,7 @@ defineExpose({
         @favorite="addToFavorites"
         @add-to-playlist="openPlaylistPicker"
         @add-selection-to-playlist="openPlaylistPicker"
+        @view-comments="openTrackComments"
         @open-artist="openTrackArtist"
         @open-album="openTrackAlbum"
       />
@@ -3086,6 +3098,7 @@ defineExpose({
           :entity-action-id="entityActionId"
           :supports-library-actions="supportsLibraryActions"
           :supports-playlist-selection="supportsPlaylistSelection"
+          :supports-comments="onlineTrackSupportsComments"
           :is-favorite="isTrackFavorite"
           @play="requestTrackPlayback($event, sectionItems<OnlineTrack>('songs'))"
           @download="downloadTrack"
@@ -3093,6 +3106,7 @@ defineExpose({
           @favorite="addToFavorites"
           @add-to-playlist="openPlaylistPicker"
           @add-selection-to-playlist="openPlaylistPicker"
+          @view-comments="openTrackComments"
           @open-artist="openTrackArtist"
           @open-album="openTrackAlbum"
         />
@@ -3126,6 +3140,13 @@ defineExpose({
         </div>
       </section>
     </div>
+
+    <OnlineCommentsDialog
+      v-if="commentTrack"
+      :key="commentTrack.key"
+      :track="commentTrack"
+      @close="commentTrack = null"
+    />
 
     <Teleport to="body" :disabled="isActive">
       <dialog

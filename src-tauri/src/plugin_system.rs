@@ -2914,7 +2914,7 @@ mod tests {
         assert!(matches!(
             error,
             PluginSystemError::ProviderLoad { message, .. }
-                if message.contains("Provider API 1.4, expected 1.3")
+            if message.contains("Provider API 1.5, expected 1.3")
         ));
     }
 

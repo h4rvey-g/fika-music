@@ -1,6 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Download, Heart, ListPlus, Music2, Pause, RefreshCw, Volume2 } from "@lucide/vue";
+import {
+  Download,
+  Heart,
+  ListPlus,
+  MessageCircle,
+  Music2,
+  Pause,
+  RefreshCw,
+  Volume2,
+} from "@lucide/vue";
 import {
   onlineTracksMatch,
   splitOnlineArtistNames,
@@ -15,6 +24,7 @@ const props = defineProps<{
   entityActionId?: string | null;
   supportsLibraryActions: (track: OnlineTrack) => boolean;
   supportsPlaylistSelection: (tracks: OnlineTrack[]) => boolean;
+  supportsComments: (track: OnlineTrack) => boolean;
   isFavorite: (track: OnlineTrack) => boolean;
 }>();
 
@@ -25,6 +35,7 @@ const emit = defineEmits<{
   favorite: [track: OnlineTrack];
   addToPlaylist: [track: OnlineTrack];
   addSelectionToPlaylist: [tracks: OnlineTrack[]];
+  viewComments: [track: OnlineTrack];
   openArtist: [track: OnlineTrack, artist: string];
   openAlbum: [track: OnlineTrack];
 }>();
@@ -38,6 +49,10 @@ const selectedTracks = computed(() =>
 const selectionSupportsPlaylist = computed(() =>
   props.supportsPlaylistSelection(selectedTracks.value)
 );
+const selectionSupportsComments = computed(() => {
+  const [track] = selectedTracks.value;
+  return selectedTracks.value.length === 1 && Boolean(track && props.supportsComments(track));
+});
 
 watch(
   () => props.tracks,
@@ -126,9 +141,15 @@ function addSelectionToPlaylist() {
   closeContextMenu();
 }
 
+function viewComments() {
+  const [track] = selectedTracks.value;
+  if (selectionSupportsComments.value && track) emit("viewComments", track);
+  closeContextMenu();
+}
+
 function menuPosition(x: number, y: number) {
   const width = 240;
-  const height = 112;
+  const height = 156;
   return {
     x: Math.max(8, Math.min(x, window.innerWidth - width - 8)),
     y: Math.max(8, Math.min(y, window.innerHeight - height - 8)),
@@ -352,6 +373,19 @@ function artistActionId(track: OnlineTrack, artist: string) {
         >
         <ListPlus :size="16" aria-hidden="true" />
           Add to Playlist
+        </button>
+      </li>
+      <li>
+        <button
+          type="button"
+          :disabled="!selectionSupportsComments"
+          :title="selectedTracks.length === 1 && !selectionSupportsComments
+            ? 'This track has no NetEase or KuGou comment source'
+            : undefined"
+          @click="viewComments"
+        >
+          <MessageCircle :size="16" aria-hidden="true" />
+          View Comments
         </button>
       </li>
     </ul>

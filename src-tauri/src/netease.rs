@@ -3,11 +3,12 @@ use crate::source_runtime::{
     self, JsonScalar, MusicRecommendationKind, RemoteTrack, SourceAction,
     SourceAlbumSearchResponse, SourceAlbumSearchResult, SourceArtistBiography,
     SourceArtistBiographySection, SourceArtistSearchResponse, SourceArtistSearchResult,
-    SourceCapability, SourceEntityRef, SourceInfo, SourcePlaylist, SourcePlaylistDetail,
-    SourcePlaylistMutation, SourcePlaylistMutationKind, SourcePlaylistSearchResponse,
-    SourcePlaylistSearchResult, SourceProvider, SourceQuality, SourceRecommendationsResponse,
-    SourceRequest, SourceResponse, SourceRuntimeApiVersion, SourceRuntimeContext,
-    SourceRuntimeError, SourceSearchResponse, SourceSuggestionsResponse, SourceTrackRef,
+    SourceCapability, SourceComment, SourceCommentsResponse, SourceEntityRef, SourceInfo,
+    SourcePlaylist, SourcePlaylistDetail, SourcePlaylistMutation, SourcePlaylistMutationKind,
+    SourcePlaylistSearchResponse, SourcePlaylistSearchResult, SourceProvider, SourceQuality,
+    SourceRecommendationsResponse, SourceRequest, SourceResponse, SourceRuntimeApiVersion,
+    SourceRuntimeContext, SourceRuntimeError, SourceSearchResponse, SourceSuggestionsResponse,
+    SourceTrackRef,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
@@ -31,7 +32,7 @@ pub const NETEASE_PLUGIN_ID: &str = "fika.netease";
 pub const NETEASE_PROVIDER_ID: &str = "fika-netease";
 pub const NETEASE_PROVIDER_ENTRYPOINT: &str = "builtin:netease";
 pub const NETEASE_PROVIDER_API_VERSION: SourceRuntimeApiVersion =
-    SourceRuntimeApiVersion::new(1, 4);
+    SourceRuntimeApiVersion::new(1, 5);
 pub const NETEASE_HOST_BRIDGE_ID: &str = "netease-api-enhanced";
 pub const NETEASE_API_BASIS_VERSION: &str = "4.32.1";
 
@@ -250,6 +251,13 @@ pub trait NeteaseProviderBridge: Send + Sync {
         page: u64,
         page_size: u64,
     ) -> Result<SourceSearchResponse, NeteaseBridgeError>;
+
+    fn music_comments(
+        &self,
+        track_id: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceCommentsResponse, NeteaseBridgeError>;
 
     fn recommendations(
         &self,
@@ -1007,6 +1015,29 @@ impl NeteaseProviderBridge for NeteaseServiceBridge {
         })
     }
 
+    fn music_comments(
+        &self,
+        track_id: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceCommentsResponse, NeteaseBridgeError> {
+        validate_netease_track_id(track_id)?;
+        let offset = page.saturating_sub(1).saturating_mul(page_size);
+        let body = new_client()?
+            .raw_weapi(
+                &format!("https://music.163.com/api/v1/resource/comments/R_SO_4_{track_id}"),
+                json!({
+                    "rid": track_id,
+                    "limit": page_size,
+                    "offset": offset,
+                    "beforeTime": 0,
+                }),
+            )
+            .map_err(|error| bridge_failure("fetch track comments", error))
+            .and_then(|response| checked_body(response, "fetch track comments"))?;
+        Ok(netease_comments_from_json(&body, page, page_size))
+    }
+
     fn recommendations(
         &self,
         account_ref: &str,
@@ -1585,6 +1616,74 @@ fn netease_artist_biography_from_json(body: &JsonValue) -> SourceArtistBiography
     SourceArtistBiography { summary, sections }
 }
 
+fn netease_comments_from_json(
+    body: &JsonValue,
+    page: u64,
+    page_size: u64,
+) -> SourceCommentsResponse {
+    let comments = body
+        .get("comments")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(netease_comment_from_json)
+        .collect::<Vec<_>>();
+    let hot_comments = if page == 1 {
+        body.get("hotComments")
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(netease_comment_from_json)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let total = body.get("total").and_then(JsonValue::as_u64);
+    let has_more = body
+        .get("more")
+        .and_then(JsonValue::as_bool)
+        .or_else(|| total.map(|total| page.saturating_mul(page_size) < total))
+        .unwrap_or(comments.len() == page_size as usize);
+    SourceCommentsResponse {
+        hot_comments,
+        comments,
+        total,
+        has_more,
+    }
+}
+
+fn netease_comment_from_json(value: &JsonValue) -> Option<SourceComment> {
+    let user = value.get("user")?;
+    let content = json_string(value.get("content"))?.trim().to_owned();
+    Some(SourceComment {
+        id: json_id(value.get("commentId"))?,
+        user_name: json_string(user.get("nickname"))?,
+        avatar_url: netease_image_url(user.get("avatarUrl")),
+        content,
+        timestamp_ms: value.get("time").and_then(JsonValue::as_u64),
+        time_label: json_string(value.get("timeStr")),
+        liked_count: value
+            .get("likedCount")
+            .and_then(JsonValue::as_u64)
+            .unwrap_or_default(),
+        reply_count: value
+            .get("replyCount")
+            .and_then(JsonValue::as_u64)
+            .or_else(|| {
+                value
+                    .pointer("/showFloorComment/replyCount")
+                    .and_then(JsonValue::as_u64)
+            })
+            .unwrap_or_default(),
+        location: value
+            .pointer("/ipLocation/location")
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|location| !location.is_empty())
+            .map(str::to_owned),
+    })
+}
+
 fn system_time_year(time: SystemTime) -> Option<u32> {
     let seconds = time.duration_since(UNIX_EPOCH).ok()?.as_secs();
     let days = seconds / 86_400;
@@ -1680,6 +1779,7 @@ impl SourceProvider for NeteaseSourceProvider {
                     SourceAction::AlbumRead,
                     SourceAction::PlaylistReadPublic,
                     SourceAction::MusicUrl,
+                    SourceAction::MusicComments,
                     SourceAction::MusicRecommendations,
                     SourceAction::PlaylistList,
                     SourceAction::PlaylistRead,
@@ -1847,6 +1947,19 @@ impl SourceProvider for NeteaseSourceProvider {
                     .bridge
                     .music_url(account_ref.as_deref(), &track_id, quality);
                 Self::finish(context, operation, result).map(SourceResponse::MusicUrl)
+            }
+            SourceRequest::MusicComments {
+                music_info,
+                page,
+                page_size,
+                ..
+            } => {
+                let operation = "fetch NetEase track comments";
+                Self::prepare_bridge(context, operation)?;
+                let track_id = track_id_from_music_info(&music_info)
+                    .ok_or_else(|| context.provider_error("Remote Track has no NetEase id"))?;
+                let result = self.bridge.music_comments(&track_id, page, page_size);
+                Self::finish(context, operation, result).map(SourceResponse::MusicComments)
             }
             SourceRequest::MusicRecommendations {
                 account_ref,
@@ -2593,6 +2706,20 @@ mod tests {
             self.music_search("", 1, 1)
         }
 
+        fn music_comments(
+            &self,
+            _track_id: &str,
+            _page: u64,
+            _page_size: u64,
+        ) -> Result<SourceCommentsResponse, NeteaseBridgeError> {
+            Ok(SourceCommentsResponse {
+                hot_comments: Vec::new(),
+                comments: Vec::new(),
+                total: Some(0),
+                has_more: false,
+            })
+        }
+
         fn recommendations(
             &self,
             _account_ref: &str,
@@ -2710,6 +2837,86 @@ mod tests {
     }
 
     #[test]
+    fn comments_parser_should_normalize_hot_and_recent_comments() {
+        let response = netease_comments_from_json(
+            &json!({
+                "hotComments": [{
+                    "commentId": 11,
+                    "user": {
+                        "nickname": "Hot Listener",
+                        "avatarUrl": "http://example.test/hot.jpg"
+                    },
+                    "content": "A memorable line",
+                    "time": 1_700_000_000_000_u64,
+                    "timeStr": "2023-11-14",
+                    "likedCount": 42,
+                    "showFloorComment": { "replyCount": 3 },
+                    "ipLocation": { "location": "Shanghai" }
+                }],
+                "comments": [{
+                    "commentId": "12",
+                    "user": { "nickname": "Recent Listener" },
+                    "content": "Still listening",
+                    "timeStr": "just now",
+                    "likedCount": 2
+                }],
+                "total": 21,
+                "more": true
+            }),
+            1,
+            20,
+        );
+
+        assert_eq!(
+            response,
+            SourceCommentsResponse {
+                hot_comments: vec![SourceComment {
+                    id: "11".to_owned(),
+                    user_name: "Hot Listener".to_owned(),
+                    avatar_url: Some("https://example.test/hot.jpg".to_owned()),
+                    content: "A memorable line".to_owned(),
+                    timestamp_ms: Some(1_700_000_000_000),
+                    time_label: Some("2023-11-14".to_owned()),
+                    liked_count: 42,
+                    reply_count: 3,
+                    location: Some("Shanghai".to_owned()),
+                }],
+                comments: vec![SourceComment {
+                    id: "12".to_owned(),
+                    user_name: "Recent Listener".to_owned(),
+                    avatar_url: None,
+                    content: "Still listening".to_owned(),
+                    timestamp_ms: None,
+                    time_label: Some("just now".to_owned()),
+                    liked_count: 2,
+                    reply_count: 0,
+                    location: None,
+                }],
+                total: Some(21),
+                has_more: true,
+            }
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the live NetEase comments service"]
+    fn live_comments_should_return_public_page() {
+        let bridge = NeteaseServiceBridge::with_credentials(
+            test_database(),
+            Arc::new(DefaultSourceHost::new(Duration::from_secs(10), 1024)),
+            Arc::new(MemoryCredentialStore::default()),
+        )
+        .expect("test bridge should initialize");
+
+        let response = bridge
+            .music_comments("186016", 1, 20)
+            .expect("live NetEase comments should load");
+
+        assert!(response.total.is_some_and(|total| total > 0));
+        assert!(!response.comments.is_empty() || !response.hot_comments.is_empty());
+    }
+
+    #[test]
     fn private_radar_parser_should_find_the_personalized_playlist_by_name() {
         let playlist_id = private_radar_playlist_id(&json!({
             "recommend": [{
@@ -2803,6 +3010,7 @@ mod tests {
                 SourceAction::AlbumRead,
                 SourceAction::PlaylistReadPublic,
                 SourceAction::MusicUrl,
+                SourceAction::MusicComments,
                 SourceAction::MusicRecommendations,
                 SourceAction::PlaylistList,
                 SourceAction::PlaylistRead,

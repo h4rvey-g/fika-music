@@ -2,11 +2,12 @@ use crate::database::AppCredentialStore;
 use crate::source_runtime::{
     self, JsonScalar, RemoteTrack, SourceAction, SourceAlbumSearchResponse,
     SourceAlbumSearchResult, SourceArtistSearchResponse, SourceArtistSearchResult,
-    SourceCapability, SourceEntityRef, SourceInfo, SourcePlaylist, SourcePlaylistDetail,
-    SourcePlaylistMutation, SourcePlaylistMutationKind, SourcePlaylistSearchResponse,
-    SourcePlaylistSearchResult, SourceProvider, SourceQuality, SourceRecommendationsResponse,
-    SourceRequest, SourceResponse, SourceRuntimeApiVersion, SourceRuntimeContext,
-    SourceRuntimeError, SourceSearchResponse, SourceSuggestionsResponse, SourceTrackRef,
+    SourceCapability, SourceComment, SourceCommentsResponse, SourceEntityRef, SourceInfo,
+    SourcePlaylist, SourcePlaylistDetail, SourcePlaylistMutation, SourcePlaylistMutationKind,
+    SourcePlaylistSearchResponse, SourcePlaylistSearchResult, SourceProvider, SourceQuality,
+    SourceRecommendationsResponse, SourceRequest, SourceResponse, SourceRuntimeApiVersion,
+    SourceRuntimeContext, SourceRuntimeError, SourceSearchResponse, SourceSuggestionsResponse,
+    SourceTrackRef,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
@@ -27,7 +28,7 @@ use uuid::Uuid;
 pub const KUGOU_PLUGIN_ID: &str = "fika.kugou";
 pub const KUGOU_PROVIDER_ID: &str = "fika-kugou";
 pub const KUGOU_PROVIDER_ENTRYPOINT: &str = "builtin:kugou";
-pub const KUGOU_PROVIDER_API_VERSION: SourceRuntimeApiVersion = SourceRuntimeApiVersion::new(1, 4);
+pub const KUGOU_PROVIDER_API_VERSION: SourceRuntimeApiVersion = SourceRuntimeApiVersion::new(1, 5);
 pub const KUGOU_HOST_BRIDGE_ID: &str = "kugou-music-api";
 pub const KUGOU_API_BASIS_VERSION: &str = "1.5.1 (283f1e9)";
 
@@ -284,6 +285,13 @@ pub trait KugouProviderBridge: Send + Sync {
         page_size: u64,
     ) -> Result<SourceSearchResponse, KugouBridgeError>;
 
+    fn music_comments(
+        &self,
+        mix_song_id: u64,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceCommentsResponse, KugouBridgeError>;
+
     fn music_url(
         &self,
         account_ref: &str,
@@ -363,6 +371,12 @@ trait KugouApi: Send + Sync {
     fn public_playlist_page(
         &self,
         playlist_id: &str,
+        page: u64,
+        page_size: u64,
+    ) -> Result<JsonValue, KugouBridgeError>;
+    fn music_comments(
+        &self,
+        mix_song_id: u64,
         page: u64,
         page_size: u64,
     ) -> Result<JsonValue, KugouBridgeError>;
@@ -652,6 +666,38 @@ impl KugouApi for KugouHttpApi {
                 ),
                 ("pagesize".to_owned(), page_size.to_string()),
                 ("global_collection_id".to_owned(), playlist_id.to_owned()),
+            ]),
+            None,
+            SignatureKind::Android,
+            None,
+        )
+    }
+
+    fn music_comments(
+        &self,
+        mix_song_id: u64,
+        page: u64,
+        page_size: u64,
+    ) -> Result<JsonValue, KugouBridgeError> {
+        self.request_json(
+            "fetch track comments",
+            GATEWAY_BASE_URL,
+            "/mcomment/v1/cmtlist",
+            Method::POST,
+            &KugouDevice::generate(),
+            None,
+            BTreeMap::from([
+                ("mixsongid".to_owned(), mix_song_id.to_string()),
+                ("need_show_image".to_owned(), "1".to_owned()),
+                ("p".to_owned(), page.to_string()),
+                ("pagesize".to_owned(), page_size.to_string()),
+                ("show_classify".to_owned(), "1".to_owned()),
+                ("show_hotword_list".to_owned(), "1".to_owned()),
+                ("extdata".to_owned(), "0".to_owned()),
+                (
+                    "code".to_owned(),
+                    "fc4be23b4e972707f36b8a828a93ba8a".to_owned(),
+                ),
             ]),
             None,
             SignatureKind::Android,
@@ -1413,6 +1459,19 @@ impl KugouProviderBridge for KugouServiceBridge {
         })
     }
 
+    fn music_comments(
+        &self,
+        mix_song_id: u64,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceCommentsResponse, KugouBridgeError> {
+        if mix_song_id == 0 {
+            return Err(KugouBridgeError::InvalidTrack);
+        }
+        let body = self.api.music_comments(mix_song_id, page, page_size)?;
+        Ok(kugou_comments_from_json(&body, page, page_size))
+    }
+
     fn music_url(
         &self,
         account_ref: &str,
@@ -1660,6 +1719,7 @@ impl SourceProvider for KugouSourceProvider {
                     SourceAction::AlbumRead,
                     SourceAction::PlaylistReadPublic,
                     SourceAction::MusicUrl,
+                    SourceAction::MusicComments,
                     SourceAction::MusicRecommendations,
                     SourceAction::PlaylistList,
                     SourceAction::PlaylistRead,
@@ -1817,6 +1877,20 @@ impl SourceProvider for KugouSourceProvider {
                 }
                 Ok(SourceResponse::MusicUrl(resolved.url))
             }
+            SourceRequest::MusicComments {
+                music_info,
+                page,
+                page_size,
+                ..
+            } => {
+                let operation = "fetch KuGou track comments";
+                Self::prepare_bridge(context, operation)?;
+                let mix_song_id = mix_song_id_from_music_info(&music_info).ok_or_else(|| {
+                    context.provider_error("Remote Track has no KuGou mix song id")
+                })?;
+                let result = self.bridge.music_comments(mix_song_id, page, page_size);
+                Self::finish(context, operation, result).map(SourceResponse::MusicComments)
+            }
             SourceRequest::MusicRecommendations {
                 account_ref,
                 kind: source_runtime::MusicRecommendationKind::Daily,
@@ -1886,6 +1960,13 @@ fn track_identity_from_music_info(music_info: &JsonValue) -> Option<KugouTrackId
         album_id,
         album_audio_id,
     })
+}
+
+fn mix_song_id_from_music_info(music_info: &JsonValue) -> Option<u64> {
+    ["mixSongId", "albumAudioId", "album_audio_id", "mixsongid"]
+        .into_iter()
+        .find_map(|key| json_u64(music_info.get(key)))
+        .filter(|id| *id > 0)
 }
 
 fn kugou_playlist_track_from_ref(
@@ -2307,6 +2388,62 @@ fn kugou_total(body: &JsonValue) -> Option<u64> {
 fn kugou_is_end(body: &JsonValue, page: u64, page_size: u64, returned: usize) -> bool {
     kugou_total(body).is_some_and(|total| page.saturating_mul(page_size) >= total)
         || returned < page_size as usize
+}
+
+fn kugou_comments_from_json(body: &JsonValue, page: u64, page_size: u64) -> SourceCommentsResponse {
+    let comments = body
+        .get("list")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(kugou_comment_from_json)
+        .collect::<Vec<_>>();
+    let total = json_u64(body.get("count"));
+    let has_more = json_u64(body.get("maxPage"))
+        .map(|maximum_page| page < maximum_page)
+        .or_else(|| total.map(|total| page.saturating_mul(page_size) < total))
+        .unwrap_or(comments.len() == page_size as usize);
+    SourceCommentsResponse {
+        hot_comments: Vec::new(),
+        comments,
+        total,
+        has_more,
+    }
+}
+
+fn kugou_comment_from_json(value: &JsonValue) -> Option<SourceComment> {
+    let id = trimmed_json_string(value.get("id"))?;
+    let user_name = trimmed_json_string(value.get("user_name"))?;
+    let content = trimmed_json_string(value.get("content"))?;
+    Some(SourceComment {
+        id,
+        user_name,
+        avatar_url: json_string(value.get("user_pic"))
+            .as_deref()
+            .and_then(normalize_image_url),
+        content,
+        timestamp_ms: None,
+        time_label: trimmed_json_string(value.get("addtime")),
+        liked_count: value
+            .pointer("/like/count")
+            .and_then(|count| json_u64(Some(count)))
+            .or_else(|| {
+                value
+                    .pointer("/like/likenum")
+                    .and_then(|count| json_u64(Some(count)))
+            })
+            .unwrap_or_default(),
+        reply_count: json_u64(value.get("reply_num")).unwrap_or_default(),
+        location: json_string(value.get("location"))
+            .map(|location| location.trim().to_owned())
+            .filter(|location| !location.is_empty()),
+    })
+}
+
+fn trimmed_json_string(value: Option<&JsonValue>) -> Option<String> {
+    json_string(value)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn kugou_entity_ids(id: &str) -> BTreeMap<String, JsonScalar> {
@@ -2786,6 +2923,20 @@ mod tests {
             self.music_search("", 1, 1)
         }
 
+        fn music_comments(
+            &self,
+            _mix_song_id: u64,
+            _page: u64,
+            _page_size: u64,
+        ) -> Result<SourceCommentsResponse, KugouBridgeError> {
+            Ok(SourceCommentsResponse {
+                hot_comments: Vec::new(),
+                comments: Vec::new(),
+                total: Some(0),
+                has_more: false,
+            })
+        }
+
         fn music_url(
             &self,
             _account_ref: &str,
@@ -2967,6 +3118,68 @@ mod tests {
                 Some(&JsonScalar::String("32100650".to_owned())),
             )
         );
+    }
+
+    #[test]
+    fn comments_parser_should_normalize_current_comment_response() {
+        let response = kugou_comments_from_json(
+            &json!({
+                "count": 41,
+                "maxPage": 3,
+                "list": [
+                    {
+                        "id": 1650568368,
+                        "content": "Still sounds good",
+                        "addtime": "2023-12-28 02:43:51",
+                        "reply_num": 7,
+                        "user_name": "KuGou Listener",
+                        "user_pic": "http://imge.kugou.com/avatar.jpg",
+                        "like": { "count": 620 },
+                        "location": "Hunan"
+                    },
+                    {
+                        "id": 1650568369,
+                        "content": " ",
+                        "user_name": "Invalid Listener"
+                    }
+                ]
+            }),
+            1,
+            20,
+        );
+
+        assert_eq!(
+            response,
+            SourceCommentsResponse {
+                hot_comments: Vec::new(),
+                comments: vec![SourceComment {
+                    id: "1650568368".to_owned(),
+                    user_name: "KuGou Listener".to_owned(),
+                    avatar_url: Some("https://imge.kugou.com/avatar.jpg".to_owned()),
+                    content: "Still sounds good".to_owned(),
+                    timestamp_ms: None,
+                    time_label: Some("2023-12-28 02:43:51".to_owned()),
+                    liked_count: 620,
+                    reply_count: 7,
+                    location: Some("Hunan".to_owned()),
+                }],
+                total: Some(41),
+                has_more: true,
+            }
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the live KuGou comments service"]
+    fn live_comments_should_return_public_page() {
+        let api = KugouHttpApi::new().expect("HTTP client should initialize");
+        let body = api
+            .music_comments(302_362_878, 1, 20)
+            .expect("live KuGou comments should load");
+        let response = kugou_comments_from_json(&body, 1, 20);
+
+        assert!(response.total.is_some_and(|total| total > 0));
+        assert!(!response.comments.is_empty());
     }
 
     #[test]
@@ -3193,6 +3406,7 @@ mod tests {
                 SourceAction::AlbumRead,
                 SourceAction::PlaylistReadPublic,
                 SourceAction::MusicUrl,
+                SourceAction::MusicComments,
                 SourceAction::MusicRecommendations,
                 SourceAction::PlaylistList,
                 SourceAction::PlaylistRead,
