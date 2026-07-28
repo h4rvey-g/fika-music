@@ -1233,8 +1233,15 @@ impl SourceHost for DefaultSourceHost {
                 .timeout
                 .unwrap_or(self.network_timeout)
                 .min(self.network_timeout),
-        )
-        .header(reqwest::header::USER_AGENT, "FikaMusic/0.1 source-runtime");
+        );
+        if !request
+            .headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("user-agent"))
+        {
+            request_builder =
+                request_builder.header(reqwest::header::USER_AGENT, "FikaMusic/0.1 source-runtime");
+        }
         for (name, value) in &request.headers {
             let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
                 SourceHostError::InvalidResponse {
@@ -2916,6 +2923,7 @@ mod tests {
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
@@ -2977,6 +2985,26 @@ mod tests {
         });
 
         (format!("http://{address}/test"), handle)
+    }
+
+    fn spawn_http_request_capture_server(
+    ) -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test HTTP server should bind");
+        let address = listener
+            .local_addr()
+            .expect("test HTTP server should have an address");
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = [0_u8; 4096];
+            let length = stream.read(&mut request).unwrap_or_default();
+            let _ = sender.send(String::from_utf8_lossy(&request[..length]).into_owned());
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        });
+        (format!("http://{address}/test"), receiver, handle)
     }
 
     #[derive(Debug)]
@@ -3875,6 +3903,31 @@ mod tests {
         server.join().expect("test HTTP server should finish");
 
         assert!(matches!(error, SourceHostError::Timeout { .. }));
+    }
+
+    #[test]
+    fn default_host_should_use_an_explicit_user_agent_instead_of_its_default() {
+        let (url, request_receiver, server) = spawn_http_request_capture_server();
+        let host = DefaultSourceHost::new(Duration::from_secs(1), 1024);
+        let mut request = SourceHttpRequest::get(url);
+        request
+            .headers
+            .insert("User-Agent".to_owned(), "ProviderBrowser/1.0".to_owned());
+
+        host.http_request("test-source", &request, &SourceCancellationToken::default())
+            .expect("HTTP request should complete");
+        let captured = request_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("server should capture the request");
+        server.join().expect("test HTTP server should finish");
+        let user_agents = captured
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .filter(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+            .map(|(_, value)| value.trim())
+            .collect::<Vec<_>>();
+
+        assert_eq!(user_agents, ["ProviderBrowser/1.0"]);
     }
 
     #[test]

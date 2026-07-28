@@ -198,6 +198,7 @@ const recommendationEntries: RecommendationEntry[] = [
 
 const query = ref("");
 const workspaceRoot = ref<HTMLElement | null>(null);
+const searchArea = ref<HTMLElement | null>(null);
 const mainScrollViewport = ref<HTMLElement | null>(null);
 const submittedQuery = ref("");
 const expandedSection = ref<OnlineSearchSection | null>(null);
@@ -395,6 +396,7 @@ const playlistPickerActionId = computed(() => {
 
 onMounted(async () => {
   mainScrollViewport.value = workspaceRoot.value?.closest("main") ?? null;
+  window.addEventListener("pointerdown", handleWindowPointerDown);
   [
     unlistenSearch,
     unlistenDownloads,
@@ -466,6 +468,7 @@ watch(visibleSongListLoading, (loading) => {
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener("pointerdown", handleWindowPointerDown);
   unlistenSearch?.();
   unlistenDownloads?.();
   unlistenDownloadProgress?.();
@@ -595,6 +598,11 @@ function openSuggestions() {
     return;
   }
   suggestionsOpen.value = keyword.length >= 2;
+}
+
+function handleWindowPointerDown(event: PointerEvent) {
+  if (event.target instanceof Node && searchArea.value?.contains(event.target)) return;
+  suggestionsOpen.value = false;
 }
 
 function requestSuggestions(keyword: string, delayMs = 0) {
@@ -2073,7 +2081,7 @@ defineExpose({
 <template>
   <div ref="workspaceRoot" class="flex w-full min-w-0 flex-col gap-4">
     <div class="flex flex-col gap-3 border-b border-base-300 pb-4 sm:flex-row sm:items-center">
-      <div class="relative min-w-0 flex-1">
+      <div ref="searchArea" class="relative min-w-0 flex-1">
         <form class="join flex w-full" role="search" @submit.prevent="submitSearch()">
           <label class="input input-sm join-item flex min-w-0 flex-1 items-center gap-2">
             <Search :size="16" aria-hidden="true" />

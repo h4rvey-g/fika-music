@@ -11,11 +11,15 @@ The current v0.1 implementation includes:
 - A separate Audio Source Registry and configuration view for local-file and
   HTTP(S) URL import of LX Music JavaScript sources. Imported scripts are
   statically checked, fingerprinted, permission-reviewed, and executed in a
-  resource-limited QuickJS runtime with host-mediated network access. No Audio
-  Sources are built in.
+  resource-limited QuickJS runtime with host-mediated network access. The
+  registry also supports permission-reviewed, host-registered Rust sources.
 - A bundled NetEase Cloud Music Plugin with QR account connection,
   recommendations, Remote Track playback, Playlist list/read, confirmed
   add/remove mutations, and audit history.
+- A bundled public YouTube Music catalog Plugin for search, artists, albums,
+  playlists, artwork, and lyrics, paired with a separate bundled Rust Audio
+  Source that uses an integrity-checked official `yt-dlp` sidecar for playback
+  and download.
 
 NetEase behavior is implemented by a Node-free Rust Service Bridge pinned to
 the selected `NeteaseCloudMusicApiEnhanced/api-enhanced` v4.32.1 contract.

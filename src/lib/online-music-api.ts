@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { TAURI_COMMANDS } from "../generated/bindings";
 import type {
@@ -403,7 +403,7 @@ export async function resolveOnlineTrack(
           qualities,
           timeoutMs: Math.min(
             remaining,
-            options.settings.layerTimeoutSeconds * 1_000,
+            audioSourceLayerTimeoutMs(source, options.settings.layerTimeoutSeconds),
           ),
           probe,
           router,
@@ -478,7 +478,10 @@ async function raceAudioSourcePair(options: SourcePairOptions): Promise<OnlinePl
         qualities: options.qualities,
         timeoutMs: Math.min(
           remaining,
-          options.options.settings.layerTimeoutSeconds * 1_000,
+          audioSourceLayerTimeoutMs(
+            source,
+            options.options.settings.layerTimeoutSeconds,
+          ),
         ),
         signal: controllers[index].signal,
         probe: options.probe,
@@ -519,6 +522,17 @@ async function raceAudioSourcePair(options: SourcePairOptions): Promise<OnlinePl
   }
 }
 
+const YOUTUBE_MUSIC_PLAYBACK_ADAPTER = "builtin:youtube-music-playback";
+
+function audioSourceLayerTimeoutMs(
+  source: AudioSourceRecord,
+  configuredTimeoutSeconds: number,
+): number {
+  return source.adapter === YOUTUBE_MUSIC_PLAYBACK_ADAPTER
+    ? Number.POSITIVE_INFINITY
+    : configuredTimeoutSeconds * 1_000;
+}
+
 type LayerOptions = ResolveOnlineTrackOptions & {
   audioSource: AudioSourceRecord;
   qualities: SourceQuality[];
@@ -541,12 +555,17 @@ async function resolveFromAudioSourceLayer(options: LayerOptions): Promise<Onlin
 
   for (const [index, quality] of options.qualities.entries()) {
     throwIfAborted(options.signal);
+    const qualityCandidates = supportedCandidates.filter((candidate) => {
+      const source = options.audioSource.sources.find((entry) => entry.id === candidate.sourceId);
+      return source && (!source.qualities.length || source.qualities.includes(quality));
+    });
+    if (!qualityCandidates.length) continue;
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     const remainingQualityCount = options.qualities.length - index;
     const qualityBudget = Math.max(1, Math.floor(remaining / remainingQualityCount));
     try {
-      return await raceCandidates(options, supportedCandidates, quality, qualityBudget);
+      return await raceCandidates(options, qualityCandidates, quality, qualityBudget);
     } catch (error) {
       if (isAbortError(error)) throw error;
     }
@@ -610,40 +629,56 @@ async function raceCandidates(
           options.router.reportSuccess(attemptKey, Date.now() - startedAt);
           return { ...cached, track: options.track };
         }
-        const outcome = await dispatchAudioSourceRequest(
-          options.audioSource.id,
-          {
-            action: "musicUrl",
-            source: candidate.sourceId,
-            musicInfo: {
-              ...candidate.rawInfo,
-              ...candidate.platformIds,
-              id: candidate.id,
-              title: candidate.title,
-              name: candidate.title,
-              artist: candidate.artist,
-              singer: candidate.artist,
-              album: candidate.album,
-              albumName: candidate.album,
-              duration: candidate.durationSeconds,
+        let mediaUrl: string | null = null;
+        for (let resolutionAttempt = 0; resolutionAttempt < 2; resolutionAttempt += 1) {
+          const outcome = await dispatchAudioSourceRequest(
+            options.audioSource.id,
+            {
+              action: "musicUrl",
+              source: candidate.sourceId,
+              musicInfo: {
+                ...candidate.rawInfo,
+                ...candidate.platformIds,
+                id: candidate.id,
+                title: candidate.title,
+                name: candidate.title,
+                artist: candidate.artist,
+                singer: candidate.artist,
+                album: candidate.album,
+                albumName: candidate.album,
+                duration: candidate.durationSeconds,
+              },
+              quality,
             },
-            quality,
-          },
-          requestId,
-        );
-        if (outcome.response.action !== "musicUrl") {
-          throw new Error("Audio Source returned an unexpected response.");
+            requestId,
+          );
+          if (outcome.response.action !== "musicUrl") {
+            throw new Error("Audio Source returned an unexpected response.");
+          }
+          const resolvedUrl = outcome.response.data;
+          const candidateMediaUrl = webviewMediaUrl(resolvedUrl);
+          if (options.excludedUrls?.has(candidateMediaUrl)) {
+            throw new Error("Media URL already failed in this playback session.");
+          }
+          try {
+            await options.probe(candidateMediaUrl, {
+              timeoutMs,
+              signal: branchAbort.signal,
+            });
+            mediaUrl = candidateMediaUrl;
+            break;
+          } catch (error) {
+            const retryWithFreshUrl = resolutionAttempt === 0
+              && isGoogleMediaUrl(resolvedUrl)
+              && !isAbortError(error)
+              && !branchAbort.signal.aborted;
+            if (!retryWithFreshUrl) throw error;
+          }
         }
-        if (options.excludedUrls?.has(outcome.response.data)) {
-          throw new Error("Media URL already failed in this playback session.");
-        }
-        await options.probe(outcome.response.data, {
-          timeoutMs,
-          signal: branchAbort.signal,
-        });
+        if (mediaUrl === null) throw new Error("Audio Source did not return a playable URL.");
         const playback = {
           track: options.track,
-          url: outcome.response.data,
+          url: mediaUrl,
           providerName: options.audioSource.name,
           candidate: {
             id: candidate.id,
@@ -717,6 +752,24 @@ function resolvedPlaybackCacheKey(
 
 function cachedPlayback(key: string) {
   return resolvedPlaybackCache.get(key) ?? null;
+}
+
+function isGoogleMediaUrl(url: string) {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    return (
+      parsed.protocol === "https:"
+      && (hostname === "googlevideo.com" || hostname.endsWith(".googlevideo.com"))
+      && parsed.pathname === "/videoplayback"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function webviewMediaUrl(url: string) {
+  return isGoogleMediaUrl(url) ? convertFileSrc(url, "fika-media") : url;
 }
 
 function isCachedFailure(key: string) {

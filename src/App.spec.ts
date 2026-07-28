@@ -541,7 +541,7 @@ describe("application shell", () => {
           name: id,
           type: "music",
           actions: ["musicUrl"],
-          qualities: ["320k"],
+          qualities: ["128k", "320k"],
         })),
       }),
     ];
@@ -644,7 +644,7 @@ describe("application shell", () => {
           name: "NetEase",
           type: "music",
           actions: ["musicUrl"],
-          qualities: ["320k"],
+          qualities: ["128k", "320k"],
         }],
       }),
     ];

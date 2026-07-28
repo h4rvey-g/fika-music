@@ -12,6 +12,10 @@ use crate::plugin_system::{
     PluginProviderCatalog, PluginProviderContract, PluginProviderRegistration, PluginSystemError,
 };
 use crate::source_runtime::{SourceCapability, SourceProvider};
+use crate::youtube_music::{
+    YoutubeMusicSourceProvider, YOUTUBE_MUSIC_PLUGIN_ID, YOUTUBE_MUSIC_PROVIDER_API_VERSION,
+    YOUTUBE_MUSIC_PROVIDER_ENTRYPOINT, YOUTUBE_MUSIC_PROVIDER_ID,
+};
 
 /// Returns the manifest contracts for every production Provider entrypoint.
 ///
@@ -19,7 +23,8 @@ use crate::source_runtime::{SourceCapability, SourceProvider};
 pub fn contract_catalog() -> Result<PluginProviderCatalog, PluginSystemError> {
     PluginProviderCatalog::new()
         .with_contract(netease_contract())?
-        .with_contract(kugou_contract())
+        .with_contract(kugou_contract())?
+        .with_contract(youtube_music_contract())
 }
 
 /// Wires every production Provider entrypoint to its host-owned dependencies.
@@ -44,10 +49,19 @@ pub fn provider_catalog(
         ));
         Ok(provider)
     });
+    let youtube_music_registration =
+        PluginProviderRegistration::new(youtube_music_contract(), move |context| {
+            let provider: Arc<dyn SourceProvider> = Arc::new(YoutubeMusicSourceProvider::new(
+                context.provider_id,
+                context.declared_capabilities,
+            ));
+            Ok(provider)
+        });
 
     PluginProviderCatalog::new()
         .with_registration(netease_registration)?
-        .with_registration(kugou_registration)
+        .with_registration(kugou_registration)?
+        .with_registration(youtube_music_registration)
 }
 
 fn netease_contract() -> PluginProviderContract {
@@ -79,5 +93,16 @@ fn kugou_contract() -> PluginProviderContract {
             SourceCapability::BridgeKugouMusicApi,
         ],
         [KUGOU_HOST_BRIDGE_ID],
+    )
+}
+
+fn youtube_music_contract() -> PluginProviderContract {
+    PluginProviderContract::new(
+        YOUTUBE_MUSIC_PLUGIN_ID,
+        YOUTUBE_MUSIC_PROVIDER_ID,
+        YOUTUBE_MUSIC_PROVIDER_ENTRYPOINT,
+        YOUTUBE_MUSIC_PROVIDER_API_VERSION,
+        [SourceCapability::NetworkAny],
+        std::iter::empty::<String>(),
     )
 }

@@ -174,11 +174,13 @@ function sourceRoutes(
       info.id === candidate.sourceId && info.actions.includes("musicUrl")
     );
     if (!sourceInfo) return [];
-    return qualities.map((quality, qualityIndex) => ({
-      attemptKey: playbackAttemptKey(source.id, candidate.channelId, quality),
-      candidateIndex,
-      qualityIndex,
-    }));
+    return qualities.flatMap((quality, qualityIndex) =>
+      !sourceInfo.qualities.length || sourceInfo.qualities.includes(quality) ? [{
+        attemptKey: playbackAttemptKey(source.id, candidate.channelId, quality),
+        candidateIndex,
+        qualityIndex,
+      }] : [],
+    );
   });
 }
 

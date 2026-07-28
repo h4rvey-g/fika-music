@@ -42,6 +42,10 @@ pub mod plugin_system;
 mod registry_support;
 mod source_request_registry;
 pub mod source_runtime;
+mod youtube_media_proxy;
+pub mod youtube_music;
+pub mod youtube_music_playback;
+mod yt_dlp_sidecar;
 
 use account_commands::{
     cancel_kugou_qr_login, cancel_netease_qr_login, disconnect_kugou_account,
@@ -79,6 +83,9 @@ const ONLINE_DOWNLOAD_PROGRESS_EVENT: &str = "online-music:download-progress";
 const ONLINE_DOWNLOAD_COMPLETED_EVENT: &str = "online-music:download-completed";
 const LIBRARY_METADATA_VERSION: i64 = 1;
 const LIBRARY_FOLDER_SETTING_KEY: &str = "local_music_folder";
+const MAX_ONLINE_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const DEFAULT_DOWNLOAD_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(60);
+const YT_DLP_DOWNLOAD_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(120);
 
 macro_rules! with_tauri_commands {
     ($consumer:ident) => {
@@ -227,6 +234,8 @@ enum AppError {
     OnlineDownload(#[from] online_download::OnlineDownloadError),
     #[error("online execution error: {0}")]
     OnlineExecution(#[from] online_execution::OnlineExecutionError),
+    #[error("yt-dlp sidecar error: {0}")]
+    YtDlp(#[from] yt_dlp_sidecar::YtDlpSidecarError),
 }
 
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
@@ -342,6 +351,7 @@ struct AppState {
     download_source_router: Mutex<download_source_router::DownloadSourceRouter>,
     online_music_cache: Arc<online_music::OnlineMusicCache>,
     online_executor: Arc<online_execution::OnlineExecutor>,
+    yt_dlp_sidecar: Arc<yt_dlp_sidecar::YtDlpSidecar>,
     audio_source_registry: Mutex<AudioSourceRegistry>,
     plugin_registry: Mutex<PluginRegistry>,
     netease_bridge: Arc<netease::NeteaseServiceBridge>,
@@ -445,6 +455,12 @@ impl AppState {
             .parent()
             .map(|path| path.join("audio-sources"))
             .unwrap_or_else(|| PathBuf::from("audio-sources"));
+        let yt_dlp_sidecar = Arc::new(yt_dlp_sidecar::YtDlpSidecar::new(
+            user_plugins_dir
+                .parent()
+                .map(|path| path.join("runtime").join("yt-dlp"))
+                .unwrap_or_else(|| PathBuf::from("runtime").join("yt-dlp")),
+        )?);
         {
             let connection = db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
             audio_source_system::migrate_legacy_lx_plugins(
@@ -454,7 +470,10 @@ impl AppState {
             )?;
         }
         let mut audio_source_registry =
-            AudioSourceRegistry::new(audio_sources_dir, Arc::clone(&source_runtime));
+            AudioSourceRegistry::new(audio_sources_dir, Arc::clone(&source_runtime))
+                .with_bundled_source(youtube_music_playback::bundled_audio_source_registration(
+                    Arc::clone(&yt_dlp_sidecar),
+                ))?;
         let provider_catalog =
             bundled_plugins::provider_catalog(provider_bridge, kugou_provider_bridge)?;
         #[cfg(test)]
@@ -488,6 +507,7 @@ impl AppState {
             ),
             online_music_cache: Arc::new(online_music::OnlineMusicCache::default()),
             online_executor,
+            yt_dlp_sidecar,
             audio_source_registry: Mutex::new(audio_source_registry),
             plugin_registry: Mutex::new(plugin_registry),
             netease_bridge,
@@ -1036,6 +1056,7 @@ struct ResolvedOnlineDownload {
     url: String,
     channel_name: String,
     attempt: download_source_router::DownloadAttemptKey,
+    youtube_video_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1139,7 +1160,15 @@ fn download_online_item(
             },
         )
     };
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let resolution_timeout = if sources
+        .iter()
+        .any(|source| source.id == youtube_music_playback::YOUTUBE_MUSIC_AUDIO_SOURCE_ID)
+    {
+        YT_DLP_DOWNLOAD_RESOLUTION_TIMEOUT
+    } else {
+        DEFAULT_DOWNLOAD_RESOLUTION_TIMEOUT
+    };
+    let deadline = Instant::now() + resolution_timeout;
     let resolved = resolve_online_download_url(
         app,
         &sources,
@@ -1155,32 +1184,6 @@ fn download_online_item(
     if cancellation.is_cancelled() {
         return Err(OnlineItemDownloadError::Cancelled);
     }
-
-    let response_result = client
-        .get(&resolved.url)
-        .timeout(Duration::from_secs(15 * 60))
-        .send()
-        .and_then(reqwest::blocking::Response::error_for_status);
-    let mut response = match response_result {
-        Ok(response) => response,
-        Err(error) => {
-            report_download_route_failure(app, resolved.attempt.clone());
-            return Err(OnlineItemDownloadError::Message(format!(
-                "media download failed: {error}"
-            )));
-        }
-    };
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok());
-    let extension_hint = media_extension(content_type, &resolved.url);
-    if extension_hint.is_none() && !is_generic_media_type(content_type) {
-        report_download_route_failure(app, resolved.attempt.clone());
-        return Err(OnlineItemDownloadError::Message(
-            "media type is not a supported audio format".to_owned(),
-        ));
-    }
     let filename = online_download::render_filename(
         &settings.filename_template,
         &item.track,
@@ -1188,10 +1191,136 @@ fn download_online_item(
     )
     .map_err(|error| OnlineItemDownloadError::Message(error.to_string()))?;
     let destination = PathBuf::from(&task.destination);
+    let temporary = match if resolved.attempt.audio_source_id
+        == youtube_music_playback::YOUTUBE_MUSIC_AUDIO_SOURCE_ID
+    {
+        download_online_item_with_ytdlp(app, task_id, item, &destination, &resolved, cancellation)
+    } else {
+        download_online_item_with_http(
+            app,
+            task_id,
+            item,
+            &destination,
+            &resolved,
+            &client,
+            cancellation,
+        )
+    } {
+        Ok(temporary) => temporary,
+        Err(error) => {
+            report_download_route_failure(app, resolved.attempt.clone());
+            return Err(error);
+        }
+    };
 
-    const MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+    let extension = match online_download::downloaded_audio_extension(&temporary) {
+        Ok(extension) => extension,
+        Err(error) => {
+            report_download_route_failure(app, resolved.attempt.clone());
+            return Err(OnlineItemDownloadError::Message(error.to_string()));
+        }
+    };
+    let target = destination.join(format!("{filename}.{extension}"));
+    validate_download_conflict(&target)?;
+
+    let cover = load_download_cover(&client, &item.track, cancellation);
+    let warning = online_download::write_metadata(&temporary, &item.track, cover.as_deref())
+        .err()
+        .map(|error| format!("Audio saved, but metadata tagging failed: {error}"));
+    if cancellation.is_cancelled() {
+        return Err(OnlineItemDownloadError::Cancelled);
+    }
+    validate_download_conflict(&target)?;
+    temporary
+        .persist_noclobber(&target)
+        .map_err(|error| OnlineItemDownloadError::Io(error.error))?;
+    let final_bytes = fs::metadata(&target)?.len();
+    Ok((target, final_bytes, warning))
+}
+
+fn download_online_item_with_ytdlp(
+    app: &AppHandle,
+    task_id: &str,
+    item: &online_download::OnlineDownloadItem,
+    destination: &Path,
+    resolved: &ResolvedOnlineDownload,
+    cancellation: &source_runtime::SourceCancellationToken,
+) -> Result<tempfile::TempPath, OnlineItemDownloadError> {
+    let video_id = resolved.youtube_video_id.as_deref().ok_or_else(|| {
+        OnlineItemDownloadError::Message(
+            "YouTube download requires a canonical video ID.".to_owned(),
+        )
+    })?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".fika-download-")
+        .suffix(".m4a")
+        .tempfile_in(destination)?
+        .into_temp_path();
+    begin_online_item_download(app, task_id, item, &temporary, None)?;
+    let sidecar = {
+        let state = app.state::<AppState>();
+        Arc::clone(&state.yt_dlp_sidecar)
+    };
+    let mut last_progress_update = Instant::now();
+    let bytes = sidecar
+        .download_audio(video_id, &temporary, cancellation, |downloaded, total| {
+            if last_progress_update.elapsed() >= Duration::from_millis(250) || total.is_some() {
+                persist_online_download_progress(app, task_id, &item.item_id, downloaded, total);
+                last_progress_update = Instant::now();
+            }
+        })
+        .map_err(|error| match error {
+            yt_dlp_sidecar::YtDlpSidecarError::Cancelled => OnlineItemDownloadError::Cancelled,
+            error => OnlineItemDownloadError::Message(error.to_string()),
+        })?;
+    if cancellation.is_cancelled() {
+        return Err(OnlineItemDownloadError::Cancelled);
+    }
+    persist_online_download_progress(app, task_id, &item.item_id, bytes, Some(bytes));
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&temporary)?
+        .sync_all()?;
+    Ok(temporary)
+}
+
+fn download_online_item_with_http(
+    app: &AppHandle,
+    task_id: &str,
+    item: &online_download::OnlineDownloadItem,
+    destination: &Path,
+    resolved: &ResolvedOnlineDownload,
+    client: &reqwest::blocking::Client,
+    cancellation: &source_runtime::SourceCancellationToken,
+) -> Result<tempfile::TempPath, OnlineItemDownloadError> {
+    let mut request = client
+        .get(&resolved.url)
+        .timeout(Duration::from_secs(15 * 60));
+    if let Some(headers) = youtube_media_proxy::registered_headers(&resolved.url) {
+        request = request.headers(headers);
+    }
+    let mut response = request.send().map_err(|_| {
+        OnlineItemDownloadError::Message("media download connection failed".to_owned())
+    })?;
+    if !response.status().is_success() {
+        return Err(OnlineItemDownloadError::Message(format!(
+            "media download returned HTTP {}",
+            response.status().as_u16()
+        )));
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    let extension_hint = media_extension(content_type, &resolved.url);
+    if extension_hint.is_none() && !is_generic_media_type(content_type) {
+        return Err(OnlineItemDownloadError::Message(
+            "media type is not a supported audio format".to_owned(),
+        ));
+    }
     let total_bytes = response.content_length();
-    if total_bytes.is_some_and(|length| length > MAX_DOWNLOAD_BYTES) {
+    if total_bytes.is_some_and(|length| length > MAX_ONLINE_DOWNLOAD_BYTES) {
         return Err(OnlineItemDownloadError::Message(
             "media download is larger than 2 GiB".to_owned(),
         ));
@@ -1202,13 +1331,57 @@ fn download_online_item(
     let mut temporary = tempfile::Builder::new()
         .prefix(".fika-download-")
         .suffix(&temporary_suffix)
-        .tempfile_in(&destination)?;
+        .tempfile_in(destination)?;
+    begin_online_item_download(app, task_id, item, temporary.path(), total_bytes)?;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut downloaded = 0_u64;
+    let mut last_progress_update = Instant::now();
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(OnlineItemDownloadError::Cancelled);
+        }
+        let count = response.read(&mut buffer).map_err(|_| {
+            OnlineItemDownloadError::Message("media download stream failed".to_owned())
+        })?;
+        if count == 0 {
+            break;
+        }
+        downloaded = downloaded.saturating_add(count as u64);
+        if downloaded > MAX_ONLINE_DOWNLOAD_BYTES {
+            return Err(OnlineItemDownloadError::Message(
+                "media download exceeded 2 GiB".to_owned(),
+            ));
+        }
+        temporary.write_all(&buffer[..count])?;
+        if last_progress_update.elapsed() >= Duration::from_millis(250) {
+            persist_online_download_progress(app, task_id, &item.item_id, downloaded, total_bytes);
+            last_progress_update = Instant::now();
+        }
+    }
+    if downloaded == 0 {
+        return Err(OnlineItemDownloadError::Message(
+            "media download returned an empty file".to_owned(),
+        ));
+    }
+    persist_online_download_progress(app, task_id, &item.item_id, downloaded, total_bytes);
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    Ok(temporary.into_temp_path())
+}
+
+fn begin_online_item_download(
+    app: &AppHandle,
+    task_id: &str,
+    item: &online_download::OnlineDownloadItem,
+    temporary_path: &Path,
+    total_bytes: Option<u64>,
+) -> Result<(), OnlineItemDownloadError> {
     let item_started = {
         let state = app.state::<AppState>();
         let db = state.db.lock().map_err(|_| {
             OnlineItemDownloadError::Message("database lock was poisoned".to_owned())
         })?;
-        online_download::set_item_downloading(&db, &item.item_id, temporary.path(), total_bytes)
+        online_download::set_item_downloading(&db, &item.item_id, temporary_path, total_bytes)
             .map_err(|error| OnlineItemDownloadError::Message(error.to_string()))?
     };
     if !item_started {
@@ -1222,71 +1395,7 @@ fn download_online_item(
         0,
         total_bytes,
     );
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut downloaded = 0_u64;
-    let mut last_progress_update = Instant::now();
-    const PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(250);
-    loop {
-        if cancellation.is_cancelled() {
-            return Err(OnlineItemDownloadError::Cancelled);
-        }
-        let count = match response.read(&mut buffer) {
-            Ok(count) => count,
-            Err(error) => {
-                report_download_route_failure(app, resolved.attempt.clone());
-                return Err(OnlineItemDownloadError::Message(format!(
-                    "media stream failed: {error}"
-                )));
-            }
-        };
-        if count == 0 {
-            break;
-        }
-        downloaded = downloaded.saturating_add(count as u64);
-        if downloaded > MAX_DOWNLOAD_BYTES {
-            return Err(OnlineItemDownloadError::Message(
-                "media download exceeded 2 GiB".to_owned(),
-            ));
-        }
-        temporary.write_all(&buffer[..count])?;
-        if last_progress_update.elapsed() >= PROGRESS_UPDATE_INTERVAL {
-            persist_online_download_progress(app, task_id, &item.item_id, downloaded, total_bytes);
-            last_progress_update = Instant::now();
-        }
-    }
-    if downloaded == 0 {
-        report_download_route_failure(app, resolved.attempt);
-        return Err(OnlineItemDownloadError::Message(
-            "media download returned an empty file".to_owned(),
-        ));
-    }
-    persist_online_download_progress(app, task_id, &item.item_id, downloaded, total_bytes);
-    temporary.flush()?;
-    temporary.as_file().sync_all()?;
-
-    let extension = match online_download::downloaded_audio_extension(temporary.path()) {
-        Ok(extension) => extension,
-        Err(error) => {
-            report_download_route_failure(app, resolved.attempt.clone());
-            return Err(OnlineItemDownloadError::Message(error.to_string()));
-        }
-    };
-    let target = destination.join(format!("{filename}.{extension}"));
-    validate_download_conflict(&target)?;
-
-    let cover = load_download_cover(&client, &item.track, cancellation);
-    let warning = online_download::write_metadata(temporary.path(), &item.track, cover.as_deref())
-        .err()
-        .map(|error| format!("Audio saved, but metadata tagging failed: {error}"));
-    if cancellation.is_cancelled() {
-        return Err(OnlineItemDownloadError::Cancelled);
-    }
-    validate_download_conflict(&target)?;
-    temporary
-        .persist_noclobber(&target)
-        .map_err(|error| OnlineItemDownloadError::Io(error.error))?;
-    let final_bytes = fs::metadata(&target)?.len();
-    Ok((target, final_bytes, warning))
+    Ok(())
 }
 
 fn resolve_online_download_url(
@@ -1444,7 +1553,7 @@ fn resolve_download_source_layer(
     policy: DownloadResolutionPolicy<'_>,
     cancellation: &source_runtime::SourceCancellationToken,
 ) -> Result<Option<ResolvedOnlineDownload>, OnlineItemDownloadError> {
-    let layer_deadline = policy.deadline.min(Instant::now() + policy.layer_timeout);
+    let layer_deadline = download_source_layer_deadline(&source.id, Instant::now(), policy);
     for quality in policy.qualities.iter().copied() {
         if cancellation.is_cancelled() {
             return Err(OnlineItemDownloadError::Cancelled);
@@ -1497,6 +1606,18 @@ fn resolve_download_source_layer(
     Ok(None)
 }
 
+fn download_source_layer_deadline(
+    audio_source_id: &str,
+    now: Instant,
+    policy: DownloadResolutionPolicy<'_>,
+) -> Instant {
+    if audio_source_id == youtube_music_playback::YOUTUBE_MUSIC_AUDIO_SOURCE_ID {
+        policy.deadline
+    } else {
+        policy.deadline.min(now + policy.layer_timeout)
+    }
+}
+
 fn quality_fallback(
     preferred: source_runtime::SourceQuality,
 ) -> Vec<source_runtime::SourceQuality> {
@@ -1526,15 +1647,23 @@ fn race_download_candidates(
         let mut preparation_failures = Vec::new();
         for candidate in candidates {
             let request = download_music_url_request(candidate, quality);
+            let youtube_video_id = (source.id
+                == youtube_music_playback::YOUTUBE_MUSIC_AUDIO_SOURCE_ID)
+                .then(|| youtube_video_id_from_candidate(candidate))
+                .flatten();
             let attempt = download_source_router::DownloadAttemptKey::new(
                 &source.id,
                 &candidate.channel_id,
                 quality,
             );
             match registry.prepare_dispatch(&source.id, &request) {
-                Ok(dispatch) => {
-                    prepared.push((dispatch, request, candidate.channel_name.clone(), attempt))
-                }
+                Ok(dispatch) => prepared.push((
+                    dispatch,
+                    request,
+                    candidate.channel_name.clone(),
+                    attempt,
+                    youtube_video_id,
+                )),
                 Err(_) => preparation_failures.push(attempt),
             }
         }
@@ -1554,11 +1683,11 @@ fn race_download_candidates(
     let candidate_count = prepared.len();
     let mut pending_attempts = prepared
         .iter()
-        .map(|(_, _, _, attempt)| attempt.clone())
+        .map(|(_, _, _, attempt, _)| attempt.clone())
         .collect::<BTreeSet<_>>();
     let race_cancellation = source_runtime::SourceCancellationToken::default();
     let client = executor.http_client();
-    for (dispatch, request, channel_name, attempt) in prepared {
+    for (dispatch, request, channel_name, attempt, youtube_video_id) in prepared {
         let sender = sender.clone();
         let token = race_cancellation.clone();
         let client = client.clone();
@@ -1585,6 +1714,7 @@ fn race_download_candidates(
                         url,
                         channel_name,
                         attempt: attempt.clone(),
+                        youtube_video_id,
                     });
                 DownloadCandidateOutcome {
                     attempt,
@@ -1681,6 +1811,24 @@ fn download_music_url_request(
     }
 }
 
+fn youtube_video_id_from_candidate(
+    candidate: &online_music::OnlineTrackCandidate,
+) -> Option<String> {
+    let platform_video_id = candidate
+        .platform_ids
+        .get("videoId")
+        .and_then(|value| match value {
+            source_runtime::JsonScalar::String(value) => Some(value.as_str()),
+            source_runtime::JsonScalar::Number(_) => None,
+        })
+        .filter(|video_id| yt_dlp_sidecar::is_canonical_video_id(video_id));
+    platform_video_id
+        .or_else(|| {
+            yt_dlp_sidecar::is_canonical_video_id(&candidate.id).then_some(candidate.id.as_str())
+        })
+        .map(str::to_owned)
+}
+
 fn probe_download_url(
     client: &reqwest::blocking::Client,
     url: &str,
@@ -1691,12 +1839,14 @@ fn probe_download_url(
     if remaining.is_zero() || cancellation.is_cancelled() {
         return false;
     }
-    let Ok(mut response) = client
+    let mut request = client
         .get(url)
         .timeout(remaining)
-        .header(reqwest::header::RANGE, "bytes=0-1023")
-        .send()
-    else {
+        .header(reqwest::header::RANGE, "bytes=0-1023");
+    if let Some(headers) = youtube_media_proxy::registered_headers(url) {
+        request = request.headers(headers);
+    }
+    let Ok(mut response) = request.send() else {
         return false;
     };
     if !response.status().is_success() || cancellation.is_cancelled() {
@@ -5219,6 +5369,14 @@ fn now_timestamp() -> i64 {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .register_asynchronous_uri_scheme_protocol(
+            youtube_media_proxy::YOUTUBE_MEDIA_PROTOCOL,
+            |_context, request, responder| {
+                let _task = tauri::async_runtime::spawn_blocking(move || {
+                    responder.respond(youtube_media_proxy::protocol_response(request));
+                });
+            },
+        )
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             let db_path = app_data_dir.join("fika-library.sqlite3");
@@ -5287,6 +5445,32 @@ mod tests {
             Duration::from_secs(1),
             Instant::now() + Duration::from_secs(2),
         ));
+    }
+
+    #[test]
+    fn yt_dlp_download_source_uses_the_remaining_resolution_budget() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(20);
+        let qualities = [source_runtime::SourceQuality::K128];
+        let policy = DownloadResolutionPolicy {
+            qualities: &qualities,
+            selection_mode: online_music::AudioSourceSelectionMode::Manual,
+            layer_timeout: Duration::from_secs(8),
+            deadline,
+        };
+
+        assert_eq!(
+            download_source_layer_deadline(
+                youtube_music_playback::YOUTUBE_MUSIC_AUDIO_SOURCE_ID,
+                now,
+                policy,
+            ),
+            deadline
+        );
+        assert_eq!(
+            download_source_layer_deadline("ordinary-source", now, policy),
+            now + Duration::from_secs(8)
+        );
     }
 
     #[test]

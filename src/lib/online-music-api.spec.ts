@@ -21,12 +21,21 @@ import {
   createOnlineTrackCandidate,
 } from "../test/fixtures";
 
-const invoke = vi.hoisted(() => vi.fn());
+const { convertFileSrc, invoke } = vi.hoisted(() => ({
+  convertFileSrc: vi.fn((path: string, protocol: string) =>
+    `${protocol}://localhost/${encodeURIComponent(path)}`
+  ),
+  invoke: vi.fn(),
+}));
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc, invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
-function audioSource(id: string, sources = ["wy", "kg"]): AudioSourceRecord {
+function audioSource(
+  id: string,
+  sources = ["wy", "kg"],
+  qualities: AudioSourceRecord["sources"][number]["qualities"] = ["128k", "320k"],
+): AudioSourceRecord {
   return createAudioSourceRecord({
     id,
     name: id,
@@ -40,7 +49,7 @@ function audioSource(id: string, sources = ["wy", "kg"]): AudioSourceRecord {
       name: source,
       type: "music",
       actions: ["musicUrl"],
-      qualities: ["128k", "320k"],
+      qualities,
     })),
   });
 }
@@ -66,6 +75,7 @@ const track = createOnlineTrack({
 describe("online music playback routing", () => {
   beforeEach(() => {
     invoke.mockReset();
+    convertFileSrc.mockClear();
     invalidateOnlinePlaybackCaches();
   });
 
@@ -135,6 +145,126 @@ describe("online music playback routing", () => {
     expect(qualityFallback("320k")).toEqual(["320k", "128k"]);
   });
 
+  it("skips qualities that an Audio Source does not declare", async () => {
+    const requestedQualities: string[] = [];
+    invoke.mockImplementation((command: string, payload: { request?: { quality?: string } }) => {
+      if (command === "dispatch_audio_source_request") {
+        requestedQualities.push(payload.request?.quality ?? "");
+        return Promise.resolve({
+          response: {
+            action: "musicUrl",
+            data: "https://cdn.test/youtube.m4a",
+          },
+          diagnostics: [],
+        });
+      }
+      return Promise.resolve(true);
+    });
+
+    await resolveOnlineTrack({
+      track: createOnlineTrack({
+        candidates: [createOnlineTrackCandidate({ sourceId: "yt" })],
+      }),
+      audioSources: [audioSource("youtube", ["yt"], ["128k"])],
+      settings: { ...settings, preferredQuality: "320k" },
+      probe: async () => undefined,
+    });
+
+    expect(requestedQualities).toEqual(["128k"]);
+  });
+
+  it("routes Google media through the Tauri media protocol before probing", async () => {
+    const resolvedUrl =
+      "https://rr5---sn.example.googlevideo.com/videoplayback?itag=140&sig=test";
+    invoke.mockImplementation((command: string) => {
+      if (command === "dispatch_audio_source_request") {
+        return Promise.resolve({
+          response: { action: "musicUrl", data: resolvedUrl },
+          diagnostics: [],
+        });
+      }
+      return Promise.resolve(true);
+    });
+    const probe = vi.fn(async () => undefined);
+
+    const playback = await resolveOnlineTrack({
+      track: createOnlineTrack({
+        candidates: [createOnlineTrackCandidate({ sourceId: "yt" })],
+      }),
+      audioSources: [audioSource("youtube", ["yt"], ["128k"])],
+      settings: { ...settings, preferredQuality: "128k" },
+      probe,
+    });
+
+    const proxiedUrl = `fika-media://localhost/${encodeURIComponent(resolvedUrl)}`;
+    expect(convertFileSrc).toHaveBeenCalledWith(resolvedUrl, "fika-media");
+    expect(probe).toHaveBeenCalledWith(proxiedUrl, expect.any(Object));
+    expect(playback.url).toBe(proxiedUrl);
+  });
+
+  it("does not proxy a hostname that only contains the Google media suffix", async () => {
+    const resolvedUrl =
+      "https://googlevideo.com.attacker.test/videoplayback?itag=140&sig=test";
+    invoke.mockImplementation((command: string) => {
+      if (command === "dispatch_audio_source_request") {
+        return Promise.resolve({
+          response: { action: "musicUrl", data: resolvedUrl },
+          diagnostics: [],
+        });
+      }
+      return Promise.resolve(true);
+    });
+    const probe = vi.fn(async () => undefined);
+
+    const playback = await resolveOnlineTrack({
+      track: createOnlineTrack({
+        candidates: [createOnlineTrackCandidate({ sourceId: "yt" })],
+      }),
+      audioSources: [audioSource("youtube", ["yt"], ["128k"])],
+      settings: { ...settings, preferredQuality: "128k" },
+      probe,
+    });
+
+    expect(convertFileSrc).not.toHaveBeenCalled();
+    expect(playback.url).toBe(resolvedUrl);
+  });
+
+  it("resolves a fresh Google media URL after the first CDN probe fails", async () => {
+    const resolvedUrls = [
+      "https://first.googlevideo.com/videoplayback?itag=140&sig=first",
+      "https://second.googlevideo.com/videoplayback?itag=140&sig=second",
+    ];
+    let dispatchCount = 0;
+    invoke.mockImplementation((command: string) => {
+      if (command === "dispatch_audio_source_request") {
+        const data = resolvedUrls[Math.min(dispatchCount, resolvedUrls.length - 1)];
+        dispatchCount += 1;
+        return Promise.resolve({
+          response: { action: "musicUrl", data },
+          diagnostics: [],
+        });
+      }
+      return Promise.resolve(true);
+    });
+    const probe = vi.fn((url: string) =>
+      url.includes("first.googlevideo.com")
+        ? Promise.reject(new Error("CDN connection failed"))
+        : Promise.resolve()
+    );
+
+    const playback = await resolveOnlineTrack({
+      track: createOnlineTrack({
+        candidates: [createOnlineTrackCandidate({ sourceId: "yt" })],
+      }),
+      audioSources: [audioSource("youtube", ["yt"], ["128k"])],
+      settings: { ...settings, preferredQuality: "128k" },
+      probe,
+    });
+
+    expect(dispatchCount).toBe(2);
+    expect(playback.url).toContain("second.googlevideo.com");
+  });
+
   it("preserves time for lower-quality fallback when the preferred URL probe stalls", async () => {
     invoke.mockImplementation((command: string, payload: { request?: { quality?: string } }) => {
       if (command === "dispatch_audio_source_request") {
@@ -174,6 +304,56 @@ describe("online music playback routing", () => {
     });
 
     expect(playback.quality).toBe("128k");
+  });
+
+  it("lets the bundled yt-dlp source use the remaining playback budget", async () => {
+    vi.useFakeTimers();
+    try {
+      invoke.mockImplementation((command: string) => {
+        if (command === "dispatch_audio_source_request") {
+          return new Promise((resolve) => {
+            setTimeout(() => resolve({
+              response: {
+                action: "musicUrl",
+                data: "https://cdn.test/youtube.m4a",
+              },
+              diagnostics: [],
+            }), 12);
+          });
+        }
+        return Promise.resolve(true);
+      });
+      const source = {
+        ...audioSource("youtube", ["yt"], ["128k"]),
+        adapter: "builtin:youtube-music-playback",
+      };
+      const resolving = resolveOnlineTrack({
+        track: createOnlineTrack({
+          candidates: [createOnlineTrackCandidate({ sourceId: "yt" })],
+        }),
+        audioSources: [source],
+        settings: {
+          ...settings,
+          audioSourceSelectionMode: "automatic",
+          layerTimeoutSeconds: 0.008,
+          playbackTimeoutSeconds: 0.02,
+          preferredQuality: "128k",
+        },
+        probe: async () => undefined,
+      });
+      const outcome = resolving.then(
+        (playback) => ({ playback }),
+        (error: unknown) => ({ error }),
+      );
+
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(await outcome).toMatchObject({
+        playback: { audioSourceId: "youtube", quality: "128k" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("forwards the Local Music folder as the download picker starting directory", async () => {

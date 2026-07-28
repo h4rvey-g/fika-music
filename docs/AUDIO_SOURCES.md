@@ -1,8 +1,9 @@
 # Audio Sources
 
-Audio Sources are user-imported, playback-only LX-compatible source packages.
-They are not Plugins and the application ships with no enabled or built-in
-Audio Source records.
+Audio Sources are playback-only providers with a lifecycle separate from
+Plugins. Most are user-imported LX-compatible packages. Fika also registers a
+bundled Rust YouTube Music playback source; it is disabled until its network
+capability is reviewed and enabled.
 
 ## Responsibilities
 
@@ -12,6 +13,7 @@ The Audio Source Registry owns:
 - HTTP(S) URL import;
 - `audio-source.json` validation and source integrity checks;
 - permission review, enable/disable, removal, and diagnostics;
+- host registration of non-removable bundled Rust playback providers;
 - routing typed `musicUrl` requests through the shared Source Runtime.
 
 The Audio Sources UI exposes only those configuration responsibilities. Music
@@ -83,10 +85,42 @@ content. Downloads use a 20-second timeout, follow at most five redirects,
 reject credential-bearing URLs, HTTPS-to-HTTP downgrades, HTML responses, and
 responses over 4 MiB. Query parameters are removed from persisted provenance.
 
+## Bundled Rust source
+
+The bundled `fika.youtube-music-playback` Audio Source is registered by the
+host and does not live in the managed import directory. Its manifest and
+factory are compiled into the application. Registry activation verifies its
+Audio Source ID, Provider ID, Runtime API version, capabilities, and source
+catalog before retaining the Provider.
+
+It accepts only `musicUrl` for the `yt` source and only canonical YouTube video
+IDs. Search and metadata remain in the separate `fika.youtube-music` Plugin.
+The source is permission-reviewed and can be disabled, but cannot be removed.
+Its Rust adapter installs the official `yt-dlp` `2026.07.04` sidecar under
+app-data on first use, after checking the platform-specific size and SHA-256
+digest. `FIKA_YT_DLP_PATH` can explicitly select an existing executable for
+development or managed deployments. Fika does not link a `yt-dlp` Rust wrapper
+crate.
+
+Signed YouTube CDN URLs are played through Fika's `fika-media` protocol rather
+than loaded directly by the WebView. The Rust handler permits only HTTPS
+`*.googlevideo.com/videoplayback` targets and forwards bounded byte ranges with
+an allowlisted subset of the request headers returned by `yt-dlp`. YouTube
+downloads are performed by the sidecar directly into Fika's registered
+temporary path, preserving task cancellation, size limits, metadata tagging,
+and no-overwrite behavior. Other Audio Sources continue to use their normal
+HTTP(S) download path.
+
+Because yt-dlp metadata extraction can exceed the generic per-source timeout,
+this bundled source may use the remaining overall playback deadline. Download
+resolution uses a bounded two-minute budget. Imported and other bundled Audio
+Sources keep the configured per-layer timeout.
+
 ## Lifecycle and permissions
 
-An imported source that declares `network:any` starts in `NeedsReview`. The
-user chooses grants and explicitly confirms the review before enabling it.
+An imported or bundled source that declares `network:any` starts in
+`NeedsReview`. The user chooses grants and explicitly confirms the review
+before enabling it.
 Revocation updates the Source Runtime provider policy immediately. Enabled
 sources are initialized again on application startup and registry refresh.
 

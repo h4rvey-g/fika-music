@@ -2728,6 +2728,40 @@ mod tests {
     }
 
     #[test]
+    fn bundled_youtube_music_manifest_should_match_the_registered_contract() {
+        let manifest = serde_json::from_str::<PluginManifest>(include_str!(
+            "../plugins/youtube-music/plugin.json"
+        ))
+        .expect("bundled YouTube Music manifest should deserialize");
+        let catalog = crate::bundled_plugins::contract_catalog()
+            .expect("bundled Provider contracts should register");
+
+        catalog
+            .validate_manifest(&manifest)
+            .expect("bundled YouTube Music manifest should match its host contract");
+    }
+
+    #[test]
+    fn builtin_youtube_music_entrypoint_is_reserved_for_the_bundled_package() {
+        let mut impostor = manifest("user.youtube-music", "builtin:youtube-music", &[]);
+        impostor.provider_entrypoints[0].id =
+            crate::youtube_music::YOUTUBE_MUSIC_PROVIDER_ID.to_owned();
+        impostor.supported_api_version = crate::youtube_music::YOUTUBE_MUSIC_PROVIDER_API_VERSION;
+        impostor.provider_entrypoints[0].capabilities =
+            [SourceCapability::NetworkAny].into_iter().collect();
+        let catalog = crate::bundled_plugins::contract_catalog()
+            .expect("bundled Provider contracts should register");
+
+        let errors = catalog
+            .validate_manifest(&impostor)
+            .expect_err("a user package must not claim the YouTube Music entrypoint");
+
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("reserved for Plugin fika.youtube-music")));
+    }
+
+    #[test]
     fn builtin_kugou_entrypoint_should_be_reserved_for_the_bundled_package() {
         let mut impostor = manifest("user.kugou", "builtin:kugou", &[]);
         impostor.provider_entrypoints[0].id = crate::kugou::KUGOU_PROVIDER_ID.to_owned();

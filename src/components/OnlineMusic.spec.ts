@@ -24,7 +24,10 @@ const tauriMocks = vi.hoisted(() => ({
 
 const eventListeners = new Map<string, (event: { payload: unknown }) => void>();
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: tauriMocks.invoke }));
+vi.mock("@tauri-apps/api/core", () => ({
+  convertFileSrc: (path: string) => path,
+  invoke: tauriMocks.invoke,
+}));
 vi.mock("@tauri-apps/api/event", () => ({ listen: tauriMocks.listen }));
 
 const settings = createOnlineMusicSettings();
@@ -319,6 +322,21 @@ describe("Online Music workspace", () => {
     expect(
       wrapper.findAll('ul[aria-label="Search history"] button').map((button) => button.text()),
     ).toEqual(["Midnight Drive", "Jazz Mix"]);
+    wrapper.unmount();
+  });
+
+  it("closes search history when the page outside the search area is clicked", async () => {
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+
+    await wrapper.get('input[aria-label="Search Online Music"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('ul[aria-label="Search history"]').exists()).toBe(true);
+
+    document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    await nextTick();
+
+    expect(wrapper.find('ul[aria-label="Search history"]').exists()).toBe(false);
     wrapper.unmount();
   });
 

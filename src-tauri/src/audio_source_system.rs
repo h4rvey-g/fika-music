@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,6 +60,23 @@ pub struct AudioSourceManifest {
 
 impl AudioSourceManifest {
     fn validate(&self, runtime_api_version: SourceRuntimeApiVersion) -> Result<(), String> {
+        self.validate_with_adapter(runtime_api_version, |adapter| {
+            LxJsImportAdapter::parse(adapter).is_some()
+        })
+    }
+
+    fn validate_bundled(&self, runtime_api_version: SourceRuntimeApiVersion) -> Result<(), String> {
+        self.validate_with_adapter(runtime_api_version, |adapter| {
+            adapter.starts_with("builtin:")
+                && valid_identifier(adapter.trim_start_matches("builtin:"))
+        })
+    }
+
+    fn validate_with_adapter(
+        &self,
+        runtime_api_version: SourceRuntimeApiVersion,
+        adapter_is_supported: impl FnOnce(&str) -> bool,
+    ) -> Result<(), String> {
         let mut errors = Vec::new();
         if self.manifest_version != AUDIO_SOURCE_MANIFEST_VERSION {
             errors.push(format!(
@@ -78,7 +96,7 @@ impl AudioSourceManifest {
         if semver::Version::parse(&self.version).is_err() {
             errors.push(format!("version is not valid semver: {}", self.version));
         }
-        if LxJsImportAdapter::parse(&self.adapter).is_none() {
+        if !adapter_is_supported(&self.adapter) {
             errors.push(format!(
                 "unsupported audio source adapter: {}",
                 self.adapter
@@ -126,6 +144,49 @@ impl AudioSourceManifest {
             Ok(())
         } else {
             Err(errors.join("; "))
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BundledAudioSourceBuildContext {
+    pub audio_source_id: String,
+    pub provider_id: String,
+    pub declared_capabilities: BTreeSet<SourceCapability>,
+    pub source_catalog: BTreeMap<String, SourceInfo>,
+}
+
+type BundledProviderFactory =
+    dyn Fn(BundledAudioSourceBuildContext) -> Result<Arc<dyn SourceProvider>, String> + Send + Sync;
+
+#[derive(Clone)]
+pub struct BundledAudioSourceRegistration {
+    manifest: AudioSourceManifest,
+    factory: Arc<BundledProviderFactory>,
+}
+
+impl std::fmt::Debug for BundledAudioSourceRegistration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BundledAudioSourceRegistration")
+            .field("audio_source_id", &self.manifest.id)
+            .field("provider_id", &self.manifest.provider_id)
+            .field("adapter", &self.manifest.adapter)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BundledAudioSourceRegistration {
+    pub fn new<F>(manifest: AudioSourceManifest, factory: F) -> Self
+    where
+        F: Fn(BundledAudioSourceBuildContext) -> Result<Arc<dyn SourceProvider>, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            manifest,
+            factory: Arc::new(factory),
         }
     }
 }
@@ -330,6 +391,13 @@ struct AudioSourceEntryRuntime {
     manifest: Option<AudioSourceManifest>,
     record: AudioSourceRecord,
     provider: Option<Arc<dyn SourceProvider>>,
+    origin: AudioSourceOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioSourceOrigin {
+    Bundled,
+    Imported,
 }
 
 #[derive(Clone)]
@@ -390,6 +458,7 @@ struct DownloadedAudioSource {
 pub struct AudioSourceRegistry {
     audio_sources_dir: PathBuf,
     runtime: Arc<SourceRuntime>,
+    bundled_sources: BTreeMap<String, BundledAudioSourceRegistration>,
     entries: BTreeMap<String, AudioSourceEntryRuntime>,
 }
 
@@ -398,6 +467,7 @@ impl std::fmt::Debug for AudioSourceRegistry {
         formatter
             .debug_struct("AudioSourceRegistry")
             .field("audio_sources_dir", &self.audio_sources_dir)
+            .field("bundled_source_count", &self.bundled_sources.len())
             .field("source_count", &self.entries.len())
             .finish_non_exhaustive()
     }
@@ -408,8 +478,40 @@ impl AudioSourceRegistry {
         Self {
             audio_sources_dir: audio_sources_dir.into(),
             runtime,
+            bundled_sources: BTreeMap::new(),
             entries: BTreeMap::new(),
         }
+    }
+
+    pub fn with_bundled_source(
+        mut self,
+        registration: BundledAudioSourceRegistration,
+    ) -> Result<Self, AudioSourceSystemError> {
+        registration
+            .manifest
+            .validate_bundled(self.runtime.api_version())
+            .map_err(AudioSourceSystemError::InvalidManifest)?;
+        if self
+            .bundled_sources
+            .values()
+            .any(|existing| existing.manifest.provider_id == registration.manifest.provider_id)
+        {
+            return Err(AudioSourceSystemError::InvalidManifest(format!(
+                "bundled Provider id is already registered: {}",
+                registration.manifest.provider_id
+            )));
+        }
+        let audio_source_id = registration.manifest.id.clone();
+        if self
+            .bundled_sources
+            .insert(audio_source_id.clone(), registration)
+            .is_some()
+        {
+            return Err(AudioSourceSystemError::InvalidManifest(format!(
+                "bundled audio source id is already registered: {audio_source_id}"
+            )));
+        }
+        Ok(self)
     }
 
     pub fn records(&self) -> Vec<AudioSourceRecord> {
@@ -472,6 +574,28 @@ impl AudioSourceRegistry {
         let persisted = load_persisted_states(connection)?;
         let mut seen_ids = BTreeSet::new();
         let mut seen_provider_ids = BTreeSet::new();
+        for registration in self.bundled_sources.values() {
+            let manifest = registration.manifest.clone();
+            seen_ids.insert(manifest.id.clone());
+            seen_provider_ids.insert(manifest.provider_id.clone());
+            let path = PathBuf::from(format!("builtin:{}", manifest.id));
+            let record = record_for_manifest(
+                &manifest,
+                &path,
+                persisted.get(&manifest.id),
+                self.runtime.api_version(),
+                false,
+            )?;
+            self.entries.insert(
+                manifest.id.clone(),
+                AudioSourceEntryRuntime {
+                    manifest: Some(manifest),
+                    record,
+                    provider: None,
+                    origin: AudioSourceOrigin::Bundled,
+                },
+            );
+        }
         for path in discover_audio_source_paths(&self.audio_sources_dir)? {
             let mut manifest = match read_manifest(&path) {
                 Ok(manifest) => manifest,
@@ -510,6 +634,7 @@ impl AudioSourceRegistry {
                 &path,
                 persisted.get(&manifest.id),
                 self.runtime.api_version(),
+                true,
             )?;
             self.entries.insert(
                 manifest.id.clone(),
@@ -517,6 +642,7 @@ impl AudioSourceRegistry {
                     manifest: Some(manifest),
                     record,
                     provider: None,
+                    origin: AudioSourceOrigin::Imported,
                 },
             );
         }
@@ -620,6 +746,16 @@ impl AudioSourceRegistry {
         manifest
             .validate(self.runtime.api_version())
             .map_err(AudioSourceSystemError::InvalidManifest)?;
+        if self.bundled_sources.contains_key(&manifest.id)
+            || self
+                .bundled_sources
+                .values()
+                .any(|registration| registration.manifest.provider_id == manifest.provider_id)
+        {
+            return Err(AudioSourceSystemError::InvalidManifest(
+                "audio source id or Provider id is reserved by a bundled Audio Source".to_owned(),
+            ));
+        }
 
         fs::create_dir_all(&self.audio_sources_dir)?;
         let root = fs::canonicalize(&self.audio_sources_dir)?;
@@ -981,7 +1117,13 @@ impl AudioSourceRegistry {
             ));
         }
 
-        let provider = match build_provider(&manifest, Path::new(&entry.record.path)) {
+        let origin = entry.origin;
+        let package_path = PathBuf::from(&entry.record.path);
+        let provider_result = match origin {
+            AudioSourceOrigin::Bundled => self.build_bundled_provider(&manifest),
+            AudioSourceOrigin::Imported => build_imported_provider(&manifest, &package_path),
+        };
+        let provider = match provider_result {
             Ok(provider) => provider,
             Err(error) => {
                 self.activation_failed(connection, audio_source_id, &error)?;
@@ -1014,6 +1156,19 @@ impl AudioSourceRegistry {
                 return Err(error);
             }
         };
+        if report.sources != manifest.source_catalog {
+            let _ = self.runtime.uninitialize_provider(&provider_id);
+            let _ = self
+                .runtime
+                .clear_provider_granted_capabilities(&provider_id);
+            let error = AudioSourceSystemError::ProviderLoad {
+                audio_source_id: audio_source_id.to_owned(),
+                message: "Provider source catalog does not match the bundled registration"
+                    .to_owned(),
+            };
+            self.activation_failed(connection, audio_source_id, &error)?;
+            return Err(error);
+        }
 
         let mut candidate = entry.record.clone();
         candidate.enabled = true;
@@ -1048,6 +1203,83 @@ impl AudioSourceRegistry {
         entry.provider = Some(provider);
         entry.record = candidate.clone();
         Ok(candidate)
+    }
+
+    fn build_bundled_provider(
+        &self,
+        manifest: &AudioSourceManifest,
+    ) -> Result<Arc<dyn SourceProvider>, AudioSourceSystemError> {
+        let registration = self.bundled_sources.get(&manifest.id).ok_or_else(|| {
+            AudioSourceSystemError::ProviderLoad {
+                audio_source_id: manifest.id.clone(),
+                message: "bundled Audio Source registration is unavailable".to_owned(),
+            }
+        })?;
+        if registration.manifest != *manifest {
+            return Err(AudioSourceSystemError::ProviderLoad {
+                audio_source_id: manifest.id.clone(),
+                message: "bundled Audio Source manifest does not match its registration".to_owned(),
+            });
+        }
+        let context = BundledAudioSourceBuildContext {
+            audio_source_id: manifest.id.clone(),
+            provider_id: manifest.provider_id.clone(),
+            declared_capabilities: manifest.capabilities.clone(),
+            source_catalog: manifest.source_catalog.clone(),
+        };
+        let provider = catch_unwind(AssertUnwindSafe(|| (registration.factory)(context)))
+            .map_err(|_| AudioSourceSystemError::ProviderLoad {
+                audio_source_id: manifest.id.clone(),
+                message: "bundled Provider factory panicked".to_owned(),
+            })?
+            .map_err(|message| AudioSourceSystemError::ProviderLoad {
+                audio_source_id: manifest.id.clone(),
+                message,
+            })?;
+        let provider_id =
+            catch_unwind(AssertUnwindSafe(|| provider.id().to_owned())).map_err(|_| {
+                AudioSourceSystemError::ProviderLoad {
+                    audio_source_id: manifest.id.clone(),
+                    message: "reading the bundled Provider ID panicked".to_owned(),
+                }
+            })?;
+        if provider_id != manifest.provider_id {
+            return Err(AudioSourceSystemError::ProviderLoad {
+                audio_source_id: manifest.id.clone(),
+                message: format!(
+                    "factory returned Provider {provider_id}, expected {}",
+                    manifest.provider_id
+                ),
+            });
+        }
+        let api_version =
+            catch_unwind(AssertUnwindSafe(|| provider.api_version())).map_err(|_| {
+                AudioSourceSystemError::ProviderLoad {
+                    audio_source_id: manifest.id.clone(),
+                    message: "reading the bundled Provider API version panicked".to_owned(),
+                }
+            })?;
+        if api_version != manifest.supported_api_version {
+            return Err(AudioSourceSystemError::ProviderLoad {
+                audio_source_id: manifest.id.clone(),
+                message: format!(
+                    "factory returned Provider API {api_version}, expected {}",
+                    manifest.supported_api_version
+                ),
+            });
+        }
+        let capabilities = catch_unwind(AssertUnwindSafe(|| provider.required_capabilities()))
+            .map_err(|_| AudioSourceSystemError::ProviderLoad {
+                audio_source_id: manifest.id.clone(),
+                message: "reading the bundled Provider capabilities panicked".to_owned(),
+            })?;
+        if capabilities != manifest.capabilities {
+            return Err(AudioSourceSystemError::ProviderLoad {
+                audio_source_id: manifest.id.clone(),
+                message: "factory Provider capabilities do not match the registration".to_owned(),
+            });
+        }
+        Ok(provider)
     }
 
     fn activation_failed(
@@ -1195,6 +1427,7 @@ impl AudioSourceRegistry {
                     can_enable: false,
                 },
                 provider: None,
+                origin: AudioSourceOrigin::Imported,
             },
         );
     }
@@ -1473,7 +1706,7 @@ fn prepare_import_contents(
     Ok((manifest, source, report))
 }
 
-fn build_provider(
+fn build_imported_provider(
     manifest: &AudioSourceManifest,
     package_path: &Path,
 ) -> Result<Arc<dyn SourceProvider>, AudioSourceSystemError> {
@@ -1799,6 +2032,7 @@ fn record_for_manifest(
     path: &Path,
     persisted: Option<&PersistedAudioSourceState>,
     runtime_api_version: SourceRuntimeApiVersion,
+    can_remove: bool,
 ) -> Result<AudioSourceRecord, AudioSourceSystemError> {
     let fingerprint = manifest_fingerprint(manifest)?;
     let manifest_unchanged =
@@ -1857,7 +2091,7 @@ fn record_for_manifest(
         granted_capabilities,
         sources: manifest.source_catalog.values().cloned().collect(),
         diagnostics,
-        can_remove: true,
+        can_remove,
         can_enable: false,
     };
     update_action_flags(&mut record);
@@ -2314,6 +2548,65 @@ mod tests {
             .expect("reviewed source should enable");
         assert_eq!(enabled.state, AudioSourceState::Enabled);
         assert!(enabled.enabled);
+    }
+
+    #[test]
+    fn bundled_rust_source_uses_audio_source_lifecycle_and_cannot_be_removed() {
+        let root = tempfile::tempdir().expect("test directory should exist");
+        let executable = root.path().join("fake-yt-dlp");
+        fs::write(&executable, []).expect("fake sidecar should exist");
+        let connection = database();
+        let mut registry = AudioSourceRegistry::new(
+            root.path().join("audio-sources"),
+            Arc::new(SourceRuntime::new()),
+        )
+        .with_bundled_source(
+            crate::youtube_music_playback::bundled_audio_source_registration(Arc::new(
+                crate::yt_dlp_sidecar::YtDlpSidecar::with_executable(
+                    root.path().join("yt-dlp"),
+                    executable,
+                ),
+            )),
+        )
+        .expect("bundled source should register");
+
+        let records = registry
+            .refresh(&connection)
+            .expect("registry should discover the bundled source");
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(
+            record.id,
+            crate::youtube_music_playback::YOUTUBE_MUSIC_AUDIO_SOURCE_ID
+        );
+        assert_eq!(record.state, AudioSourceState::NeedsReview);
+        assert!(!record.can_remove);
+        assert_eq!(
+            record.adapter.as_deref(),
+            Some("builtin:youtube-music-playback")
+        );
+        assert_eq!(
+            record.sources[0].id,
+            crate::youtube_music::YOUTUBE_MUSIC_SOURCE_ID
+        );
+
+        registry
+            .set_capabilities(
+                &connection,
+                &record.id,
+                [SourceCapability::NetworkAny],
+                true,
+            )
+            .expect("network capability should be reviewable");
+        let enabled = registry
+            .set_enabled(&connection, &record.id, true)
+            .expect("bundled source should enable");
+        assert_eq!(enabled.state, AudioSourceState::Enabled);
+        assert!(enabled.enabled);
+        assert!(matches!(
+            registry.remove(&connection, &record.id),
+            Err(AudioSourceSystemError::InvalidState(_, _))
+        ));
     }
 
     #[test]
