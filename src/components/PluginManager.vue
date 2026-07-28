@@ -210,7 +210,7 @@ function diagnosticClass(level: PluginDiagnostic["level"]) {
   if (level === "warn") {
     return "text-warning";
   }
-  return "text-base-content/70";
+  return "text-muted";
 }
 
 function formatTimestamp(timestamp: number) {
@@ -234,7 +234,7 @@ function sourceCount(plugin: PluginRecord) {
           <Plug :size="18" aria-hidden="true" />
           Plugin System
         </h2>
-        <p class="mt-1 text-sm text-base-content/65">
+        <p class="mt-1 text-sm text-muted">
           {{ plugins.length }} installed package{{ plugins.length === 1 ? "" : "s" }}
         </p>
       </div>
@@ -277,12 +277,12 @@ function sourceCount(plugin: PluginRecord) {
       </button>
     </div>
 
-    <div v-if="isLoading && !hasPlugins" class="flex items-center gap-2 p-6 text-sm text-base-content/65">
+    <div v-if="isLoading && !hasPlugins" class="flex items-center gap-2 p-6 text-sm text-muted">
       <RefreshCw class="animate-spin" :size="16" aria-hidden="true" />
       Loading Plugins
     </div>
 
-    <div v-else-if="!hasPlugins" class="p-8 text-center text-sm text-base-content/65">
+    <div v-else-if="!hasPlugins" class="p-8 text-center text-sm text-muted">
       No Plugin packages discovered.
     </div>
 
@@ -298,13 +298,13 @@ function sourceCount(plugin: PluginRecord) {
             <span class="badge badge-sm" :class="stateClass(plugin.state)">{{ stateLabel(plugin.state) }}</span>
             <span class="badge badge-outline badge-sm">{{ plugin.origin }}</span>
           </div>
-          <p class="mt-1 truncate text-xs text-base-content/60">
+          <p class="mt-1 truncate text-xs text-muted">
             {{ plugin.id }}<span v-if="plugin.version"> / v{{ plugin.version }}</span>
           </p>
-          <p v-if="plugin.description" class="mt-2 text-sm text-base-content/70">{{ plugin.description }}</p>
+          <p v-if="plugin.description" class="mt-2 text-sm text-muted">{{ plugin.description }}</p>
 
           <div v-if="expandedPluginId === plugin.id" class="mt-4 space-y-4 border-t border-base-300 pt-4">
-            <div class="grid gap-2 text-xs text-base-content/65 sm:grid-cols-3">
+            <div class="grid gap-2 text-xs text-muted sm:grid-cols-3">
               <span>{{ plugin.providers.length }} provider{{ plugin.providers.length === 1 ? "" : "s" }}</span>
               <span>{{ sourceCount(plugin) }} source{{ sourceCount(plugin) === 1 ? "" : "s" }}</span>
               <span class="truncate" :title="plugin.path">{{ plugin.path }}</span>
@@ -337,11 +337,11 @@ function sourceCount(plugin: PluginRecord) {
               <div v-for="provider in plugin.providers" :key="provider.id" class="rounded border border-base-300 p-3">
                 <div class="flex flex-wrap items-center justify-between gap-2">
                   <span class="text-sm font-medium">{{ provider.id }}</span>
-                  <span class="text-xs" :class="provider.initialized ? 'text-success' : 'text-base-content/60'">
+                  <span class="text-xs" :class="provider.initialized ? 'text-success' : 'text-muted'">
                     {{ provider.initialized ? "Initialized" : "Not initialized" }}
                   </span>
                 </div>
-                <div class="mt-1 text-xs text-base-content/60">{{ provider.entrypoint }}</div>
+                <div class="mt-1 text-xs text-muted">{{ provider.entrypoint }}</div>
                 <div v-if="provider.sources.length" class="mt-2 flex flex-wrap gap-1">
                   <span v-for="source in provider.sources" :key="source.id" class="badge badge-ghost badge-sm">
                     {{ source.id }} / {{ source.name }}
@@ -355,7 +355,7 @@ function sourceCount(plugin: PluginRecord) {
                 <h4 class="text-sm font-semibold">Diagnostics</h4>
                 <button
                   v-if="plugin.diagnostics.length"
-                  class="btn btn-ghost btn-xs"
+                  class="btn btn-ghost btn-sm"
                   type="button"
                   :disabled="busyPluginId === plugin.id"
                   @click="clearDiagnostics(plugin)"
@@ -363,15 +363,15 @@ function sourceCount(plugin: PluginRecord) {
                   Clear
                 </button>
               </div>
-              <div v-if="!plugin.diagnostics.length" class="text-xs text-base-content/60">No diagnostics.</div>
+              <div v-if="!plugin.diagnostics.length" class="text-xs text-muted">No diagnostics.</div>
               <ul v-else class="max-h-52 space-y-2 overflow-y-auto rounded border border-base-300 p-3">
                 <li v-for="(diagnostic, index) in plugin.diagnostics" :key="`${diagnostic.timestamp}-${index}`" class="text-xs">
                   <div class="flex flex-wrap items-center gap-2">
                     <span class="font-medium uppercase" :class="diagnosticClass(diagnostic.level)">{{ diagnostic.level }}</span>
-                    <span class="text-base-content/50">{{ diagnostic.code }}</span>
-                    <span class="text-base-content/50">{{ formatTimestamp(diagnostic.timestamp) }}</span>
+                    <span class="text-muted">{{ diagnostic.code }}</span>
+                    <span class="text-muted">{{ formatTimestamp(diagnostic.timestamp) }}</span>
                   </div>
-                  <p class="mt-1 break-words text-base-content/75">{{ diagnostic.message }}</p>
+                  <p class="mt-1 break-words text-muted">{{ diagnostic.message }}</p>
                 </li>
               </ul>
             </div>
@@ -396,7 +396,7 @@ function sourceCount(plugin: PluginRecord) {
             :disabled="busyPluginId === plugin.id || (!plugin.enabled && !plugin.canEnable)"
             @click="toggleEnabled(plugin)"
           >
-            <Power :size="15" aria-hidden="true" />
+                <Power :size="16" aria-hidden="true" />
             {{ plugin.enabled ? "Disable" : "Enable" }}
           </button>
           <button

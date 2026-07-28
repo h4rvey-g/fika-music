@@ -249,7 +249,7 @@ function previewTemplate(template: string, values: Record<string, string>) {
               @drop="dropChannel(channel.id)"
             >
               <input
-                class="checkbox checkbox-sm"
+                class="checkbox checkbox-md"
                 type="checkbox"
                 :checked="!settings.excludedChannels.includes(channel.id)"
                 :aria-label="`Include ${channel.sourceName}`"
@@ -257,13 +257,13 @@ function previewTemplate(template: string, values: Record<string, string>) {
               />
               <div class="min-w-0 flex-1">
                 <div class="truncate text-sm">{{ channel.sourceName }}</div>
-                <div class="truncate text-xs text-base-content/50">{{ channel.pluginName }} · {{ channel.sourceId }}</div>
+                <div class="truncate text-xs text-muted">{{ channel.pluginName }} · {{ channel.sourceId }}</div>
               </div>
-              <button class="btn btn-square btn-ghost btn-xs" type="button" :disabled="index === 0 || Boolean(saving)" aria-label="Move channel up" title="Move up" @click="moveChannel(index, -1)">
-                <ArrowUp :size="13" aria-hidden="true" />
+              <button class="btn btn-square btn-ghost btn-sm" type="button" :disabled="index === 0 || Boolean(saving)" aria-label="Move channel up" title="Move up" @click="moveChannel(index, -1)">
+                <ArrowUp :size="16" aria-hidden="true" />
               </button>
-              <button class="btn btn-square btn-ghost btn-xs" type="button" :disabled="index === orderedChannels.length - 1 || Boolean(saving)" aria-label="Move channel down" title="Move down" @click="moveChannel(index, 1)">
-                <ArrowDown :size="13" aria-hidden="true" />
+              <button class="btn btn-square btn-ghost btn-sm" type="button" :disabled="index === orderedChannels.length - 1 || Boolean(saving)" aria-label="Move channel down" title="Move down" @click="moveChannel(index, 1)">
+                <ArrowDown :size="16" aria-hidden="true" />
               </button>
             </li>
           </ul>
@@ -311,13 +311,13 @@ function previewTemplate(template: string, values: Record<string, string>) {
               @dragover.prevent
               @drop="dropAudioSource(source.id)"
             >
-              <span class="w-6 text-center text-xs tabular-nums text-base-content/45">{{ index + 1 }}</span>
+              <span class="w-6 text-center text-xs tabular-nums text-muted">{{ index + 1 }}</span>
               <span class="min-w-0 flex-1 truncate text-sm">{{ source.name }}</span>
-              <button class="btn btn-square btn-ghost btn-xs" type="button" :disabled="index === 0 || Boolean(saving)" aria-label="Move Audio Source up" title="Move up" @click="moveAudioSource(index, -1)">
-                <ArrowUp :size="13" aria-hidden="true" />
+              <button class="btn btn-square btn-ghost btn-sm" type="button" :disabled="index === 0 || Boolean(saving)" aria-label="Move Audio Source up" title="Move up" @click="moveAudioSource(index, -1)">
+                <ArrowUp :size="16" aria-hidden="true" />
               </button>
-              <button class="btn btn-square btn-ghost btn-xs" type="button" :disabled="index === orderedAudioSources.length - 1 || Boolean(saving)" aria-label="Move Audio Source down" title="Move down" @click="moveAudioSource(index, 1)">
-                <ArrowDown :size="13" aria-hidden="true" />
+              <button class="btn btn-square btn-ghost btn-sm" type="button" :disabled="index === orderedAudioSources.length - 1 || Boolean(saving)" aria-label="Move Audio Source down" title="Move down" @click="moveAudioSource(index, 1)">
+                <ArrowDown :size="16" aria-hidden="true" />
               </button>
             </li>
           </ul>
@@ -346,11 +346,11 @@ function previewTemplate(template: string, values: Record<string, string>) {
         <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
           <label class="flex min-w-0 items-center gap-3">
             <History :size="17" aria-hidden="true" />
-            <span><span class="block text-sm font-medium">Recent search history</span><span class="block text-xs text-base-content/55">Stores up to 10 query strings locally</span></span>
+            <span><span class="block text-sm font-medium">Recent search history</span><span class="block text-xs text-muted">Stores up to 10 query strings locally</span></span>
           </label>
           <div class="flex items-center gap-2">
-            <button class="btn btn-sm" type="button" :disabled="saving === 'clear-history'" @click="clearHistory"><Trash2 :size="14" aria-hidden="true" />Clear</button>
-            <input class="toggle toggle-sm" type="checkbox" :checked="settings.searchHistoryEnabled" aria-label="Store recent searches" @change="toggleHistory(($event.currentTarget as HTMLInputElement).checked)" />
+          <button class="btn btn-sm" type="button" :disabled="saving === 'clear-history'" @click="clearHistory"><Trash2 :size="16" aria-hidden="true" />Clear</button>
+          <input class="toggle toggle-md" type="checkbox" :checked="settings.searchHistoryEnabled" aria-label="Store recent searches" @change="toggleHistory(($event.currentTarget as HTMLInputElement).checked)" />
           </div>
         </div>
       </div>
@@ -363,20 +363,20 @@ function previewTemplate(template: string, values: Record<string, string>) {
       </div>
       <div class="divide-y divide-base-300">
         <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-          <div class="min-w-0"><div class="text-sm font-medium">Download directory</div><div class="truncate text-xs text-base-content/55" :title="settings.downloadDirectory || undefined">{{ settings.downloadDirectory || 'Not configured' }}</div></div>
-          <button class="btn btn-sm shrink-0" type="button" :disabled="saving === 'directory'" @click="chooseDirectory"><FolderOpen :size="15" aria-hidden="true" />Choose</button>
+          <div class="min-w-0"><div class="text-sm font-medium">Download directory</div><div class="truncate text-xs text-muted" :title="settings.downloadDirectory || undefined">{{ settings.downloadDirectory || 'Not configured' }}</div></div>
+        <button class="btn btn-sm shrink-0" type="button" :disabled="saving === 'directory'" @click="chooseDirectory"><FolderOpen :size="16" aria-hidden="true" />Choose</button>
         </div>
         <div class="px-4 py-4">
           <label for="filename-template" class="text-sm font-medium">Filename template</label>
           <div class="mt-2 flex gap-2">
             <input id="filename-template" v-model="templateDraft" class="input input-sm min-w-0 flex-1 font-mono" />
-            <button class="btn btn-primary btn-sm" type="button" :disabled="saving === 'template' || templateDraft === settings.filenameTemplate" @click="applyTemplate"><Save :size="14" aria-hidden="true" />Apply</button>
+          <button class="btn btn-primary btn-sm" type="button" :disabled="saving === 'template' || templateDraft === settings.filenameTemplate" @click="applyTemplate"><Save :size="16" aria-hidden="true" />Apply</button>
           </div>
-          <div class="mt-1 truncate text-xs" :class="templateError ? 'text-error' : 'text-base-content/55'">{{ templateError || templatePreview }}</div>
+          <div class="mt-1 truncate text-xs" :class="templateError ? 'text-error' : 'text-muted'">{{ templateError || templatePreview }}</div>
         </div>
         <div class="grid gap-4 px-4 py-4 sm:grid-cols-2">
           <label class="form-control"><span class="label-text text-sm">Concurrent songs</span><input class="input input-sm mt-1" type="number" min="1" max="4" :value="settings.downloadConcurrency" @change="persist({ downloadConcurrency: Number(($event.currentTarget as HTMLInputElement).value) }, 'download-concurrency')" /></label>
-          <label class="flex items-center justify-between gap-3 self-end py-2"><span class="text-sm">Batch completion notifications</span><input class="toggle toggle-sm" type="checkbox" :checked="settings.batchNotifications" @change="persist({ batchNotifications: ($event.currentTarget as HTMLInputElement).checked }, 'notifications')" /></label>
+        <label class="flex items-center justify-between gap-3 self-end py-2"><span class="text-sm">Batch completion notifications</span><input class="toggle toggle-md" type="checkbox" :checked="settings.batchNotifications" @change="persist({ batchNotifications: ($event.currentTarget as HTMLInputElement).checked }, 'notifications')" /></label>
         </div>
       </div>
     </section>

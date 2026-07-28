@@ -53,7 +53,7 @@ function actionLabel(action: string) {
               v{{ plugin.version }}
             </span>
           </div>
-          <p class="mt-0.5 truncate text-xs text-base-content/60">
+          <p class="mt-0.5 truncate text-xs text-muted">
             {{ plugin.author || plugin.id }}
           </p>
         </div>
@@ -65,13 +65,13 @@ function actionLabel(action: string) {
       </button>
     </header>
 
-    <p v-if="plugin.description" class="border-b border-base-300 px-4 py-3 text-sm text-base-content/70">
+    <p v-if="plugin.description" class="border-b border-base-300 px-4 py-3 text-sm text-muted">
       {{ plugin.description }}
     </p>
 
     <div class="flex items-center justify-between gap-3 border-b border-base-300 px-4 py-3">
       <h3 class="text-sm font-semibold">Source providers</h3>
-      <span class="text-xs text-base-content/60">
+      <span class="text-xs text-muted">
         {{ plugin.providers.length }} provider{{ plugin.providers.length === 1 ? "" : "s" }} ·
         {{ sourceCount }} source{{ sourceCount === 1 ? "" : "s" }}
       </span>
@@ -93,7 +93,7 @@ function actionLabel(action: string) {
               {{ provider.initialized ? "Initialized" : "Unavailable" }}
             </span>
           </div>
-          <p class="mt-1 truncate text-xs text-base-content/55" :title="provider.entrypoint">
+          <p class="mt-1 truncate text-xs text-muted" :title="provider.entrypoint">
             {{ provider.entrypoint }}
           </p>
 
@@ -105,7 +105,7 @@ function actionLabel(action: string) {
             >
               <div class="min-w-0">
                 <div class="truncate text-sm font-medium">{{ source.name }}</div>
-                <div class="truncate text-xs text-base-content/55">{{ source.id }}</div>
+                <div class="truncate text-xs text-muted">{{ source.id }}</div>
               </div>
               <div class="flex flex-wrap gap-1 sm:justify-end">
                 <span
@@ -118,14 +118,14 @@ function actionLabel(action: string) {
               </div>
             </li>
           </ul>
-          <p v-else class="mt-3 text-xs text-base-content/55">No source catalog entries.</p>
+          <p v-else class="mt-3 text-xs text-muted">No source catalog entries.</p>
         </div>
       </li>
     </ul>
 
-    <div v-else class="p-6 text-sm text-base-content/60">No providers are registered.</div>
+    <div v-else class="p-6 text-sm text-muted">No providers are registered.</div>
 
-    <footer class="flex flex-wrap gap-x-4 gap-y-1 border-t border-base-300 px-4 py-3 text-xs text-base-content/55">
+    <footer class="flex flex-wrap gap-x-4 gap-y-1 border-t border-base-300 px-4 py-3 text-xs text-muted">
       <span>{{ plugin.id }}</span>
       <span>{{ plugin.origin === "bundled" ? "Bundled" : "User installed" }}</span>
     </footer>

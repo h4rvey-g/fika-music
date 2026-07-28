@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_NOW_PLAYING_LYRICS_PREFERENCES,
+  MIN_NOW_PLAYING_LYRICS_INACTIVE_OPACITY,
   NOW_PLAYING_LYRICS_STORAGE_KEY,
   NOW_PLAYING_LYRICS_THEME_COLOR,
   loadNowPlayingLyricsPreferences,
@@ -9,6 +10,10 @@ import {
 } from "./now-playing-lyrics";
 
 describe("now playing lyrics preferences", () => {
+  it("uses an accessible default opacity for inactive lyrics", () => {
+    expect(DEFAULT_NOW_PLAYING_LYRICS_PREFERENCES.inactiveOpacity).toBe(0.85);
+  });
+
   it("falls back to defaults when persisted preferences are malformed", () => {
     const storage = {
       getItem: vi.fn().mockReturnValue("not-json"),
@@ -36,7 +41,7 @@ describe("now playing lyrics preferences", () => {
       fontSize: 30,
       lineGap: 4,
       inactiveColor: "#123456",
-      inactiveOpacity: 0.1,
+      inactiveOpacity: MIN_NOW_PLAYING_LYRICS_INACTIVE_OPACITY,
     });
   });
 

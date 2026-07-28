@@ -245,7 +245,7 @@ function artistActionId(track: OnlineTrack, artist: string) {
           <td class="hidden max-w-48 text-xs lg:table-cell">
             <button
               v-if="track.album"
-              class="link link-hover inline-flex min-w-0 max-w-full items-center gap-1 text-left opacity-60 disabled:cursor-wait"
+              class="link link-hover inline-flex min-w-0 max-w-full items-center gap-1 text-left text-muted disabled:cursor-wait"
               type="button"
               :disabled="entityActionId === `album:${track.key}`"
               :aria-busy="entityActionId === `album:${track.key}` ? 'true' : undefined"
@@ -263,7 +263,7 @@ function artistActionId(track: OnlineTrack, artist: string) {
                 aria-hidden="true"
               />
             </button>
-            <span v-else class="opacity-60">-</span>
+            <span v-else class="text-muted">-</span>
           </td>
           <td>
             <div class="flex max-w-28 gap-1 overflow-hidden">
@@ -277,11 +277,11 @@ function artistActionId(track: OnlineTrack, artist: string) {
               </span>
             </div>
           </td>
-          <td class="text-right text-xs tabular-nums text-base-content/55">{{ duration(track.durationSeconds) }}</td>
+          <td class="text-right text-xs tabular-nums text-muted">{{ duration(track.durationSeconds) }}</td>
           <td>
             <div class="flex justify-end gap-1">
               <button
-                class="btn btn-square btn-ghost btn-xs"
+                class="btn btn-square btn-ghost btn-sm"
                 type="button"
                 :disabled="!supportsLibraryActions(track) || trackActionId === `favorite:${track.key}`"
                 :aria-label="`Add ${track.title} to My Favorite Music`"
@@ -290,17 +290,17 @@ function artistActionId(track: OnlineTrack, artist: string) {
                 @click.stop="$emit('favorite', track)"
                 @dblclick.stop
               >
-                <RefreshCw v-if="trackActionId === `favorite:${track.key}`" class="animate-spin" :size="14" aria-hidden="true" />
+                <RefreshCw v-if="trackActionId === `favorite:${track.key}`" class="animate-spin" :size="16" aria-hidden="true" />
                 <Heart
                   v-else
                   :class="{ 'text-error': isFavorite(track) }"
                   :fill="isFavorite(track) ? 'currentColor' : 'none'"
-                  :size="14"
+                  :size="16"
                   aria-hidden="true"
                 />
               </button>
               <button
-                class="btn btn-square btn-ghost btn-xs"
+                class="btn btn-square btn-ghost btn-sm"
                 type="button"
                 :disabled="!supportsLibraryActions(track) || trackActionId === `playlist:${track.key}`"
                 :aria-label="`Add ${track.title} to a Playlist`"
@@ -308,18 +308,18 @@ function artistActionId(track: OnlineTrack, artist: string) {
                 @click.stop="$emit('addToPlaylist', track)"
                 @dblclick.stop
               >
-                <RefreshCw v-if="trackActionId === `playlist:${track.key}`" class="animate-spin" :size="14" aria-hidden="true" />
-                <ListPlus v-else :size="14" aria-hidden="true" />
+                <RefreshCw v-if="trackActionId === `playlist:${track.key}`" class="animate-spin" :size="16" aria-hidden="true" />
+                <ListPlus v-else :size="16" aria-hidden="true" />
               </button>
               <button
-                class="btn btn-square btn-ghost btn-xs"
+                class="btn btn-square btn-ghost btn-sm"
                 type="button"
                 :aria-label="`Download ${track.title}`"
                 title="Download"
                 @click.stop="$emit('download', track)"
                 @dblclick.stop
               >
-                <Download :size="14" aria-hidden="true" />
+                <Download :size="16" aria-hidden="true" />
               </button>
             </div>
           </td>
@@ -340,7 +340,7 @@ function artistActionId(track: OnlineTrack, artist: string) {
       </li>
       <li>
         <button type="button" @click="downloadSelection">
-          <Download :size="15" aria-hidden="true" />
+        <Download :size="16" aria-hidden="true" />
           Download
         </button>
       </li>
@@ -350,7 +350,7 @@ function artistActionId(track: OnlineTrack, artist: string) {
           :disabled="!selectionSupportsPlaylist"
           @click="addSelectionToPlaylist"
         >
-          <ListPlus :size="15" aria-hidden="true" />
+        <ListPlus :size="16" aria-hidden="true" />
           Add to Playlist
         </button>
       </li>

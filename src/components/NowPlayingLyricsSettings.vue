@@ -9,6 +9,7 @@ import {
   Type,
 } from "@lucide/vue";
 import {
+  MIN_NOW_PLAYING_LYRICS_INACTIVE_OPACITY,
   NOW_PLAYING_LYRICS_FONT_OPTIONS,
   NOW_PLAYING_LYRICS_SETTINGS_ID,
   NOW_PLAYING_LYRICS_THEME_COLOR,
@@ -122,7 +123,7 @@ function previewLineStyle(active: boolean) {
       <div class="grid gap-4 px-4 py-4 sm:grid-cols-2">
         <label class="flex items-center justify-between gap-3">
           <span class="flex items-center gap-3 text-sm font-medium">
-            <Type class="text-base-content/60" :size="17" aria-hidden="true" />
+            <Type class="text-muted" :size="17" aria-hidden="true" />
             Typeface
           </span>
           <select
@@ -162,12 +163,12 @@ function previewLineStyle(active: boolean) {
         <label class="min-w-0">
           <span class="mb-2 flex items-center justify-between gap-3 text-sm font-medium">
             Size
-            <output class="text-xs tabular-nums text-base-content/60">
+            <output class="text-xs tabular-nums text-muted">
               {{ preferences.fontSize }} px
             </output>
           </span>
           <input
-            class="range range-sm w-full"
+            class="range range-sm min-h-6 w-full"
             type="range"
             min="12"
             max="30"
@@ -181,12 +182,12 @@ function previewLineStyle(active: boolean) {
         <label class="min-w-0">
           <span class="mb-2 flex items-center justify-between gap-3 text-sm font-medium">
             Line spacing
-            <output class="text-xs tabular-nums text-base-content/60">
+            <output class="text-xs tabular-nums text-muted">
               {{ preferences.lineGap }} px
             </output>
           </span>
           <input
-            class="range range-sm w-full"
+            class="range range-sm min-h-6 w-full"
             type="range"
             min="4"
             max="28"
@@ -241,14 +242,14 @@ function previewLineStyle(active: boolean) {
         <label class="min-w-0">
           <span class="mb-2 flex items-center justify-between gap-3 text-sm font-medium">
             Other line opacity
-            <output class="text-xs tabular-nums text-base-content/60">
+            <output class="text-xs tabular-nums text-muted">
               {{ Math.round(preferences.inactiveOpacity * 100) }}%
             </output>
           </span>
           <input
-            class="range range-sm w-full"
+            class="range range-sm min-h-6 w-full"
             type="range"
-            min="0.1"
+            :min="MIN_NOW_PLAYING_LYRICS_INACTIVE_OPACITY"
             max="1"
             step="0.05"
             :value="preferences.inactiveOpacity"
@@ -265,7 +266,7 @@ function previewLineStyle(active: boolean) {
           class="flex items-center justify-between gap-3 text-sm font-medium"
         >
           <span class="flex items-center gap-3">
-            <Palette class="text-base-content/60" :size="17" aria-hidden="true" />
+            <Palette class="text-muted" :size="17" aria-hidden="true" />
             {{ control.label }}
           </span>
           <div class="flex shrink-0 items-center gap-1">

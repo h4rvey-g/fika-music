@@ -289,7 +289,7 @@ function diagnosticClass(level: AudioSourceDiagnostic["level"]) {
   if (level === "warn") {
     return "text-warning";
   }
-  return "text-base-content/70";
+  return "text-muted";
 }
 
 function formatTimestamp(timestamp: number) {
@@ -307,7 +307,7 @@ function formatTimestamp(timestamp: number) {
         </div>
         <div class="min-w-0">
           <h2 class="text-base font-semibold">Audio Sources</h2>
-          <p class="mt-0.5 text-xs text-base-content/60">
+          <p class="mt-0.5 text-xs text-muted">
             {{ audioSources.length }} imported source{{ audioSources.length === 1 ? "" : "s" }}
           </p>
         </div>
@@ -443,7 +443,7 @@ function formatTimestamp(timestamp: number) {
       </button>
     </div>
 
-    <div v-if="isLoading && !hasAudioSources" class="flex items-center gap-2 p-6 text-sm text-base-content/65">
+    <div v-if="isLoading && !hasAudioSources" class="flex items-center gap-2 p-6 text-sm text-muted">
       <RefreshCw class="animate-spin" :size="16" aria-hidden="true" />
       Loading audio sources
     </div>
@@ -480,10 +480,10 @@ function formatTimestamp(timestamp: number) {
               {{ audioSource.adapter }}
             </span>
           </div>
-          <p class="mt-1 truncate text-xs text-base-content/60">
+          <p class="mt-1 truncate text-xs text-muted">
             {{ audioSource.id }}<span v-if="audioSource.version"> / v{{ audioSource.version }}</span>
           </p>
-          <p v-if="audioSource.description" class="mt-2 text-sm text-base-content/70">
+          <p v-if="audioSource.description" class="mt-2 text-sm text-muted">
             {{ audioSource.description }}
           </p>
 
@@ -491,7 +491,7 @@ function formatTimestamp(timestamp: number) {
             v-if="expandedSourceId === audioSource.id"
             class="mt-4 space-y-4 border-t border-base-300 pt-4"
           >
-            <div class="grid gap-2 text-xs text-base-content/65 sm:grid-cols-2">
+            <div class="grid gap-2 text-xs text-muted sm:grid-cols-2">
               <span>{{ audioSource.sources.length }} catalog source{{ audioSource.sources.length === 1 ? "" : "s" }}</span>
               <span class="truncate" :title="audioSource.path">{{ audioSource.path }}</span>
             </div>
@@ -516,7 +516,7 @@ function formatTimestamp(timestamp: number) {
                 >
                   <span>{{ capabilityLabel(capability) }}</span>
                   <input
-                    class="checkbox checkbox-sm"
+                class="checkbox checkbox-md"
                     type="checkbox"
                     :checked="audioSource.grantedCapabilities.includes(capability)"
                     :disabled="busySourceId === audioSource.id"
@@ -539,7 +539,7 @@ function formatTimestamp(timestamp: number) {
                   :disabled="busySourceId === audioSource.id"
                   @click="reviewCapabilities(audioSource)"
                 >
-                  <ShieldCheck :size="15" aria-hidden="true" />
+              <ShieldCheck :size="16" aria-hidden="true" />
                   Confirm review
                 </button>
               </div>
@@ -563,7 +563,7 @@ function formatTimestamp(timestamp: number) {
                 <h4 class="text-sm font-semibold">Diagnostics</h4>
                 <button
                   v-if="audioSource.diagnostics.length"
-                  class="btn btn-ghost btn-xs"
+                  class="btn btn-ghost btn-sm"
                   type="button"
                   :disabled="busySourceId === audioSource.id"
                   @click="clearDiagnostics(audioSource)"
@@ -571,7 +571,7 @@ function formatTimestamp(timestamp: number) {
                   Clear
                 </button>
               </div>
-              <p v-if="!audioSource.diagnostics.length" class="text-xs text-base-content/60">
+              <p v-if="!audioSource.diagnostics.length" class="text-xs text-muted">
                 No diagnostics.
               </p>
               <ul v-else class="max-h-52 space-y-2 overflow-y-auto border border-base-300 p-3">
@@ -584,10 +584,10 @@ function formatTimestamp(timestamp: number) {
                     <span class="font-medium uppercase" :class="diagnosticClass(diagnostic.level)">
                       {{ diagnostic.level }}
                     </span>
-                    <span class="text-base-content/50">{{ diagnostic.code }}</span>
-                    <span class="text-base-content/50">{{ formatTimestamp(diagnostic.timestamp) }}</span>
+                    <span class="text-muted">{{ diagnostic.code }}</span>
+                    <span class="text-muted">{{ formatTimestamp(diagnostic.timestamp) }}</span>
                   </div>
-                  <p class="mt-1 break-words text-base-content/75">{{ diagnostic.message }}</p>
+                  <p class="mt-1 break-words text-muted">{{ diagnostic.message }}</p>
                 </li>
               </ul>
             </div>
@@ -598,7 +598,7 @@ function formatTimestamp(timestamp: number) {
           <label class="flex items-center gap-2 text-xs">
             <span class="sr-only">Enable {{ audioSource.name }}</span>
             <input
-              class="toggle toggle-sm"
+            class="toggle toggle-md"
               type="checkbox"
               :checked="audioSource.enabled"
               :disabled="busySourceId === audioSource.id || (!audioSource.enabled && !audioSource.canEnable)"

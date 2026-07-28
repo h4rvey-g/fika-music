@@ -200,4 +200,21 @@ describe("DesktopLyricsWindow", () => {
     );
     wrapper.unmount();
   });
+
+  it("uses readable toolbar colors and compact desktop targets", async () => {
+    const wrapper = mount(DesktopLyricsWindow);
+    await flushPromises();
+
+    const toolbar = wrapper.get('[data-testid="desktop-lyrics-toolbar"]');
+    expect(toolbar.classes()).toContain("bg-black/70");
+    expect(toolbar.get(".text-white").text()).toContain("Fika Music");
+    expect(toolbar.find('[class~="text-white/70"]').exists()).toBe(true);
+    for (const button of toolbar.findAll("button")) {
+      expect(button.classes()).toContain("btn-sm");
+      expect(button.get("svg").attributes("width")).toBe("16");
+      expect(button.attributes("aria-label")).toBeTruthy();
+    }
+
+    wrapper.unmount();
+  });
 });

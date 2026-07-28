@@ -1,6 +1,7 @@
 export const NOW_PLAYING_LYRICS_STORAGE_KEY = "fika.now-playing-lyrics";
 export const NOW_PLAYING_LYRICS_SETTINGS_ID = "now-playing-lyrics-settings";
 export const NOW_PLAYING_LYRICS_THEME_COLOR = "theme";
+export const MIN_NOW_PLAYING_LYRICS_INACTIVE_OPACITY = 0.6;
 
 export const NOW_PLAYING_LYRICS_FONT_OPTIONS = [
   { value: "system", label: "System" },
@@ -39,7 +40,7 @@ export const DEFAULT_NOW_PLAYING_LYRICS_PREFERENCES: NowPlayingLyricsPreferences
   alignment: "center",
   activeColor: NOW_PLAYING_LYRICS_THEME_COLOR,
   inactiveColor: NOW_PLAYING_LYRICS_THEME_COLOR,
-  inactiveOpacity: 0.45,
+  inactiveOpacity: 0.85,
 };
 
 export function loadNowPlayingLyricsPreferences(
@@ -112,7 +113,7 @@ export function parseNowPlayingLyricsPreferences(
     ),
     inactiveOpacity: clampNumber(
       candidate.inactiveOpacity,
-      0.1,
+      MIN_NOW_PLAYING_LYRICS_INACTIVE_OPACITY,
       1,
       DEFAULT_NOW_PLAYING_LYRICS_PREFERENCES.inactiveOpacity,
     ),

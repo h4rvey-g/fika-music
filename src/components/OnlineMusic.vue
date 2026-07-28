@@ -2255,7 +2255,7 @@ defineExpose({
           v-if="suggestionsOpen && (suggestionLoading || suggestions.length)"
           class="absolute inset-x-0 top-full z-30 mt-1 overflow-hidden rounded border border-base-300 bg-base-100 shadow-lg"
         >
-          <div v-if="suggestionLoading" class="flex h-10 items-center gap-2 px-3 text-xs text-base-content/60">
+          <div v-if="suggestionLoading" class="flex h-10 items-center gap-2 px-3 text-xs text-muted">
             <span class="loading loading-spinner loading-xs"></span>
             {{ query.trim() ? "Loading suggestions" : "Loading search history" }}
           </div>
@@ -2266,8 +2266,8 @@ defineExpose({
           >
             <li v-for="suggestion in suggestions" :key="suggestion">
               <button type="button" @mousedown.prevent="submitSearch(suggestion)">
-                <History v-if="!query.trim()" :size="14" aria-hidden="true" />
-                <Search v-else :size="14" aria-hidden="true" />
+              <History v-if="!query.trim()" :size="16" aria-hidden="true" />
+              <Search v-else :size="16" aria-hidden="true" />
                 <span class="truncate">{{ suggestion }}</span>
               </button>
             </li>
@@ -2276,10 +2276,22 @@ defineExpose({
       </div>
 
       <div role="tablist" class="tabs tabs-border shrink-0">
-        <button role="tab" class="tab" :class="{ 'tab-active': activeTab === 'search' }" @click="selectTab('search')">
+        <button
+          role="tab"
+          class="tab"
+          :class="activeTab === 'search' ? 'tab-active text-base-content' : 'text-muted'"
+          :aria-selected="activeTab === 'search'"
+          @click="selectTab('search')"
+        >
           Search
         </button>
-        <button role="tab" class="tab" :class="{ 'tab-active': activeTab === 'downloads' }" @click="selectTab('downloads')">
+        <button
+          role="tab"
+          class="tab"
+          :class="activeTab === 'downloads' ? 'tab-active text-base-content' : 'text-muted'"
+          :aria-selected="activeTab === 'downloads'"
+          @click="selectTab('downloads')"
+        >
           Downloads
           <span v-if="downloadTasks.length" class="badge badge-sm ml-1">{{ downloadTasks.length }}</span>
         </button>
@@ -2299,12 +2311,12 @@ defineExpose({
           Open channel
         </button>
         <button v-if="detailRetryAvailable" class="btn btn-sm" type="button" @click="retryDetail">
-          <RefreshCw :size="14" aria-hidden="true" />
+          <RefreshCw :size="16" aria-hidden="true" />
           Retry
         </button>
       </div>
-      <button class="btn btn-square btn-ghost btn-xs" type="button" aria-label="Dismiss error" @click="dismissGlobalError">
-        <X :size="14" aria-hidden="true" />
+      <button class="btn btn-square btn-ghost btn-sm" type="button" aria-label="Dismiss error" @click="dismissGlobalError">
+        <X :size="16" aria-hidden="true" />
       </button>
     </div>
     <div v-if="completionMessage" role="status" class="alert alert-success py-2 text-sm">
@@ -2319,9 +2331,9 @@ defineExpose({
     <div v-if="activeTab === 'downloads'" class="min-h-64">
       <div class="flex items-center justify-between border-b border-base-300 pb-2">
         <h2 class="text-sm font-semibold">Download tasks</h2>
-        <span class="text-xs text-base-content/55">{{ downloadTasks.length }} task{{ downloadTasks.length === 1 ? '' : 's' }}</span>
+        <span class="text-xs text-muted">{{ downloadTasks.length }} task{{ downloadTasks.length === 1 ? '' : 's' }}</span>
       </div>
-      <div v-if="!downloadTasks.length" class="flex min-h-48 flex-col items-center justify-center gap-2 text-base-content/55">
+      <div v-if="!downloadTasks.length" class="flex min-h-48 flex-col items-center justify-center gap-2 text-muted">
         <Download :size="24" aria-hidden="true" />
         <span class="text-sm">No download tasks</span>
       </div>
@@ -2336,7 +2348,7 @@ defineExpose({
                   {{ downloadTaskStateLabel(task.state) }}
                 </span>
               </div>
-              <div class="mt-1 flex min-w-0 items-center gap-2 text-xs text-base-content/55">
+              <div class="mt-1 flex min-w-0 items-center gap-2 text-xs text-muted">
                 <span>{{ task.completedItems }} complete</span>
                 <span>{{ task.skippedItems }} skipped</span>
                 <span v-if="task.failedItems">{{ task.failedItems }} failed</span>
@@ -2355,37 +2367,37 @@ defineExpose({
             <div class="flex shrink-0 gap-1">
               <button
                 v-if="task.state === 'paused' || task.state === 'queued' || task.state === 'completedWithErrors'"
-                class="btn btn-square btn-ghost btn-xs"
+                class="btn btn-square btn-ghost btn-sm"
                 type="button"
                 :disabled="downloadActionId === task.taskId"
                 aria-label="Resume download task"
                 title="Resume"
                 @click="runDownloadAction(task, 'start')"
               >
-                <RefreshCw v-if="downloadActionId === task.taskId" class="animate-spin" :size="14" aria-hidden="true" />
-                <Play v-else :size="14" aria-hidden="true" />
+                <RefreshCw v-if="downloadActionId === task.taskId" class="animate-spin" :size="16" aria-hidden="true" />
+                <Play v-else :size="16" aria-hidden="true" />
               </button>
               <button
                 v-if="task.state === 'running'"
-                class="btn btn-square btn-ghost btn-xs"
+                class="btn btn-square btn-ghost btn-sm"
                 type="button"
                 :disabled="downloadActionId === task.taskId"
                 aria-label="Pause download task"
                 title="Pause"
                 @click="runDownloadAction(task, 'pause')"
               >
-                <Pause :size="14" aria-hidden="true" />
+                <Pause :size="16" aria-hidden="true" />
               </button>
               <button
                 v-if="!['completed', 'cancelled'].includes(task.state)"
-                class="btn btn-square btn-ghost btn-xs"
+                class="btn btn-square btn-ghost btn-sm"
                 type="button"
                 :disabled="downloadActionId === task.taskId"
                 aria-label="Cancel download task"
                 title="Cancel"
                 @click="runDownloadAction(task, 'cancel')"
               >
-                <Ban :size="14" aria-hidden="true" />
+                <Ban :size="16" aria-hidden="true" />
               </button>
             </div>
           </div>
@@ -2395,34 +2407,34 @@ defineExpose({
               :key="item.itemId"
               class="grid min-w-0 grid-cols-[6rem_minmax(0,1fr)] items-center gap-x-2 gap-y-1 py-1.5 text-xs sm:flex"
             >
-              <span class="w-24 shrink-0 text-base-content/50">{{ downloadItemStateLabel(item.state) }}</span>
+              <span class="w-24 shrink-0 text-muted">{{ downloadItemStateLabel(item.state) }}</span>
               <span class="min-w-0 flex-1 truncate">{{ item.track.artist }} - {{ item.track.title }}</span>
               <div class="col-start-2 flex min-w-0 items-center justify-end gap-1 sm:contents">
-                <span v-if="itemProgressText(item)" class="shrink-0 tabular-nums text-base-content/45">
+                <span v-if="itemProgressText(item)" class="shrink-0 tabular-nums text-muted">
                   {{ itemProgressText(item) }}
                 </span>
                 <span v-if="item.message" class="hidden max-w-56 truncate text-error lg:block" :title="item.message">{{ item.message }}</span>
                 <button
                   v-if="item.state === 'failed' && task.state !== 'running'"
-                  class="btn btn-square btn-ghost btn-xs"
+                  class="btn btn-square btn-ghost btn-sm"
                   type="button"
                   :disabled="downloadActionId === item.itemId"
                   :aria-label="`Refresh candidates for ${item.track.title}`"
                   title="Refresh candidates"
                   @click="refreshAndRetryDownloadItem(task, item.itemId)"
                 >
-                  <Search :class="{ 'animate-pulse': downloadActionId === item.itemId }" :size="13" aria-hidden="true" />
+                  <Search :class="{ 'animate-pulse': downloadActionId === item.itemId }" :size="16" aria-hidden="true" />
                 </button>
                 <button
                   v-if="(item.state === 'failed' || item.state === 'cancelled') && task.state !== 'running'"
-                  class="btn btn-square btn-ghost btn-xs"
+                  class="btn btn-square btn-ghost btn-sm"
                   type="button"
                   :disabled="downloadActionId === item.itemId"
                   :aria-label="`Retry ${item.track.title}`"
                   title="Retry"
                   @click="retryDownloadItem(task, item.itemId)"
                 >
-                  <RefreshCw :class="{ 'animate-spin': downloadActionId === item.itemId }" :size="13" aria-hidden="true" />
+                  <RefreshCw :class="{ 'animate-spin': downloadActionId === item.itemId }" :size="16" aria-hidden="true" />
                 </button>
               </div>
             </li>
@@ -2442,17 +2454,17 @@ defineExpose({
         </div>
         <div class="min-w-0 flex-1">
           <h2 class="truncate text-base font-semibold">{{ visibleDetailTitle }}</h2>
-          <p class="truncate text-xs text-base-content/55">
+          <p class="truncate text-xs text-muted">
             {{ visibleDetailSubtitle }}
           </p>
         </div>
         <div v-if="detailTracks.length && isArtistTopTracksTab" class="flex shrink-0 gap-1">
           <button class="btn btn-sm" type="button" @click="playAllDetail">
-            <Play :size="15" aria-hidden="true" />
+            <Play :size="16" aria-hidden="true" />
             Play all
           </button>
           <button class="btn btn-square btn-sm" type="button" aria-label="Download all loaded tracks" title="Download all" @click="downloadAll">
-            <Download :size="15" aria-hidden="true" />
+            <Download :size="16" aria-hidden="true" />
           </button>
         </div>
       </div>
@@ -2461,7 +2473,7 @@ defineExpose({
         <button
           role="tab"
           class="tab"
-          :class="{ 'tab-active': artistDetailTab === 'topTracks' }"
+          :class="artistDetailTab === 'topTracks' ? 'tab-active text-base-content' : 'text-muted'"
           :aria-selected="artistDetailTab === 'topTracks'"
           data-online-artist-tab="top-tracks"
           type="button"
@@ -2472,7 +2484,7 @@ defineExpose({
         <button
           role="tab"
           class="tab"
-          :class="{ 'tab-active': artistDetailTab === 'albums' }"
+          :class="artistDetailTab === 'albums' ? 'tab-active text-base-content' : 'text-muted'"
           :aria-selected="artistDetailTab === 'albums'"
           data-online-artist-tab="albums"
           type="button"
@@ -2483,7 +2495,7 @@ defineExpose({
         <button
           role="tab"
           class="tab"
-          :class="{ 'tab-active': artistDetailTab === 'biography' }"
+          :class="artistDetailTab === 'biography' ? 'tab-active text-base-content' : 'text-muted'"
           :aria-selected="artistDetailTab === 'biography'"
           data-online-artist-tab="biography"
           type="button"
@@ -2530,16 +2542,16 @@ defineExpose({
         </div>
         <div
           v-else-if="artistAlbumsError && !artistAlbums.length"
-          class="flex min-h-24 items-center justify-between gap-3 text-sm text-base-content/60"
+          class="flex min-h-24 items-center justify-between gap-3 text-sm text-muted"
         >
           <span>{{ artistAlbumsError }}</span>
           <button class="btn btn-sm" type="button" @click="loadArtistAlbums()">
-            <RefreshCw :size="15" aria-hidden="true" />
+            <RefreshCw :size="16" aria-hidden="true" />
             Retry
           </button>
         </div>
         <div v-else>
-          <div v-if="!artistAlbums.length" class="flex min-h-20 items-center text-sm text-base-content/50">
+          <div v-if="!artistAlbums.length" class="flex min-h-20 items-center text-sm text-muted">
             No albums found
           </div>
           <ul v-else class="list divide-y divide-base-300">
@@ -2557,14 +2569,14 @@ defineExpose({
                 </div>
                 <div class="min-w-0">
                   <div class="truncate text-sm font-medium">{{ album.title }}</div>
-                  <div class="truncate text-xs text-base-content/55">
+                  <div class="truncate text-xs text-muted">
                     {{ [album.artist, album.releaseYear].filter(Boolean).join(' · ') }}
                   </div>
                 </div>
-                <span v-if="album.trackCount !== null" class="text-xs tabular-nums text-base-content/45">
+                <span v-if="album.trackCount !== null" class="text-xs tabular-nums text-muted">
                   {{ album.trackCount }}
                 </span>
-                <ChevronRight :size="16" class="text-base-content/45" aria-hidden="true" />
+                <ChevronRight :size="16" class="text-muted" aria-hidden="true" />
               </button>
             </li>
           </ul>
@@ -2572,7 +2584,7 @@ defineExpose({
             <AlertCircle :size="17" aria-hidden="true" />
             <span class="min-w-0 flex-1 text-sm">{{ artistAlbumsError }}</span>
             <button class="btn btn-sm" type="button" @click="loadArtistAlbums(true)">
-              <RefreshCw :size="15" aria-hidden="true" />
+              <RefreshCw :size="16" aria-hidden="true" />
               Retry
             </button>
           </div>
@@ -2592,29 +2604,29 @@ defineExpose({
         </div>
         <div
           v-else-if="artistBiographyError"
-          class="flex min-h-24 items-center justify-between gap-3 text-sm text-base-content/60"
+          class="flex min-h-24 items-center justify-between gap-3 text-sm text-muted"
         >
           <span>{{ artistBiographyError }}</span>
           <button class="btn btn-sm" type="button" @click="loadArtistBiography()">
-            <RefreshCw :size="15" aria-hidden="true" />
+            <RefreshCw :size="16" aria-hidden="true" />
             Retry
           </button>
         </div>
         <div
           v-else-if="!artistBiography?.summary && !artistBiography?.sections.length"
-          class="flex min-h-20 items-center text-sm text-base-content/50"
+          class="flex min-h-20 items-center text-sm text-muted"
         >
           No artist biography found
         </div>
         <div v-else class="space-y-5">
-          <p v-if="artistBiography?.summary" class="whitespace-pre-line text-sm leading-6 text-base-content/75">
+          <p v-if="artistBiography?.summary" class="whitespace-pre-line text-sm leading-6 text-muted">
             {{ artistBiography.summary }}
           </p>
           <section v-for="section in artistBiography?.sections" :key="`${section.title}:${section.text}`" class="space-y-1">
             <h3 class="text-sm font-semibold">{{ section.title }}</h3>
-            <p class="whitespace-pre-line text-sm leading-6 text-base-content/75">{{ section.text }}</p>
+            <p class="whitespace-pre-line text-sm leading-6 text-muted">{{ section.text }}</p>
           </section>
-          <p class="text-xs text-base-content/45">{{ artistBiography?.sourceName }}</p>
+          <p class="text-xs text-muted">{{ artistBiography?.sourceName }}</p>
         </div>
       </div>
     </div>
@@ -2670,7 +2682,7 @@ defineExpose({
             type="button"
             @click="playAllRecommendation"
           >
-            <Play :size="15" aria-hidden="true" />
+            <Play :size="16" aria-hidden="true" />
             Play all
           </button>
           <button
@@ -2681,7 +2693,7 @@ defineExpose({
             title="Download all"
             @click="downloadAllRecommendation"
           >
-            <Download :size="15" aria-hidden="true" />
+            <Download :size="16" aria-hidden="true" />
           </button>
         </div>
       </div>
@@ -2753,7 +2765,7 @@ defineExpose({
           Load next songs
         </button>
       </div>
-      <div v-else-if="!recommendationError" class="flex min-h-48 items-center justify-center text-sm text-base-content/55">
+      <div v-else-if="!recommendationError" class="flex min-h-48 items-center justify-center text-sm text-muted">
         No recommendations available
       </div>
     </div>
@@ -2799,8 +2811,8 @@ defineExpose({
                 :size="18"
                 class="mt-2 shrink-0"
                 :class="recommendationCoverUrl(entry.id)
-                  ? 'text-neutral-content/75'
-                  : 'text-base-content/45'"
+                  ? 'text-neutral-content'
+                  : 'text-muted'"
                 aria-hidden="true"
               />
             </div>
@@ -2830,7 +2842,7 @@ defineExpose({
         <div class="mb-3 flex min-w-0 flex-wrap items-center gap-2">
           <ListMusic :size="17" aria-hidden="true" />
           <h2 class="text-sm font-semibold">Playlists</h2>
-          <span v-if="playlistLibraryItems.length" class="text-xs tabular-nums text-base-content/50">
+          <span v-if="playlistLibraryItems.length" class="text-xs tabular-nums text-muted">
             {{ playlistLibraryItems.length }} loaded
           </span>
           <span
@@ -2840,7 +2852,7 @@ defineExpose({
             Partial
           </span>
           <button
-            class="btn btn-square btn-ghost btn-xs"
+            class="btn btn-square btn-ghost btn-sm"
             :class="{ 'ml-auto': !playlistLibraryFailures.length || !playlistLibraryItems.length }"
             type="button"
             :disabled="playlistLibraryLoading"
@@ -2850,7 +2862,7 @@ defineExpose({
           >
             <RefreshCw
               :class="{ 'animate-spin': playlistLibraryLoading }"
-              :size="14"
+              :size="16"
               aria-hidden="true"
             />
           </button>
@@ -2876,7 +2888,7 @@ defineExpose({
           <AlertCircle :size="17" aria-hidden="true" />
           <span class="min-w-0 flex-1 text-sm">{{ playlistLibraryError }}</span>
           <button class="btn btn-sm" type="button" @click="loadPlaylistLibrary(true)">
-            <RefreshCw :size="14" aria-hidden="true" />
+              <RefreshCw :size="16" aria-hidden="true" />
             Retry
           </button>
         </div>
@@ -2927,7 +2939,7 @@ defineExpose({
 
         <div
           v-else-if="!playlistLibraryItems.length"
-          class="flex min-h-24 items-center text-sm text-base-content/50"
+          class="flex min-h-24 items-center text-sm text-muted"
         >
           No playlists found
         </div>
@@ -2941,7 +2953,7 @@ defineExpose({
           >
             <div class="mb-2 flex items-center gap-2 border-b border-base-300 pb-2">
               <h3 class="text-sm font-medium">{{ provider.label }}</h3>
-              <span class="text-xs tabular-nums text-base-content/50">
+              <span class="text-xs tabular-nums text-muted">
                 {{ provider.items.length }}
                 {{ provider.items.length === 1 ? "playlist" : "playlists" }}
               </span>
@@ -2968,17 +2980,17 @@ defineExpose({
                   </div>
                   <div class="min-w-0 flex-1">
                     <h4 class="truncate text-sm font-medium">{{ playlist.name }}</h4>
-                    <p v-if="playlist.ownerName" class="mt-1 truncate text-xs text-base-content/55">
+                    <p v-if="playlist.ownerName" class="mt-1 truncate text-xs text-muted">
                       {{ playlist.ownerName }}
                     </p>
                     <p
                       v-if="playlist.trackCount !== null"
-                      class="mt-2 truncate text-xs tabular-nums text-base-content/45"
+                      class="mt-2 truncate text-xs tabular-nums text-muted"
                     >
                       {{ playlist.trackCount }} tracks
                     </p>
                   </div>
-                  <ChevronRight :size="17" class="shrink-0 text-base-content/40" aria-hidden="true" />
+                  <ChevronRight :size="17" class="shrink-0 text-muted" aria-hidden="true" />
                 </div>
               </button>
             </div>
@@ -2993,7 +3005,7 @@ defineExpose({
           <AlertCircle :size="17" aria-hidden="true" />
           <span class="min-w-0 flex-1">{{ playlistLibraryError }}</span>
           <button class="btn btn-sm" type="button" @click="loadPlaylistLibrary(true)">
-            <RefreshCw :size="14" aria-hidden="true" />
+            <RefreshCw :size="16" aria-hidden="true" />
             Retry
           </button>
         </div>
@@ -3033,7 +3045,7 @@ defineExpose({
         <div class="mb-2 flex items-center gap-2 border-b border-base-300 pb-2">
           <component :is="section.icon" :size="17" aria-hidden="true" />
           <h2 class="text-sm font-semibold">{{ section.label }}</h2>
-          <span v-if="sectionStates[section.id].result" class="text-xs tabular-nums text-base-content/50">
+          <span v-if="sectionStates[section.id].result" class="text-xs tabular-nums text-muted">
             {{ sectionStates[section.id].result?.data.items.length }} loaded
           </span>
           <span v-if="sectionStates[section.id].result?.failures.length" class="badge badge-warning badge-sm ml-auto">
@@ -3041,27 +3053,27 @@ defineExpose({
           </span>
           <button
             v-if="sectionStates[section.id].result?.failures.length"
-            class="btn btn-square btn-ghost btn-xs"
+            class="btn btn-square btn-ghost btn-sm"
             type="button"
             :aria-label="`Retry unavailable ${section.label} channels`"
             title="Retry unavailable channels"
             @click="retrySection(section.id)"
           >
-            <RefreshCw :size="13" aria-hidden="true" />
+            <RefreshCw :size="16" aria-hidden="true" />
           </button>
         </div>
 
         <div v-if="sectionStates[section.id].loading" class="space-y-2">
           <div v-for="index in 5" :key="index" class="skeleton h-11 w-full"></div>
         </div>
-        <div v-else-if="sectionStates[section.id].error" class="flex min-h-24 items-center justify-between gap-3 text-sm text-base-content/60">
+        <div v-else-if="sectionStates[section.id].error" class="flex min-h-24 items-center justify-between gap-3 text-sm text-muted">
           <span>{{ sectionStates[section.id].error }}</span>
           <button class="btn btn-sm" type="button" @click="retrySection(section.id)">
-            <RefreshCw :size="15" aria-hidden="true" />
+          <RefreshCw :size="16" aria-hidden="true" />
             Retry
           </button>
         </div>
-        <div v-else-if="!sectionStates[section.id].result?.data.items.length" class="flex min-h-20 items-center text-sm text-base-content/50">
+        <div v-else-if="!sectionStates[section.id].result?.data.items.length" class="flex min-h-20 items-center text-sm text-muted">
           No {{ section.label.toLowerCase() }} found
         </div>
 
@@ -3098,11 +3110,11 @@ defineExpose({
             </div>
             <div class="min-w-0">
               <div class="truncate text-sm font-medium">{{ item.name ?? item.title }}</div>
-              <div class="truncate text-xs text-base-content/55">
+              <div class="truncate text-xs text-muted">
                 {{ item.artist ?? item.ownerName ?? item.candidates?.map((candidate: any) => candidate.channelName).join(' / ') ?? item.channelName }}
               </div>
             </div>
-            <span class="text-xs tabular-nums text-base-content/45">{{ item.trackCount ?? '' }}</span>
+            <span class="text-xs tabular-nums text-muted">{{ item.trackCount ?? '' }}</span>
           </li>
         </ul>
 
@@ -3128,7 +3140,7 @@ defineExpose({
           <div class="flex items-start gap-3">
             <div class="min-w-0 flex-1">
               <h2 id="online-playlist-picker-title" class="text-base font-semibold">Add to Playlist</h2>
-              <p class="mt-1 truncate text-sm text-base-content/65">
+              <p class="mt-1 truncate text-sm text-muted">
                 {{ pendingPlaylistTracks.length === 1
                   ? `${pendingPlaylistTracks[0].title} · ${pendingPlaylistTracks[0].artist}`
                   : `${pendingPlaylistTracks.length} selected tracks` }}
@@ -3155,7 +3167,7 @@ defineExpose({
               >
                 <span class="min-w-0 flex-1 text-left">
                   <span class="block truncate text-sm">{{ target.playlist.name }}</span>
-                  <span class="block truncate text-xs opacity-60">
+              <span class="block truncate text-xs text-muted">
                     {{ target.playlist.ownerName || target.playlist.channelName }}
                   </span>
                 </span>
@@ -3178,8 +3190,8 @@ defineExpose({
               type="submit"
               :disabled="!selectedPlaylistTarget || trackActionId === playlistPickerActionId"
             >
-              <RefreshCw v-if="trackActionId === playlistPickerActionId" class="animate-spin" :size="15" aria-hidden="true" />
-              <ListPlus v-else :size="15" aria-hidden="true" />
+          <RefreshCw v-if="trackActionId === playlistPickerActionId" class="animate-spin" :size="16" aria-hidden="true" />
+          <ListPlus v-else :size="16" aria-hidden="true" />
               Add
             </button>
           </div>

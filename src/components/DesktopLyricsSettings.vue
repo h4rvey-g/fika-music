@@ -149,11 +149,11 @@ function colorPickerValue(color: string, fallback: string) {
       <div class="grid gap-4 px-4 py-4 sm:grid-cols-2">
         <label class="flex items-center justify-between gap-3">
           <span class="flex min-w-0 items-center gap-3 text-sm font-medium">
-            <Captions class="shrink-0 text-base-content/60" :size="17" aria-hidden="true" />
+            <Captions class="shrink-0 text-muted" :size="17" aria-hidden="true" />
             Desktop overlay
           </span>
           <input
-            class="toggle toggle-sm"
+            class="toggle toggle-md"
             type="checkbox"
             :checked="preferences.enabled"
             aria-label="Show desktop lyrics"
@@ -163,11 +163,11 @@ function colorPickerValue(color: string, fallback: string) {
 
         <label class="flex items-center justify-between gap-3">
           <span class="flex min-w-0 items-center gap-3 text-sm font-medium">
-            <PanelTop class="shrink-0 text-base-content/60" :size="17" aria-hidden="true" />
-            Menu bar lyrics <span class="text-xs font-normal text-base-content/55">macOS</span>
+            <PanelTop class="shrink-0 text-muted" :size="17" aria-hidden="true" />
+            Menu bar lyrics <span class="text-xs font-normal text-muted">macOS</span>
           </span>
           <input
-            class="toggle toggle-sm"
+            class="toggle toggle-md"
             type="checkbox"
             :checked="preferences.menuBarEnabled"
             aria-label="Show lyrics in macOS menu bar"
@@ -177,11 +177,11 @@ function colorPickerValue(color: string, fallback: string) {
 
         <label class="flex items-center justify-between gap-3">
           <span class="flex min-w-0 items-center gap-3 text-sm font-medium">
-            <MonitorUp class="shrink-0 text-base-content/60" :size="17" aria-hidden="true" />
+            <MonitorUp class="shrink-0 text-muted" :size="17" aria-hidden="true" />
             Always on top
           </span>
           <input
-            class="toggle toggle-sm"
+            class="toggle toggle-md"
             type="checkbox"
             :checked="preferences.alwaysOnTop"
             @change="update({ alwaysOnTop: checkboxValue($event) })"
@@ -190,11 +190,11 @@ function colorPickerValue(color: string, fallback: string) {
 
         <label class="flex items-center justify-between gap-3">
           <span class="flex min-w-0 items-center gap-3 text-sm font-medium">
-            <Lock class="shrink-0 text-base-content/60" :size="17" aria-hidden="true" />
+            <Lock class="shrink-0 text-muted" :size="17" aria-hidden="true" />
             Lock window
           </span>
           <input
-            class="toggle toggle-sm"
+            class="toggle toggle-md"
             type="checkbox"
             :checked="preferences.locked"
             @change="update({ locked: checkboxValue($event) })"
@@ -203,11 +203,11 @@ function colorPickerValue(color: string, fallback: string) {
 
         <label class="flex items-center justify-between gap-3">
           <span class="flex min-w-0 items-center gap-3 text-sm font-medium">
-            <Captions class="shrink-0 text-base-content/60" :size="17" aria-hidden="true" />
+            <Captions class="shrink-0 text-muted" :size="17" aria-hidden="true" />
             Next line
           </span>
           <input
-            class="toggle toggle-sm"
+            class="toggle toggle-md"
             type="checkbox"
             :checked="preferences.showNextLine"
             @change="update({ showNextLine: checkboxValue($event) })"
@@ -216,10 +216,10 @@ function colorPickerValue(color: string, fallback: string) {
 
         <div class="flex items-center justify-between gap-3">
           <span class="flex min-w-0 items-center gap-3 text-sm font-medium">
-            <MousePointer2Off class="shrink-0 text-base-content/60" :size="17" aria-hidden="true" />
+            <MousePointer2Off class="shrink-0 text-muted" :size="17" aria-hidden="true" />
             Pointer passthrough
           </span>
-          <span class="text-xs text-base-content/55">{{ preferences.locked ? "On" : "Off" }}</span>
+          <span class="text-xs text-muted">{{ preferences.locked ? "On" : "Off" }}</span>
         </div>
       </div>
 
@@ -277,7 +277,7 @@ function colorPickerValue(color: string, fallback: string) {
       <div class="grid gap-4 px-4 py-4 sm:grid-cols-2">
         <label class="flex items-center justify-between gap-3">
           <span class="flex items-center gap-3 text-sm font-medium">
-            <Type class="text-base-content/60" :size="17" aria-hidden="true" />
+            <Type class="text-muted" :size="17" aria-hidden="true" />
             Typeface
           </span>
           <select
@@ -311,10 +311,10 @@ function colorPickerValue(color: string, fallback: string) {
         <label class="min-w-0">
           <span class="mb-2 flex items-center justify-between gap-3 text-sm font-medium">
             Size
-            <output class="text-xs tabular-nums text-base-content/60">{{ preferences.fontSize }} px</output>
+            <output class="text-xs tabular-nums text-muted">{{ preferences.fontSize }} px</output>
           </span>
           <input
-            class="range range-sm w-full"
+            class="range range-sm min-h-6 w-full"
             type="range"
             min="18"
             max="72"
@@ -327,12 +327,12 @@ function colorPickerValue(color: string, fallback: string) {
         <label class="min-w-0">
           <span class="mb-2 flex items-center justify-between gap-3 text-sm font-medium">
             Background opacity
-            <output class="text-xs tabular-nums text-base-content/60">
+            <output class="text-xs tabular-nums text-muted">
               {{ Math.round(preferences.backgroundOpacity * 100) }}%
             </output>
           </span>
           <input
-            class="range range-sm w-full"
+            class="range range-sm min-h-6 w-full"
             type="range"
             min="0"
             max="1"

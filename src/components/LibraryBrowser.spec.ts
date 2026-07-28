@@ -407,7 +407,7 @@ describe("LibraryBrowser", () => {
     expect(firstAlbum.attributes("aria-selected")).toBe("true");
     expect(firstTrack.attributes("aria-selected")).toBe("true");
     expect(firstAlbum.findAll("span").some((span) =>
-      span.classes().includes("text-neutral-content/60"))).toBe(true);
+      span.classes().includes("text-neutral-content"))).toBe(true);
     expect(firstTrack.classes()).toContain("bg-neutral/15");
     expect(firstTrack.classes()).toContain("border-l-neutral");
     expect(firstTrack.classes()).not.toContain("text-neutral-content");

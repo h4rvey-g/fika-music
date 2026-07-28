@@ -201,41 +201,42 @@ function fontFamily(font: DesktopLyricsPreferences["font"]) {
   >
     <div
       v-if="!state.preferences.locked"
-      class="z-20 flex h-9 shrink-0 items-center bg-black/55 px-1.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
+      class="z-20 flex h-9 shrink-0 items-center bg-black/70 px-1.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
+      data-testid="desktop-lyrics-toolbar"
       @mousedown.stop="startDragging"
     >
-      <div class="min-w-0 flex-1 truncate px-1.5 text-xs text-white/75">
+      <div class="min-w-0 flex-1 truncate px-1.5 text-xs text-white">
         {{ state.title }}{{ state.subtitle ? ` · ${state.subtitle}` : "" }}
       </div>
-      <GripHorizontal class="mx-1 shrink-0 text-white/45" :size="17" aria-hidden="true" />
+      <GripHorizontal class="mx-1 shrink-0 text-white/70" :size="17" aria-hidden="true" />
       <div class="flex shrink-0 items-center gap-0.5">
         <div class="tooltip tooltip-bottom" data-tip="Smaller text">
           <button
-            class="btn btn-square btn-ghost btn-xs text-white hover:bg-white/15"
+            class="btn btn-square btn-ghost btn-sm text-white hover:bg-white/15"
             type="button"
             aria-label="Decrease desktop lyric size"
             title="Smaller text"
             @mousedown.stop
             @click.stop="adjustFontSize(-2)"
           >
-            <Minus :size="14" aria-hidden="true" />
+            <Minus :size="16" aria-hidden="true" />
           </button>
         </div>
         <div class="tooltip tooltip-bottom" data-tip="Larger text">
           <button
-            class="btn btn-square btn-ghost btn-xs text-white hover:bg-white/15"
+            class="btn btn-square btn-ghost btn-sm text-white hover:bg-white/15"
             type="button"
             aria-label="Increase desktop lyric size"
             title="Larger text"
             @mousedown.stop
             @click.stop="adjustFontSize(2)"
           >
-            <Plus :size="14" aria-hidden="true" />
+            <Plus :size="16" aria-hidden="true" />
           </button>
         </div>
         <div class="tooltip tooltip-bottom" data-tip="Always on top">
           <button
-            class="btn btn-square btn-ghost btn-xs text-white hover:bg-white/15"
+            class="btn btn-square btn-ghost btn-sm text-white hover:bg-white/15"
             :class="{ 'bg-white/15': state.preferences.alwaysOnTop }"
             type="button"
             aria-label="Toggle desktop lyrics always on top"
@@ -244,31 +245,31 @@ function fontFamily(font: DesktopLyricsPreferences["font"]) {
             @mousedown.stop
             @click.stop="updatePreferences({ alwaysOnTop: !state.preferences.alwaysOnTop })"
           >
-            <MonitorUp :size="14" aria-hidden="true" />
+            <MonitorUp :size="16" aria-hidden="true" />
           </button>
         </div>
         <div class="tooltip tooltip-bottom" data-tip="Lock window">
           <button
-            class="btn btn-square btn-ghost btn-xs text-white hover:bg-white/15"
+            class="btn btn-square btn-ghost btn-sm text-white hover:bg-white/15"
             type="button"
             aria-label="Lock desktop lyrics"
             title="Lock window"
             @mousedown.stop
             @click.stop="updatePreferences({ locked: true })"
           >
-            <Lock :size="14" aria-hidden="true" />
+            <Lock :size="16" aria-hidden="true" />
           </button>
         </div>
         <div class="tooltip tooltip-bottom" data-tip="Hide">
           <button
-            class="btn btn-square btn-ghost btn-xs text-white hover:bg-white/15"
+            class="btn btn-square btn-ghost btn-sm text-white hover:bg-white/15"
             type="button"
             aria-label="Hide desktop lyrics"
             title="Hide"
             @mousedown.stop
             @click.stop="requestHide"
           >
-            <X :size="14" aria-hidden="true" />
+            <X :size="16" aria-hidden="true" />
           </button>
         </div>
       </div>

@@ -1588,7 +1588,7 @@ function trackSubtitle(track: LocalTrack) {
             <h1 class="truncate text-base font-semibold leading-tight sm:text-lg">
               {{ currentSection.label }}
             </h1>
-            <p class="hidden truncate text-xs text-base-content/60 xl:block">
+            <p class="hidden truncate text-xs text-muted xl:block">
               {{ currentSection.description }}
             </p>
           </div>
@@ -1700,12 +1700,12 @@ function trackSubtitle(track: LocalTrack) {
             <AlertCircle :size="17" aria-hidden="true" />
             <span class="min-w-0 flex-1 text-sm">{{ appError }}</span>
             <button
-              class="btn btn-square btn-ghost btn-xs"
+              class="btn btn-square btn-ghost btn-sm"
               type="button"
               aria-label="Dismiss playback error"
               @click="appError = null"
             >
-              <X :size="14" aria-hidden="true" />
+              <X :size="16" aria-hidden="true" />
             </button>
           </div>
           <div
@@ -1820,10 +1820,10 @@ function trackSubtitle(track: LocalTrack) {
               <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <label for="theme-preference" class="min-w-0">
                   <span class="block text-sm font-medium">Theme</span>
-                  <span class="block text-xs text-base-content/60">Follow the device, current cover, or a fixed theme</span>
+                  <span class="block text-xs text-muted">Follow the device, current cover, or a fixed theme</span>
                   <span
                     v-if="themePreference === 'dynamic'"
-                    class="mt-1 flex items-center gap-1.5 text-xs text-base-content/60"
+                    class="mt-1 flex items-center gap-1.5 text-xs text-muted"
                     role="status"
                   >
                     <span
@@ -1868,10 +1868,10 @@ function trackSubtitle(track: LocalTrack) {
 
               <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <label for="layout-density" class="flex min-w-0 items-start gap-3">
-                  <Gauge class="mt-0.5 shrink-0 text-base-content/60" :size="17" aria-hidden="true" />
+                  <Gauge class="mt-0.5 shrink-0 text-muted" :size="17" aria-hidden="true" />
                   <span>
                     <span class="block text-sm font-medium">Layout density</span>
-                    <span class="block text-xs text-base-content/60">Adjust page spacing and library rows</span>
+                    <span class="block text-xs text-muted">Adjust page spacing and library rows</span>
                   </span>
                 </label>
                 <select
@@ -1912,7 +1912,7 @@ function trackSubtitle(track: LocalTrack) {
               <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <label for="stream-quality" class="min-w-0">
                   <span class="block text-sm font-medium">Default stream quality</span>
-                  <span class="block text-xs text-base-content/60">Used when resolving tracks from Audio Sources</span>
+                  <span class="block text-xs text-muted">Used when resolving tracks from Audio Sources</span>
                 </label>
                 <select
                   id="stream-quality"
@@ -1929,21 +1929,21 @@ function trackSubtitle(track: LocalTrack) {
               <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <label for="default-volume" class="min-w-0">
                   <span class="block text-sm font-medium">Volume</span>
-                  <span class="block text-xs text-base-content/60">Applied to the current and next track</span>
+                  <span class="block text-xs text-muted">Applied to the current and next track</span>
                 </label>
                 <div class="flex w-full items-center gap-3 sm:w-64">
                   <Volume2 :size="17" aria-hidden="true" />
                   <input
                     id="default-volume"
                     v-model.number="volume"
-                    class="range range-sm min-w-0 flex-1"
+                    class="range range-sm min-h-6 min-w-0 flex-1"
                     type="range"
                     min="0"
                     max="1"
                     step="0.01"
                     @input="updateVolume"
                   />
-                  <output class="w-10 text-right text-xs tabular-nums text-base-content/65">
+                  <output class="w-10 text-right text-xs tabular-nums text-muted">
                     {{ volumePercent }}%
                   </output>
                 </div>
@@ -1959,7 +1959,7 @@ function trackSubtitle(track: LocalTrack) {
             <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
               <div class="min-w-0">
                 <div class="text-sm font-medium">Music folder</div>
-                <div class="truncate text-xs text-base-content/60" :title="selectedFolder || undefined">
+                <div class="truncate text-xs text-muted" :title="selectedFolder || undefined">
                   {{ selectedFolder || "No folder selected" }}
                 </div>
               </div>
@@ -1997,7 +1997,7 @@ function trackSubtitle(track: LocalTrack) {
             </div>
             <div class="min-w-0 flex-1">
               <div class="truncate text-sm font-medium">{{ nowPlayingTitle }}</div>
-              <div class="truncate text-xs text-base-content/60">{{ nowPlayingSubtitle }}</div>
+              <div class="truncate text-xs text-muted">{{ nowPlayingSubtitle }}</div>
               <div v-if="sourceChangeMessage" class="truncate text-xs text-warning">{{ sourceChangeMessage }}</div>
             </div>
           </div>
@@ -2065,11 +2065,11 @@ function trackSubtitle(track: LocalTrack) {
             </div>
 
             <div class="flex min-w-0 items-center gap-2">
-              <span class="hidden w-9 text-right text-xs tabular-nums text-base-content/60 sm:block">
+              <span class="hidden w-9 text-right text-xs tabular-nums text-muted sm:block">
                 {{ formatPlaybackTime(playbackPosition) }}
               </span>
               <input
-                class="range range-xs min-w-0 flex-1"
+                class="range range-sm min-h-6 min-w-0 flex-1"
                 type="range"
                 min="0"
                 :max="Math.max(playbackDuration, 1)"
@@ -2080,7 +2080,7 @@ function trackSubtitle(track: LocalTrack) {
                 :aria-valuetext="`${formatPlaybackTime(playbackPosition)} of ${formatPlaybackTime(playbackDuration)}`"
                 @input="seekPlayback"
               />
-              <span class="hidden w-9 text-xs tabular-nums text-base-content/60 sm:block">
+              <span class="hidden w-9 text-xs tabular-nums text-muted sm:block">
                 {{ formatPlaybackTime(playbackDuration) }}
               </span>
             </div>
@@ -2144,10 +2144,10 @@ function trackSubtitle(track: LocalTrack) {
                 data-testid="volume-popover"
               >
                 <div class="flex h-36 w-12 flex-col items-center gap-2 rounded border border-base-300 bg-base-100 px-2 py-3 shadow-lg">
-                  <output class="text-xs tabular-nums text-base-content/65">{{ volumePercent }}</output>
+                  <output class="text-xs tabular-nums text-muted">{{ volumePercent }}</output>
                   <input
                     v-model.number="volume"
-                    class="range range-xs range-vertical min-h-0 flex-1"
+                    class="range range-sm range-vertical min-h-0 min-w-6 flex-1"
                     type="range"
                     min="0"
                     max="1"
@@ -2301,7 +2301,7 @@ function trackSubtitle(track: LocalTrack) {
           <img class="size-9 shrink-0" :src="fikaLogoUrl" alt="" />
           <div class="min-w-0">
             <div class="truncate text-base font-semibold leading-tight">Fika Music</div>
-            <div class="truncate text-xs text-base-content/60">Local-first library</div>
+            <div class="truncate text-xs text-muted">Local-first library</div>
           </div>
         </div>
 
@@ -2363,12 +2363,12 @@ function trackSubtitle(track: LocalTrack) {
         </nav>
 
         <div class="border-t border-base-300 px-4 py-3">
-          <div class="truncate text-xs text-base-content/60" :title="selectedFolder || undefined">
+          <div class="truncate text-xs text-muted" :title="selectedFolder || undefined">
             {{ selectedFolder || "No music folder" }}
           </div>
           <div class="mt-1 text-sm font-medium tabular-nums">
             {{ libraryTrackCount.toLocaleString() }} track{{ libraryTrackCount === 1 ? "" : "s" }} indexed
-            <span v-if="filteredLibraryTrackCount !== libraryTrackCount" class="text-base-content/55">
+            <span v-if="filteredLibraryTrackCount !== libraryTrackCount" class="text-muted">
               · {{ filteredLibraryTrackCount.toLocaleString() }} shown
             </span>
           </div>

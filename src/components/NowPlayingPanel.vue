@@ -297,7 +297,7 @@ watch(activeLyricIndex, async (index) => {
 
     <div class="shrink-0 border-b border-base-300 px-4 py-3">
       <div class="truncate text-sm font-semibold" :title="title">{{ title }}</div>
-      <div class="mt-0.5 truncate text-xs text-base-content/60" :title="subtitle">
+      <div class="mt-0.5 truncate text-xs text-muted" :title="subtitle">
         {{ subtitle }}
       </div>
     </div>
@@ -315,7 +315,7 @@ watch(activeLyricIndex, async (index) => {
         </span>
         <div v-if="canRetry" class="tooltip tooltip-left" data-tip="Retry lyrics">
           <button
-            class="btn btn-square btn-ghost btn-xs"
+            class="btn btn-square btn-ghost btn-sm"
             type="button"
             :disabled="lyricsLoading"
             aria-label="Retry lyrics"
@@ -324,7 +324,7 @@ watch(activeLyricIndex, async (index) => {
           >
             <RefreshCw
               :class="{ 'animate-spin': lyricsLoading }"
-              :size="14"
+              :size="16"
               aria-hidden="true"
             />
           </button>
@@ -350,7 +350,7 @@ watch(activeLyricIndex, async (index) => {
         >
           <div
             v-if="lyricsLoading"
-            class="flex h-full min-h-48 items-center justify-center gap-2 text-sm text-base-content/55"
+            class="flex h-full min-h-48 items-center justify-center gap-2 text-sm text-muted"
             role="status"
           >
             <RefreshCw class="animate-spin" :size="16" aria-hidden="true" />
@@ -367,7 +367,7 @@ watch(activeLyricIndex, async (index) => {
 
           <div
             v-else-if="!lyrics?.lines.length"
-            class="grid h-full min-h-48 place-items-center py-8 text-sm text-base-content/45"
+            class="grid h-full min-h-48 place-items-center py-8 text-sm text-muted"
           >
             No lyrics available
           </div>
@@ -399,7 +399,7 @@ watch(activeLyricIndex, async (index) => {
           <span class="h-px min-w-0 flex-1 bg-base-content/20" aria-hidden="true" />
           <output
             v-if="draggedLyricTimeLabel"
-            class="bg-base-100 px-1 text-xs tabular-nums text-base-content/60"
+            class="bg-base-100 px-1 text-xs tabular-nums text-muted"
             data-testid="lyric-seek-time"
           >
             {{ draggedLyricTimeLabel }}
@@ -434,7 +434,7 @@ watch(activeLyricIndex, async (index) => {
             type="button"
             @click="openLyricsAppearanceSettings"
           >
-            <Settings :size="15" aria-hidden="true" />
+              <Settings :size="16" aria-hidden="true" />
             Lyrics appearance
           </button>
         </li>

@@ -6,6 +6,11 @@
     night, coffee, winter, dim, nord, sunset, caramellatte, abyss, silk;
 }
 
+/* Secondary copy stays above 4.5:1 across every configured daisyUI theme. */
+@utility text-muted {
+  color: color-mix(in oklab, var(--color-base-content) 85%, transparent);
+}
+
 html,
 body,
 #app {

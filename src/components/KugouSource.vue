@@ -203,7 +203,7 @@ async function refreshAccountStatuses() {
               {{ isPluginReady ? "Ready" : "Plugin disabled" }}
             </span>
           </div>
-          <p v-if="activeAccount" class="mt-0.5 truncate text-xs text-base-content/60">
+          <p v-if="activeAccount" class="mt-0.5 truncate text-xs text-muted">
             {{ activeAccount.displayName }} · {{ activeAccount.status }}
           </p>
         </div>
@@ -282,7 +282,7 @@ async function refreshAccountStatuses() {
         <Power class="mt-0.5 shrink-0 text-warning" :size="18" aria-hidden="true" />
         <div>
           <div class="text-sm font-medium">Plugin is disabled</div>
-          <div class="mt-1 text-xs text-base-content/60">Enable the bundled Plugin to use KuGou.</div>
+          <div class="mt-1 text-xs text-muted">Enable the bundled Plugin to use KuGou.</div>
         </div>
       </div>
       <button class="btn btn-sm" type="button" @click="emit('openPlugins')">Open Plugins</button>
@@ -300,7 +300,7 @@ async function refreshAccountStatuses() {
           <Clock3 v-else :size="16" aria-hidden="true" />
           {{ qrStatus }}
         </div>
-        <p class="mt-2 text-sm text-base-content/65">Scan with the KuGou Music mobile app.</p>
+        <p class="mt-2 text-sm text-muted">Scan with the KuGou Music mobile app.</p>
         <button class="btn btn-ghost btn-sm mt-4" type="button" @click="cancelQrLogin">
           <X :size="16" aria-hidden="true" />
           Cancel
@@ -310,7 +310,7 @@ async function refreshAccountStatuses() {
 
     <div v-else-if="!activeAccountRef" class="grid min-h-52 place-items-center p-8 text-center">
       <div>
-        <UserRound class="mx-auto text-base-content/45" :size="30" aria-hidden="true" />
+        <UserRound class="mx-auto text-base-content/35" :size="30" aria-hidden="true" />
         <div class="mt-3 text-sm font-medium">No KuGou account connected</div>
       </div>
     </div>
