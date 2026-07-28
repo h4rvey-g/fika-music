@@ -5,7 +5,11 @@ import App from "./App.vue";
 import type { PluginRecord } from "./lib/plugin-api";
 import type { AudioSourceRecord } from "./lib/audio-source-api";
 import type { OnlineTrack } from "./lib/online-music-api";
-import { THEME_GROUPS, THEME_OPTIONS, UI_PREFERENCES_STORAGE_KEY } from "./lib/ui-preferences";
+import {
+  THEME_GROUPS,
+  THEME_MODE_OPTIONS,
+  UI_PREFERENCES_STORAGE_KEY,
+} from "./lib/ui-preferences";
 import { DESKTOP_LYRICS_STORAGE_KEY } from "./lib/desktop-lyrics";
 import {
   createAudioSourceRecord,
@@ -24,6 +28,18 @@ const tauriMocks = vi.hoisted(() => ({
   emitTo: vi.fn(),
   getByLabel: vi.fn(),
 }));
+
+const dynamicThemeMocks = vi.hoisted(() => ({
+  extractCoverTheme: vi.fn(),
+}));
+
+vi.mock("./lib/dynamic-theme", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./lib/dynamic-theme")>();
+  return {
+    ...actual,
+    extractCoverTheme: dynamicThemeMocks.extractCoverTheme,
+  };
+});
 
 let listedPlugins: PluginRecord[] = [];
 let listedAudioSources: AudioSourceRecord[] = [];
@@ -122,6 +138,8 @@ describe("application shell", () => {
     onlineMusicSettings = createOnlineMusicSettings();
     localStorage.clear();
     document.documentElement.removeAttribute("data-theme");
+    document.documentElement.removeAttribute("style");
+    dynamicThemeMocks.extractCoverTheme.mockResolvedValue(null);
     vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
     vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
     tauriMocks.listen.mockResolvedValue(vi.fn());
@@ -153,6 +171,7 @@ describe("application shell", () => {
 
   afterEach(() => {
     document.documentElement.removeAttribute("data-theme");
+    document.documentElement.removeAttribute("style");
     config.global.plugins = [];
     vi.restoreAllMocks();
   });
@@ -864,7 +883,7 @@ describe("application shell", () => {
     );
     expect(themeSelect.findAll("option").map((option) => option.text())).toEqual(
       [
-        THEME_OPTIONS.find((theme) => theme.value === "system")?.label,
+        ...THEME_MODE_OPTIONS.map((theme) => theme.label),
         ...THEME_GROUPS.flatMap((group) => group.options.map((theme) => theme.label)),
       ],
     );
@@ -876,6 +895,80 @@ describe("application shell", () => {
       "dracula",
     );
     wrapper.unmount();
+  });
+
+  it("applies cover-derived DaisyUI colors in dynamic theme mode", async () => {
+    const coverTheme = {
+      base100: "rgb(244 248 253)",
+      base200: "rgb(226 236 247)",
+      base300: "rgb(198 217 237)",
+      baseContent: "rgb(25 34 45)",
+      primary: "rgb(22 88 166)",
+      primaryContent: "rgb(255 255 255)",
+      secondary: "rgb(74 61 174)",
+      secondaryContent: "rgb(255 255 255)",
+      accent: "rgb(18 151 140)",
+      accentContent: "rgb(0 0 0)",
+      neutral: "rgb(42 60 79)",
+      neutralContent: "rgb(255 255 255)",
+    };
+    dynamicThemeMocks.extractCoverTheme.mockResolvedValue(coverTheme);
+    localStorage.setItem(UI_PREFERENCES_STORAGE_KEY, JSON.stringify({ theme: "dynamic" }));
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "get_scan_status") return Promise.resolve(createScanStatus());
+      if (command === "list_plugins") return Promise.resolve([]);
+      if (command === "list_audio_sources") return Promise.resolve([]);
+      if (command === "get_online_music_settings") {
+        return Promise.resolve(onlineMusicSettings);
+      }
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "list_online_music_channels") return Promise.resolve([]);
+      if (command === "local_track_media_source") {
+        return Promise.resolve({ filePath: "/music/second.mp3" });
+      }
+      if (command === "local_track_playback_details") {
+        return Promise.resolve({
+          coverDataUrl: "data:image/png;base64,cover",
+          lyrics: null,
+          lyricsError: null,
+        });
+      }
+      return Promise.resolve(null);
+    });
+
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get('button[aria-label="Play Second"]').trigger("click");
+    await flushPromises();
+
+    expect(dynamicThemeMocks.extractCoverTheme).toHaveBeenCalledWith(
+      "data:image/png;base64,cover",
+    );
+    expect(document.documentElement.dataset.theme).toBeUndefined();
+    expect(document.documentElement.style.getPropertyValue("--color-base-100"))
+      .toBe(coverTheme.base100);
+    expect(document.documentElement.style.getPropertyValue("--color-primary"))
+      .toBe(coverTheme.primary);
+    expect(document.documentElement.style.getPropertyValue("--color-accent"))
+      .toBe(coverTheme.accent);
+
+    const settingsButton = wrapper
+      .get('nav[aria-label="Primary navigation"]')
+      .findAll("button")
+      .find((button) => button.text() === "Settings");
+    await settingsButton?.trigger("click");
+    expect(wrapper.get('[role="status"]').text()).toBe("Cover colors active");
+
+    dynamicThemeMocks.extractCoverTheme.mockResolvedValue(null);
+    const themeSelect = wrapper.get<HTMLSelectElement>("#theme-preference");
+    await themeSelect.setValue("system");
+    await themeSelect.setValue("dynamic");
+    await flushPromises();
+    expect(wrapper.get('[role="status"]').text()).toBe("Cover colors unavailable");
+    expect(document.documentElement.style.getPropertyValue("--color-base-100")).toBe("");
+
+    wrapper.unmount();
+    expect(document.documentElement.style.getPropertyValue("--color-primary")).toBe("");
   });
 
   it("cycles the playback mode from sequential to shuffle to repeat", async () => {

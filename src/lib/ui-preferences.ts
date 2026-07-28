@@ -4,6 +4,7 @@ export type ThemeCategory = "bright" | "dark";
 
 export const THEME_OPTIONS = [
   { value: "system", label: "System", category: null },
+  { value: "dynamic", label: "Dynamic (cover art)", category: null },
   { value: "light", label: "Light", category: "bright" },
   { value: "dark", label: "Dark", category: "dark" },
   { value: "cupcake", label: "Cupcake", category: "bright" },
@@ -42,6 +43,8 @@ export const THEME_OPTIONS = [
 ] as const;
 
 export type ThemePreference = (typeof THEME_OPTIONS)[number]["value"];
+
+export const THEME_MODE_OPTIONS = THEME_OPTIONS.filter((option) => option.category === null);
 
 export const THEME_GROUPS: ReadonlyArray<{
   value: ThemeCategory;

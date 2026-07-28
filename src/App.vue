@@ -83,12 +83,18 @@ import type {
 import {
   DEFAULT_UI_PREFERENCES,
   THEME_GROUPS,
+  THEME_MODE_OPTIONS,
   loadUiPreferences,
   saveUiPreferences,
   type PlaybackMode,
   type StreamQuality,
   type ThemePreference,
 } from "./lib/ui-preferences";
+import {
+  applyCoverTheme,
+  clearCoverTheme,
+  extractCoverTheme,
+} from "./lib/dynamic-theme";
 import {
   DEFAULT_DESKTOP_LYRICS_PREFERENCES,
   DESKTOP_LYRICS_HIDE_EVENT,
@@ -215,6 +221,7 @@ const desktopLyricsPreferences = ref(savedDesktopLyricsPreferences);
 const themePreference = ref(savedUiPreferences.theme);
 const layoutDensity = ref(savedUiPreferences.density);
 const nowPlayingCoverUrl = ref<string | null>(null);
+const dynamicThemeStatus = ref<"idle" | "waiting" | "loading" | "active" | "unavailable">("idle");
 const activeLyrics = ref<ResolvedLyrics | null>(null);
 const activeRemoteLyricsQuery = ref<TrackLyricsQuery | null>(null);
 const isLoadingLyrics = ref(false);
@@ -250,6 +257,7 @@ let pendingRemoteQueueLoad: Promise<OnlineTrack[]> | null = null;
 let remoteQueueGeneration = 0;
 let audioSourceSelectionModeGeneration = 0;
 let sourceChangeMessageTimer: ReturnType<typeof setTimeout> | null = null;
+let dynamicThemeGeneration = 0;
 const desktopLyricsUnlisteners: UnlistenFn[] = [];
 const failedOnlineAttempts = new ExpiringCache<string, true>(5 * 60_000, 256);
 const failedOnlineUrls = new ExpiringCache<string, true>(5 * 60_000, 256);
@@ -394,7 +402,11 @@ const desktopLyricsState = computed<DesktopLyricsState>(() => ({
   preferences: { ...desktopLyricsPreferences.value },
 }));
 
-watch(themePreference, applyTheme, { immediate: true });
+watch(
+  [themePreference, nowPlayingCoverUrl],
+  ([theme, coverUrl]) => void applyTheme(theme, coverUrl),
+  { immediate: true },
+);
 watch(volume, updateVolume);
 watch(audioUrl, () => {
   playbackPosition.value = 0;
@@ -474,6 +486,8 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  dynamicThemeGeneration += 1;
+  clearCoverTheme(document.documentElement);
   document.removeEventListener("click", handlePlaybackOptionsOutsideClick);
   libraryScan.dispose();
   if (sourceChangeMessageTimer) clearTimeout(sourceChangeMessageTimer);
@@ -552,17 +566,42 @@ function updateAudioSourceRecords(records: AudioSourceRecord[]) {
   }
 }
 
-function applyTheme(theme: ThemePreference) {
+async function applyTheme(theme: ThemePreference, coverUrl: string | null) {
   if (typeof document === "undefined") {
     return;
   }
 
-  if (theme === "system") {
+  const generation = ++dynamicThemeGeneration;
+  const root = document.documentElement;
+  clearCoverTheme(root);
+  dynamicThemeStatus.value = theme === "dynamic"
+    ? coverUrl ? "loading" : "waiting"
+    : "idle";
+
+  if (theme === "system" || theme === "dynamic") {
     document.documentElement.removeAttribute("data-theme");
+  } else {
+    document.documentElement.dataset.theme = theme;
+  }
+
+  if (theme !== "dynamic" || !coverUrl) {
     return;
   }
 
-  document.documentElement.dataset.theme = theme;
+  const coverTheme = await extractCoverTheme(coverUrl);
+  if (
+    generation !== dynamicThemeGeneration
+    || themePreference.value !== "dynamic"
+    || nowPlayingCoverUrl.value !== coverUrl
+  ) {
+    return;
+  }
+  if (coverTheme) {
+    applyCoverTheme(root, coverTheme);
+    dynamicThemeStatus.value = "active";
+  } else {
+    dynamicThemeStatus.value = "unavailable";
+  }
 }
 
 function resetUiPreferences() {
@@ -1735,14 +1774,40 @@ function trackSubtitle(track: LocalTrack) {
               <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <label for="theme-preference" class="min-w-0">
                   <span class="block text-sm font-medium">Theme</span>
-                  <span class="block text-xs text-base-content/60">Use the device theme or choose an override</span>
+                  <span class="block text-xs text-base-content/60">Follow the device, current cover, or a fixed theme</span>
+                  <span
+                    v-if="themePreference === 'dynamic'"
+                    class="mt-1 flex items-center gap-1.5 text-xs text-base-content/60"
+                    role="status"
+                  >
+                    <span
+                      class="status status-xs"
+                      :class="{
+                        'status-primary': dynamicThemeStatus === 'active',
+                        'status-info': dynamicThemeStatus === 'loading',
+                        'status-warning': dynamicThemeStatus === 'unavailable',
+                        'status-neutral': dynamicThemeStatus === 'waiting',
+                      }"
+                      aria-hidden="true"
+                    ></span>
+                    <span v-if="dynamicThemeStatus === 'active'">Cover colors active</span>
+                    <span v-else-if="dynamicThemeStatus === 'loading'">Reading cover colors</span>
+                    <span v-else-if="dynamicThemeStatus === 'unavailable'">Cover colors unavailable</span>
+                    <span v-else>Waiting for cover art</span>
+                  </span>
                 </label>
                 <select
                   id="theme-preference"
                   v-model="themePreference"
-                  class="select select-sm w-full sm:w-44"
+                  class="select select-sm w-full sm:w-48"
                 >
-                  <option value="system">System</option>
+                  <option
+                    v-for="theme in THEME_MODE_OPTIONS"
+                    :key="theme.value"
+                    :value="theme.value"
+                  >
+                    {{ theme.label }}
+                  </option>
                   <optgroup
                     v-for="group in THEME_GROUPS"
                     :key="group.value"

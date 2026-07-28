@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_UI_PREFERENCES,
   THEME_GROUPS,
+  THEME_MODE_OPTIONS,
   THEME_OPTIONS,
   UI_PREFERENCES_STORAGE_KEY,
   loadUiPreferences,
@@ -51,6 +52,10 @@ describe("UI preferences", () => {
     expect(THEME_GROUPS.map((group) => group.value)).toEqual(["bright", "dark"]);
     expect(new Set(groupedThemes)).toEqual(new Set(overrideThemes));
     expect(groupedThemes).toHaveLength(overrideThemes.length);
+  });
+
+  it("keeps system and cover-driven themes outside the fixed theme groups", () => {
+    expect(THEME_MODE_OPTIONS.map((theme) => theme.value)).toEqual(["system", "dynamic"]);
   });
 
   it("migrates the legacy audio source preference to a standalone source id", () => {
