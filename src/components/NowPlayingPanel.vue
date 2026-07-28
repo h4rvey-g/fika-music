@@ -1,9 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { Disc3, FileText, RefreshCw } from "@lucide/vue";
+import { Disc3, FileText, RefreshCw, Settings } from "@lucide/vue";
 import type { ResolvedLyrics } from "../generated/bindings";
+import {
+  DEFAULT_NOW_PLAYING_LYRICS_PREFERENCES,
+  nowPlayingLyricsColor,
+  nowPlayingLyricsFontFamily,
+  type NowPlayingLyricsPreferences,
+} from "../lib/now-playing-lyrics";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   title: string;
   subtitle: string;
   coverUrl: string | null;
@@ -13,16 +19,23 @@ const props = defineProps<{
   playbackPosition: number;
   canRetry: boolean;
   fillHeight?: boolean;
-}>();
+  lyricsPreferences?: NowPlayingLyricsPreferences;
+}>(), {
+  fillHeight: false,
+  lyricsPreferences: () => ({ ...DEFAULT_NOW_PLAYING_LYRICS_PREFERENCES }),
+});
 
 const emit = defineEmits<{
   retryLyrics: [];
   seekPlayback: [position: number];
+  openLyricsSettings: [];
 }>();
 
 const lyricsViewport = ref<HTMLElement | null>(null);
 const isDraggingLyrics = ref(false);
 const draggedLyricIndex = ref(-1);
+const lyricsContextMenu = ref<{ x: number; y: number } | null>(null);
+const lyricsContextMenuAction = ref<HTMLButtonElement | null>(null);
 
 interface LyricDragState {
   pointerId: number;
@@ -69,6 +82,11 @@ const draggedLyricTimeLabel = computed(() => {
   const seconds = totalSeconds % 60;
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 });
+
+const lyricsTextStyle = computed(() => ({
+  fontFamily: nowPlayingLyricsFontFamily(props.lyricsPreferences.font),
+  textAlign: props.lyricsPreferences.alignment,
+}));
 
 const lyricsSourceLabel = computed(() => {
   switch (props.lyrics?.source) {
@@ -130,6 +148,41 @@ function resetLyricDrag() {
   }
 }
 
+function lyricLineStyle(index: number) {
+  const active = index === displayedLyricIndex.value;
+  const preferences = props.lyricsPreferences;
+  return {
+    color: nowPlayingLyricsColor(
+      active ? preferences.activeColor : preferences.inactiveColor,
+    ),
+    fontSize: `${preferences.fontSize}px`,
+    fontWeight: active ? preferences.activeFontWeight : 400,
+    lineHeight: `${Math.max(24, Math.round(preferences.fontSize * 1.4))}px`,
+    opacity: active ? 1 : preferences.inactiveOpacity,
+    paddingBlock: `${preferences.lineGap / 2}px`,
+  };
+}
+
+function closeLyricsContextMenu() {
+  lyricsContextMenu.value = null;
+}
+
+function openLyricsContextMenu(event: MouseEvent) {
+  resetLyricDrag();
+  const width = 224;
+  const height = 48;
+  lyricsContextMenu.value = {
+    x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
+    y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
+  };
+  void nextTick(() => lyricsContextMenuAction.value?.focus());
+}
+
+function openLyricsAppearanceSettings() {
+  closeLyricsContextMenu();
+  emit("openLyricsSettings");
+}
+
 function startLyricDrag(event: PointerEvent) {
   if (!canDragLyrics.value || event.isPrimary === false || event.button !== 0) {
     return;
@@ -187,6 +240,7 @@ function finishLyricDrag(event: PointerEvent) {
 watch(
   () => props.lyrics,
   async () => {
+    closeLyricsContextMenu();
     resetLyricDrag();
     await nextTick();
     if (lyricsViewport.value) {
@@ -288,6 +342,7 @@ watch(activeLyricIndex, async (index) => {
           data-testid="lyrics-viewport"
           :data-seeking="isDraggingLyrics || undefined"
           aria-live="polite"
+          @contextmenu.prevent.stop="openLyricsContextMenu"
           @pointerdown="startLyricDrag"
           @pointermove="moveLyricDrag"
           @pointerup="finishLyricDrag"
@@ -317,16 +372,17 @@ watch(activeLyricIndex, async (index) => {
             No lyrics available
           </div>
 
-          <div v-else class="min-h-full py-20" data-testid="lyric-lines">
+          <div
+            v-else
+            class="min-h-full py-20"
+            :style="lyricsTextStyle"
+            data-testid="lyric-lines"
+          >
             <p
               v-for="(line, index) in lyrics.lines"
               :key="`${line.startMs ?? 'plain'}-${index}`"
-              class="whitespace-pre-line py-2 text-sm leading-6 transition-colors duration-200"
-              :class="
-                index === displayedLyricIndex
-                  ? 'font-semibold text-base-content'
-                  : 'text-base-content/45'
-              "
+              class="break-words whitespace-pre-line transition-colors duration-200"
+              :style="lyricLineStyle(index)"
               :data-lyric-index="index"
               :data-active="index === displayedLyricIndex || undefined"
             >
@@ -351,5 +407,38 @@ watch(activeLyricIndex, async (index) => {
         </div>
       </div>
     </div>
+
+    <Teleport to="body">
+      <div
+        v-if="lyricsContextMenu"
+        class="fixed inset-0 z-40"
+        data-lyrics-context-backdrop
+        aria-hidden="true"
+        @pointerdown="closeLyricsContextMenu"
+        @contextmenu.prevent="closeLyricsContextMenu"
+      ></div>
+      <ul
+        v-if="lyricsContextMenu"
+        class="menu menu-sm fixed z-50 w-56 rounded border border-base-300 bg-base-100 p-2 text-base-content shadow-xl"
+        :style="{
+          left: `${lyricsContextMenu.x}px`,
+          top: `${lyricsContextMenu.y}px`,
+        }"
+        data-lyrics-context-menu
+        aria-label="Lyrics actions"
+        @keydown.esc.stop.prevent="closeLyricsContextMenu"
+      >
+        <li>
+          <button
+            ref="lyricsContextMenuAction"
+            type="button"
+            @click="openLyricsAppearanceSettings"
+          >
+            <Settings :size="15" aria-hidden="true" />
+            Lyrics appearance
+          </button>
+        </li>
+      </ul>
+    </Teleport>
   </section>
 </template>

@@ -12,6 +12,10 @@ import {
 } from "./lib/ui-preferences";
 import { DESKTOP_LYRICS_STORAGE_KEY } from "./lib/desktop-lyrics";
 import {
+  NOW_PLAYING_LYRICS_SETTINGS_ID,
+  NOW_PLAYING_LYRICS_STORAGE_KEY,
+} from "./lib/now-playing-lyrics";
+import {
   createAudioSourceRecord,
   createLocalTrack,
   createOnlineMusicSettings,
@@ -221,6 +225,43 @@ describe("application shell", () => {
     await sourcesButton?.trigger("click");
     expect(wrapper.find('[data-testid="audio-source-manager"]').exists()).toBe(true);
     expect(wrapper.findComponent({ name: "NowPlayingPanel" }).exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("opens and persists Now Playing lyric settings from the lyrics context menu", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.get('[data-testid="lyrics-viewport"]').trigger("contextmenu", {
+      clientX: 120,
+      clientY: 120,
+    });
+    await wrapper.vm.$nextTick();
+
+    const contextAction = document.body.querySelector<HTMLButtonElement>(
+      "[data-lyrics-context-menu] button",
+    );
+    expect(contextAction?.textContent).toContain("Lyrics appearance");
+    contextAction?.click();
+    await flushPromises();
+
+    expect(wrapper.get("h1").text()).toBe("Settings");
+    const settings = wrapper.get(`#${NOW_PLAYING_LYRICS_SETTINGS_ID}`);
+    expect(settings.attributes("tabindex")).toBe("-1");
+
+    await settings.get('input[aria-label="Now playing lyric size"]').setValue("22");
+    expect(
+      JSON.parse(localStorage.getItem(NOW_PLAYING_LYRICS_STORAGE_KEY) ?? "{}").fontSize,
+    ).toBe(22);
+
+    const localButton = wrapper
+      .get('nav[aria-label="Primary navigation"]')
+      .findAll("button")
+      .find((button) => button.text() === "Local Music");
+    await localButton?.trigger("click");
+    expect(
+      wrapper.getComponent({ name: "NowPlayingPanel" }).props("lyricsPreferences"),
+    ).toEqual(expect.objectContaining({ fontSize: 22 }));
     wrapper.unmount();
   });
 

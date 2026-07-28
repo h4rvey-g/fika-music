@@ -74,6 +74,22 @@ const artistAlbum: OnlineAlbum = {
   }],
 };
 
+function artists(count: number): OnlineArtist[] {
+  return Array.from({ length: count }, (_, index) => ({
+    ...artist,
+    key: `artist-${index + 1}`,
+    name: `Artist ${index + 1}`,
+  }));
+}
+
+function albums(count: number): OnlineAlbum[] {
+  return Array.from({ length: count }, (_, index) => ({
+    ...artistAlbum,
+    key: `album-${index + 1}`,
+    title: `Album ${index + 1}`,
+  }));
+}
+
 function track(index: number, coverUrl: string | null = null): OnlineTrack {
   const title = `Song ${index}`;
   return createOnlineTrack({
@@ -236,7 +252,7 @@ async function search(
   wrapper: ReturnType<typeof mountOnlineMusic>,
   keyword: string,
   section: OnlineSearchSection,
-  items: OnlineTrack[] | OnlineArtist[] | OnlinePlaylist[],
+  items: OnlineTrack[] | OnlineArtist[] | OnlineAlbum[] | OnlinePlaylist[],
   hasMore = false,
 ) {
   await wrapper.get('input[aria-label="Search Online Music"]').setValue(keyword);
@@ -1282,15 +1298,43 @@ describe("Online Music workspace", () => {
     wrapper.unmount();
   });
 
-  it("keeps a category visible while expanding its complete result page", async () => {
+  it.each([
+    {
+      section: "songs" as const,
+      label: "Songs",
+      summaryItems: Array.from({ length: 5 }, (_, index) => track(index + 1)),
+      completeItems: Array.from({ length: 6 }, (_, index) => track(index + 1)),
+      sixthItemLabel: "Song 6",
+    },
+    {
+      section: "artists" as const,
+      label: "Artists",
+      summaryItems: artists(5),
+      completeItems: artists(6),
+      sixthItemLabel: "Artist 6",
+    },
+    {
+      section: "albums" as const,
+      label: "Albums",
+      summaryItems: albums(5),
+      completeItems: albums(6),
+      sixthItemLabel: "Album 6",
+    },
+  ])("restores the five-item $label summary after returning from its complete result page", async ({
+    section,
+    label,
+    summaryItems,
+    completeItems,
+    sixthItemLabel,
+  }) => {
     const wrapper = mountOnlineMusic();
     await flushPromises();
-    await search(wrapper, "Song", "songs", Array.from({ length: 5 }, (_, index) => track(index + 1)), true);
+    await search(wrapper, label, section, summaryItems, true);
     tauriMocks.invoke.mockImplementation((command: string) => {
       if (command === "online_music_search_page") {
         return Promise.resolve({
-          section: "songs",
-          data: { section: "songs", items: Array.from({ length: 6 }, (_, index) => track(index + 1)) },
+          section,
+          data: { section, items: completeItems },
           failures: [],
           supportedChannels: 1,
           completedChannels: 1,
@@ -1300,17 +1344,63 @@ describe("Online Music workspace", () => {
       return Promise.resolve(null);
     });
 
+    const moreButton = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes(`More ${label}`));
+    expect(moreButton).toBeDefined();
+    await moreButton?.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain(`All ${label}`);
+    expect(wrapper.text()).toContain(sixthItemLabel);
+
+    await wrapper.get('button[aria-label="Back to search summary"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain(`All ${label}`);
+    expect(wrapper.text()).not.toContain(sixthItemLabel);
+    expect(wrapper.findAll("button").some((button) => button.text().includes(`More ${label}`)))
+      .toBe(true);
+    wrapper.unmount();
+  });
+
+  it("keeps the five-item summary when a complete result page finishes loading after returning", async () => {
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+    await search(
+      wrapper,
+      "Song",
+      "songs",
+      Array.from({ length: 5 }, (_, index) => track(index + 1)),
+      true,
+    );
+    let resolvePage: ((result: unknown) => void) | undefined;
+    const page = new Promise<unknown>((resolve) => {
+      resolvePage = resolve;
+    });
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "online_music_search_page") return page;
+      return Promise.resolve(null);
+    });
+
     const moreSongs = wrapper
       .findAll("button")
       .find((button) => button.text().includes("More Songs"));
-    expect(moreSongs).toBeDefined();
     await moreSongs?.trigger("click");
+    await wrapper.get('button[aria-label="Back to search summary"]').trigger("click");
+    resolvePage?.({
+      section: "songs",
+      data: { section: "songs", items: Array.from({ length: 6 }, (_, index) => track(index + 1)) },
+      failures: [],
+      supportedChannels: 1,
+      completedChannels: 1,
+      hasMore: false,
+    });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("All Songs");
-    expect(wrapper.text()).toContain("Song 6");
-    expect(wrapper.find('[data-online-track-key="song-1"]').exists()).toBe(true);
-    expect(wrapper.find('button[aria-label="Play Song 1"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("Song 6");
+    expect(wrapper.findAll("button").some((button) => button.text().includes("More Songs")))
+      .toBe(true);
     wrapper.unmount();
   });
 

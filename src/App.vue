@@ -40,6 +40,7 @@ import PluginManager from "./components/PluginManager.vue";
 import PluginWorkspace from "./components/PluginWorkspace.vue";
 import NeteaseSource from "./components/NeteaseSource.vue";
 import NowPlayingPanel from "./components/NowPlayingPanel.vue";
+import NowPlayingLyricsSettings from "./components/NowPlayingLyricsSettings.vue";
 import DesktopLyricsSettings from "./components/DesktopLyricsSettings.vue";
 import OnlineMusic from "./components/OnlineMusic.vue";
 import OnlineMusicSettingsPanel from "./components/OnlineMusicSettings.vue";
@@ -113,6 +114,14 @@ import {
   syncDesktopLyricsWindow,
   syncMenuBarLyrics,
 } from "./lib/desktop-lyrics-window";
+import {
+  DEFAULT_NOW_PLAYING_LYRICS_PREFERENCES,
+  NOW_PLAYING_LYRICS_SETTINGS_ID,
+  loadNowPlayingLyricsPreferences,
+  parseNowPlayingLyricsPreferences,
+  saveNowPlayingLyricsPreferences,
+  type NowPlayingLyricsPreferences,
+} from "./lib/now-playing-lyrics";
 
 type LibraryBrowserInstance = {
   refresh: () => Promise<void>;
@@ -185,6 +194,7 @@ type ActiveSection = AppSection | "plugin";
 
 const savedUiPreferences = loadUiPreferences();
 const savedDesktopLyricsPreferences = loadDesktopLyricsPreferences();
+const savedNowPlayingLyricsPreferences = loadNowPlayingLyricsPreferences();
 const appError = ref<string | null>(null);
 const libraryScan = useLibraryScan((message) => {
   appError.value = message;
@@ -218,6 +228,7 @@ const playbackDuration = ref(0);
 const volume = ref(savedUiPreferences.volume);
 const playbackMode = ref<PlaybackMode>(savedUiPreferences.playbackMode);
 const desktopLyricsPreferences = ref(savedDesktopLyricsPreferences);
+const nowPlayingLyricsPreferences = ref(savedNowPlayingLyricsPreferences);
 const themePreference = ref(savedUiPreferences.theme);
 const layoutDensity = ref(savedUiPreferences.density);
 const nowPlayingCoverUrl = ref<string | null>(null);
@@ -447,6 +458,11 @@ watch(
   { deep: true },
 );
 watch(
+  nowPlayingLyricsPreferences,
+  (preferences) => saveNowPlayingLyricsPreferences(preferences),
+  { deep: true },
+);
+watch(
   [
     nowPlayingTitle,
     nowPlayingSubtitle,
@@ -520,6 +536,14 @@ function selectSection(section: AppSection) {
   if (resetOnlineHome) {
     void nextTick(() => onlineMusic.value?.showHome());
   }
+}
+
+async function openNowPlayingLyricsSettings() {
+  selectSection(settingsSection.id);
+  await nextTick();
+  const settings = document.getElementById(NOW_PLAYING_LYRICS_SETTINGS_ID);
+  settings?.focus({ preventScroll: true });
+  settings?.scrollIntoView?.({ behavior: "smooth", block: "start" });
 }
 
 function selectPlugin(pluginId: string) {
@@ -611,7 +635,23 @@ function resetUiPreferences() {
   playbackAudioSourceId.value = DEFAULT_UI_PREFERENCES.audioSourceId;
   volume.value = DEFAULT_UI_PREFERENCES.volume;
   playbackMode.value = DEFAULT_UI_PREFERENCES.playbackMode;
+  resetNowPlayingLyricsPreferences();
   resetDesktopLyricsPreferences();
+}
+
+function updateNowPlayingLyricsPreferences(
+  patch: Partial<NowPlayingLyricsPreferences>,
+) {
+  nowPlayingLyricsPreferences.value = parseNowPlayingLyricsPreferences({
+    ...nowPlayingLyricsPreferences.value,
+    ...patch,
+  });
+}
+
+function resetNowPlayingLyricsPreferences() {
+  nowPlayingLyricsPreferences.value = {
+    ...DEFAULT_NOW_PLAYING_LYRICS_PREFERENCES,
+  };
 }
 
 function updateDesktopLyricsPreferences(patch: Partial<DesktopLyricsPreferences>) {
@@ -1621,8 +1661,10 @@ function trackSubtitle(track: LocalTrack) {
             :lyrics-error="lyricsError"
             :playback-position="playbackPosition"
             :can-retry="Boolean(activeTrack || activeRemoteLyricsQuery)"
+            :lyrics-preferences="nowPlayingLyricsPreferences"
             @retry-lyrics="retryLyrics"
             @seek-playback="seekPlaybackTo"
+            @open-lyrics-settings="openNowPlayingLyricsSettings"
           />
 
         </aside>
@@ -1696,8 +1738,10 @@ function trackSubtitle(track: LocalTrack) {
               :lyrics-error="lyricsError"
               :playback-position="playbackPosition"
               :can-retry="Boolean(activeTrack || activeRemoteLyricsQuery)"
+              :lyrics-preferences="nowPlayingLyricsPreferences"
               @retry-lyrics="retryLyrics"
               @seek-playback="seekPlaybackTo"
+              @open-lyrics-settings="openNowPlayingLyricsSettings"
             />
           </div>
         </section>
@@ -1747,8 +1791,10 @@ function trackSubtitle(track: LocalTrack) {
             :lyrics-error="lyricsError"
             :playback-position="playbackPosition"
             :can-retry="Boolean(activeTrack || activeRemoteLyricsQuery)"
+            :lyrics-preferences="nowPlayingLyricsPreferences"
             @retry-lyrics="retryLyrics"
             @seek-playback="seekPlaybackTo"
+            @open-lyrics-settings="openNowPlayingLyricsSettings"
           />
         </section>
 
@@ -1839,6 +1885,12 @@ function trackSubtitle(track: LocalTrack) {
               </div>
             </div>
           </section>
+
+          <NowPlayingLyricsSettings
+            :preferences="nowPlayingLyricsPreferences"
+            @update="updateNowPlayingLyricsPreferences"
+            @reset="resetNowPlayingLyricsPreferences"
+          />
 
           <DesktopLyricsSettings
             :preferences="desktopLyricsPreferences"

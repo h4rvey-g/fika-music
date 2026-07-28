@@ -143,6 +143,7 @@ type PlaylistSelectionTarget = {
 
 const FAVORITE_TRACK_PAGE_SIZE = 200;
 const MAX_FAVORITE_TRACK_PAGES = 100;
+const SEARCH_SUMMARY_SIZE = 5;
 
 const props = defineProps<{
   isActive: boolean;
@@ -266,6 +267,7 @@ let unlistenDownloads: (() => void) | null = null;
 let unlistenDownloadProgress: (() => void) | null = null;
 let unlistenDownloadCompletions: (() => void) | null = null;
 let searchGeneration = 0;
+let sectionLoadGeneration = 0;
 let suggestionGeneration = 0;
 let detailRequestGeneration = 0;
 let suggestionTimer: number | null = null;
@@ -1231,6 +1233,7 @@ async function submitSearch(suggestion?: string) {
   resetArtistDetailState();
   detail.value = null;
   artistDetailHistory.value = null;
+  sectionLoadGeneration += 1;
   expandedSection.value = null;
   activeTab.value = "search";
   globalError.value = null;
@@ -1291,11 +1294,25 @@ function sectionItems<T>(section: OnlineSearchSection): T[] {
   return data?.section === section ? (data.items as T[]) : [];
 }
 
-async function loadMore(section: OnlineSearchSection) {
+function collapseSectionResult(state: SectionState) {
+  const result = state.result;
+  if (result && result.data.items.length > SEARCH_SUMMARY_SIZE) {
+    result.data.items.splice(SEARCH_SUMMARY_SIZE);
+    result.hasMore = true;
+  }
+  state.page = 1;
+  state.loadingMore = false;
+}
+
+async function loadMore(
+  section: OnlineSearchSection,
+  generation = sectionLoadGeneration,
+) {
   const state = sectionStates.value[section];
   if (state.loadingMore || !submittedQuery.value) return;
   state.loadingMore = true;
-  const expandSummary = state.page === 1 && (state.result?.data.items.length ?? 0) <= 5;
+  const expandSummary = state.page === 1
+    && (state.result?.data.items.length ?? 0) <= SEARCH_SUMMARY_SIZE;
   const nextPage = expandSummary ? 1 : state.page + 1;
   const requestId = `online-page-${section}-${Date.now()}`;
   try {
@@ -1306,6 +1323,7 @@ async function loadMore(section: OnlineSearchSection) {
       20,
       requestId,
     );
+    if (generation !== sectionLoadGeneration || expandedSection.value !== section) return;
     if (expandSummary) {
       state.result = next;
     } else {
@@ -1313,9 +1331,11 @@ async function loadMore(section: OnlineSearchSection) {
     }
     state.page = nextPage;
   } catch (error) {
-    state.error = normalizeError(error);
+    if (generation === sectionLoadGeneration && expandedSection.value === section) {
+      state.error = normalizeError(error);
+    }
   } finally {
-    state.loadingMore = false;
+    if (generation === sectionLoadGeneration) state.loadingMore = false;
   }
 }
 
@@ -1724,14 +1744,19 @@ function requestTrackPlayback(track: OnlineTrack, queue: OnlineTrack[]) {
 }
 
 async function openSection(section: OnlineSearchSection) {
+  const generation = ++sectionLoadGeneration;
   summaryScrollPosition.value = document.querySelector("main")?.scrollTop ?? 0;
   expandedSection.value = section;
   const listEntry = beginVisibleSongListEntry();
   await nextTick();
   const state = sectionStates.value[section];
-  if ((state.result?.data.items.length ?? 0) <= 5 && state.result?.hasMore) {
-    await loadMore(section);
+  if (
+    (state.result?.data.items.length ?? 0) <= SEARCH_SUMMARY_SIZE
+    && state.result?.hasMore
+  ) {
+    await loadMore(section, generation);
   }
+  if (generation !== sectionLoadGeneration || expandedSection.value !== section) return;
   const main = document.querySelector("main");
   if (main) main.scrollTop = 0;
   await finishVisibleSongListEntry(listEntry);
@@ -1739,6 +1764,9 @@ async function openSection(section: OnlineSearchSection) {
 
 async function closeSection() {
   cancelTrackEntityResolution();
+  sectionLoadGeneration += 1;
+  const section = expandedSection.value;
+  if (section) collapseSectionResult(sectionStates.value[section]);
   expandedSection.value = null;
   const listEntry = beginVisibleSongListEntry();
   await nextTick();
@@ -2150,6 +2178,7 @@ function showHome() {
   if (searchId.value) void cancelSourceRequest(searchId.value);
   searchId.value = null;
   pendingSearchEvents = [];
+  sectionLoadGeneration += 1;
   expandedSection.value = null;
   sectionStates.value = newSectionStates();
 
