@@ -13,10 +13,11 @@ use fika_music_lib::online_download::{
     OnlineDownloadTask,
 };
 use fika_music_lib::online_music::{
-    AudioSourceSelectionMode, OnlineAlbum, OnlineArtist, OnlineChannel, OnlineMusicSettings,
-    OnlinePlaylist, OnlinePlaylistDetailError, OnlinePlaylistsResult, OnlineRecommendationsResult,
-    OnlineSearchData, OnlineSearchHistoryEntry, OnlineSearchSection, OnlineSearchSectionEvent,
-    OnlineSearchSectionResult, OnlineSuggestionsResult, OnlineTrack, OnlineTrackPage,
+    AudioSourceSelectionMode, OnlineAlbum, OnlineAlbumPage, OnlineArtist, OnlineArtistBiography,
+    OnlineChannel, OnlineMusicSettings, OnlinePlaylist, OnlinePlaylistDetailError,
+    OnlinePlaylistsResult, OnlineRecommendationsResult, OnlineSearchData, OnlineSearchHistoryEntry,
+    OnlineSearchSection, OnlineSearchSectionEvent, OnlineSearchSectionResult,
+    OnlineSuggestionsResult, OnlineTrack, OnlineTrackPage,
 };
 use fika_music_lib::plugin_system::PluginRecord;
 use fika_music_lib::source_runtime::{SourceRequest, SourceRequestOutcome};
@@ -126,7 +127,9 @@ fn generate(output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     export_all::<OnlineSuggestionsResult>(&config)?;
     export_all::<OnlineTrack>(&config)?;
     export_all::<OnlineArtist>(&config)?;
+    export_all::<OnlineArtistBiography>(&config)?;
     export_all::<OnlineAlbum>(&config)?;
+    export_all::<OnlineAlbumPage>(&config)?;
     export_all::<OnlinePlaylist>(&config)?;
     export_all::<OnlinePlaylistDetailError>(&config)?;
     export_all::<OnlinePlaylistsResult>(&config)?;

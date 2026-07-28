@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
 import OnlineMusic from "./OnlineMusic.vue";
 import type {
+  OnlineAlbum,
+  OnlineArtist,
   OnlineDownloadTask,
   OnlinePlaylist,
   OnlineSearchSection,
@@ -26,6 +28,48 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: tauriMocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: tauriMocks.listen }));
 
 const settings = createOnlineMusicSettings();
+
+const artist: OnlineArtist = {
+  key: "artist-key",
+  name: "Test Artist",
+  coverUrl: "https://cdn.test/artist.jpg",
+  candidates: [{
+    channelId: "fika.netease:wy",
+    pluginId: "fika.netease",
+    sourceId: "wy",
+    channelName: "NetEase Cloud Music",
+    id: "123",
+    name: "Test Artist",
+    coverUrl: "https://cdn.test/artist.jpg",
+    platformIds: { id: "123" },
+    rawInfo: { id: "123" },
+    rank: 1,
+  }],
+};
+
+const artistAlbum: OnlineAlbum = {
+  key: "album-key",
+  title: "First Album",
+  artist: "Test Artist",
+  releaseYear: 2020,
+  coverUrl: "https://cdn.test/album.jpg",
+  trackCount: 12,
+  candidates: [{
+    channelId: "fika.netease:wy",
+    pluginId: "fika.netease",
+    sourceId: "wy",
+    channelName: "NetEase Cloud Music",
+    id: "456",
+    title: "First Album",
+    artist: "Test Artist",
+    releaseYear: 2020,
+    coverUrl: "https://cdn.test/album.jpg",
+    trackCount: 12,
+    platformIds: { id: "456" },
+    rawInfo: { id: "456" },
+    rank: 1,
+  }],
+};
 
 function track(index: number, coverUrl: string | null = null): OnlineTrack {
   const title = `Song ${index}`;
@@ -189,7 +233,7 @@ async function search(
   wrapper: ReturnType<typeof mountOnlineMusic>,
   keyword: string,
   section: OnlineSearchSection,
-  items: OnlineTrack[] | OnlinePlaylist[],
+  items: OnlineTrack[] | OnlineArtist[] | OnlinePlaylist[],
   hasMore = false,
 ) {
   await wrapper.get('input[aria-label="Search Online Music"]').setValue(keyword);
@@ -252,6 +296,100 @@ describe("Online Music workspace", () => {
         button.attributes("aria-label")
       ),
     ).toEqual(["每日推荐", "私人漫游", "私人雷达"]);
+    wrapper.unmount();
+  });
+
+  it("loads artist albums and biography lazily and opens an album detail", async () => {
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "get_online_music_settings") return Promise.resolve(settings);
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "start_online_music_search") return Promise.resolve("search-1");
+      if (command === "online_music_playlists") {
+        return Promise.resolve({
+          items: [],
+          failures: [],
+          supportedChannels: 0,
+          completedChannels: 0,
+        });
+      }
+      if (command === "online_music_artist_tracks") {
+        return Promise.resolve({ items: [track(1)], hasMore: false, total: 1 });
+      }
+      if (command === "online_music_artist_albums") {
+        return Promise.resolve({ items: [artistAlbum], hasMore: false, total: 1 });
+      }
+      if (command === "online_music_artist_biography") {
+        return Promise.resolve({
+          summary: "Artist summary",
+          sections: [{ title: "Early life", text: "Artist biography" }],
+          sourceName: "NetEase Cloud Music",
+        });
+      }
+      if (command === "online_music_album_tracks") {
+        return Promise.resolve({ items: [track(2)], hasMore: false, total: 1 });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+    await search(wrapper, "Test Artist", "artists", [artist]);
+
+    await wrapper.get("li.list-row").trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll('[aria-label="Artist details"] [role="tab"]')).toHaveLength(3);
+    expect(tauriMocks.invoke).not.toHaveBeenCalledWith(
+      "online_music_artist_albums",
+      expect.anything(),
+    );
+
+    await wrapper.get('[data-online-artist-tab="albums"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-online-artist-album="album-key"]').text()).toContain("First Album");
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("online_music_artist_albums", {
+      artist,
+      page: 1,
+      pageSize: 50,
+      requestId: expect.stringMatching(/^online-artist-albums-/),
+    });
+
+    await wrapper.get('[data-online-artist-tab="biography"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-online-artist-biography]").text()).toContain("Artist biography");
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("online_music_artist_biography", {
+      artist,
+      requestId: expect.stringMatching(/^online-artist-biography-/),
+    });
+
+    await wrapper.get('[data-online-artist-tab="albums"]').trigger("click");
+    await wrapper.get('[data-online-artist-album="album-key"]').trigger("click");
+    await flushPromises();
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("online_music_album_tracks", {
+      album: artistAlbum,
+      page: 1,
+      pageSize: 100,
+      requestId: expect.stringMatching(/^online-detail-/),
+    });
+    expect(
+      tauriMocks.invoke.mock.calls.filter(([command]) =>
+        command === "online_music_artist_albums"
+      ),
+    ).toHaveLength(1);
+
+    await wrapper.get('button[aria-label="Back to Test Artist"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.get("h2").text()).toBe("Test Artist");
+    expect(wrapper.get('[data-online-artist-tab="albums"]').classes()).toContain("tab-active");
+    expect(wrapper.get('[data-online-artist-album="album-key"]').text()).toContain("First Album");
+    expect(
+      tauriMocks.invoke.mock.calls.filter(([command]) =>
+        command === "online_music_artist_albums"
+      ),
+    ).toHaveLength(1);
+    expect(
+      tauriMocks.invoke.mock.calls.filter(([command]) =>
+        command === "online_music_artist_tracks"
+      ),
+    ).toHaveLength(1);
     wrapper.unmount();
   });
 

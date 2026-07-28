@@ -1,6 +1,7 @@
 use crate::source_runtime::{
-    JsonScalar, MusicRecommendationKind, SourceAlbumSearchResult, SourceArtistSearchResult,
-    SourcePlaylist, SourcePlaylistSearchResult, SourceQuality, SourceSearchResult,
+    JsonScalar, MusicRecommendationKind, SourceAlbumSearchResult, SourceArtistBiography,
+    SourceArtistSearchResult, SourcePlaylist, SourcePlaylistSearchResult, SourceQuality,
+    SourceSearchResult,
 };
 use moka::sync::Cache;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -701,6 +702,40 @@ pub struct OnlineArtist {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "bindings.ts")]
+pub struct OnlineArtistBiographySection {
+    pub title: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct OnlineArtistBiography {
+    pub summary: Option<String>,
+    pub sections: Vec<OnlineArtistBiographySection>,
+    pub source_name: String,
+}
+
+impl OnlineArtistBiography {
+    pub fn from_source(source_name: String, biography: SourceArtistBiography) -> Self {
+        Self {
+            summary: biography.summary,
+            sections: biography
+                .sections
+                .into_iter()
+                .map(|section| OnlineArtistBiographySection {
+                    title: section.title,
+                    text: section.text,
+                })
+                .collect(),
+            source_name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct OnlineAlbumCandidate {
     pub channel_id: String,
     pub plugin_id: String,
@@ -750,6 +785,15 @@ pub struct OnlineAlbum {
     pub cover_url: Option<String>,
     pub track_count: Option<u64>,
     pub candidates: Vec<OnlineAlbumCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct OnlineAlbumPage {
+    pub items: Vec<OnlineAlbum>,
+    pub has_more: bool,
+    pub total: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]

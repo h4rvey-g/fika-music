@@ -116,6 +116,8 @@ macro_rules! with_tauri_commands {
             start_online_music_search,
             online_music_search_page,
             online_music_artist_tracks,
+            online_music_artist_albums,
+            online_music_artist_biography,
             online_music_album_tracks,
             online_music_playlist_tracks,
             clear_online_search_history,
@@ -2905,6 +2907,70 @@ fn artist_candidate_track_page(
     }
 }
 
+fn artist_candidate_album_page(
+    state: &AppState,
+    candidate: &online_music::OnlineArtistCandidate,
+    page: u64,
+    page_size: u64,
+    cancellation: source_runtime::SourceCancellationToken,
+) -> CommandResult<source_runtime::SourceAlbumSearchResponse> {
+    let outcome = dispatch_candidate_request(
+        state,
+        candidate_channel(
+            &candidate.channel_id,
+            &candidate.plugin_id,
+            &candidate.source_id,
+            &candidate.channel_name,
+            source_runtime::SourceAction::ArtistAlbums,
+        ),
+        source_runtime::SourceRequest::ArtistAlbums {
+            source: candidate.source_id.clone(),
+            artist: source_runtime::SourceEntityRef {
+                id: candidate.id.clone(),
+                platform_ids: candidate.platform_ids.clone(),
+                raw_info: candidate.raw_info.clone(),
+            },
+            page,
+            page_size,
+        },
+        cancellation,
+    )?;
+    match outcome.response {
+        source_runtime::SourceResponse::ArtistAlbums(response) => Ok(response),
+        _ => Err("provider returned an unexpected artist albums response".to_owned()),
+    }
+}
+
+fn artist_candidate_biography(
+    state: &AppState,
+    candidate: &online_music::OnlineArtistCandidate,
+    cancellation: source_runtime::SourceCancellationToken,
+) -> CommandResult<source_runtime::SourceArtistBiography> {
+    let outcome = dispatch_candidate_request(
+        state,
+        candidate_channel(
+            &candidate.channel_id,
+            &candidate.plugin_id,
+            &candidate.source_id,
+            &candidate.channel_name,
+            source_runtime::SourceAction::ArtistBiography,
+        ),
+        source_runtime::SourceRequest::ArtistBiography {
+            source: candidate.source_id.clone(),
+            artist: source_runtime::SourceEntityRef {
+                id: candidate.id.clone(),
+                platform_ids: candidate.platform_ids.clone(),
+                raw_info: candidate.raw_info.clone(),
+            },
+        },
+        cancellation,
+    )?;
+    match outcome.response {
+        source_runtime::SourceResponse::ArtistBiography(response) => Ok(response),
+        _ => Err("provider returned an unexpected artist biography response".to_owned()),
+    }
+}
+
 fn album_candidate_track_page(
     state: &AppState,
     candidate: &online_music::OnlineAlbumCandidate,
@@ -2996,6 +3062,137 @@ fn online_artist_tracks_inner(
         items,
         has_more: false,
     })
+}
+
+#[tauri::command]
+async fn online_music_artist_albums(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    artist: online_music::OnlineArtist,
+    page: u64,
+    page_size: u64,
+    request_id: Option<String>,
+) -> CommandResult<online_music::OnlineAlbumPage> {
+    let cancellation = register_source_request(state.inner(), request_id.as_deref())
+        .map_err(|error| error.message)?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        online_artist_albums_inner(&state, artist, page, page_size, cancellation)
+    })
+    .await;
+    unregister_source_request(state.inner(), request_id.as_deref());
+    result.map_err(|error| format!("online artist albums task failed: {error}"))?
+}
+
+fn online_artist_albums_inner(
+    state: &AppState,
+    artist: online_music::OnlineArtist,
+    page: u64,
+    page_size: u64,
+    cancellation: source_runtime::SourceCancellationToken,
+) -> CommandResult<online_music::OnlineAlbumPage> {
+    if page == 0 || !(1..=200).contains(&page_size) {
+        return Err("Invalid artist albums page".to_owned());
+    }
+    let settings = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| "database lock was poisoned".to_owned())?;
+        online_music::load_settings(&db).map_err(|error| error.to_string())?
+    };
+    let mut candidates = Vec::new();
+    let mut has_more = false;
+    let mut total = None;
+    let mut completed_candidates = 0_u64;
+    for artist_candidate in artist.candidates {
+        if cancellation.is_cancelled() {
+            return Err("request cancelled".to_owned());
+        }
+        let Ok(response) = artist_candidate_album_page(
+            state,
+            &artist_candidate,
+            page,
+            page_size,
+            cancellation.clone(),
+        ) else {
+            continue;
+        };
+        completed_candidates += 1;
+        has_more |= !response.is_end;
+        total = total.max(response.total);
+        let channel = candidate_channel(
+            &artist_candidate.channel_id,
+            &artist_candidate.plugin_id,
+            &artist_candidate.source_id,
+            &artist_candidate.channel_name,
+            source_runtime::SourceAction::ArtistAlbums,
+        );
+        candidates.extend(response.list.into_iter().enumerate().map(|(index, album)| {
+            online_music::OnlineAlbumCandidate::from_source(
+                &channel,
+                album,
+                rank_for_page(page, page_size, index),
+            )
+        }));
+    }
+    if completed_candidates == 0 {
+        return Err("Artist albums are unavailable from the configured sources".to_owned());
+    }
+    let groups = online_music::group_album_candidates(candidates)
+        .into_values()
+        .collect();
+    Ok(online_music::OnlineAlbumPage {
+        items: online_music::merge_albums(groups, &settings.channel_priority),
+        has_more,
+        total,
+    })
+}
+
+#[tauri::command]
+async fn online_music_artist_biography(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    artist: online_music::OnlineArtist,
+    request_id: Option<String>,
+) -> CommandResult<online_music::OnlineArtistBiography> {
+    let cancellation = register_source_request(state.inner(), request_id.as_deref())
+        .map_err(|error| error.message)?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        online_artist_biography_inner(&state, artist, cancellation)
+    })
+    .await;
+    unregister_source_request(state.inner(), request_id.as_deref());
+    result.map_err(|error| format!("online artist biography task failed: {error}"))?
+}
+
+fn online_artist_biography_inner(
+    state: &AppState,
+    artist: online_music::OnlineArtist,
+    cancellation: source_runtime::SourceCancellationToken,
+) -> CommandResult<online_music::OnlineArtistBiography> {
+    let mut empty_biography = None;
+    for artist_candidate in artist.candidates {
+        if cancellation.is_cancelled() {
+            return Err("request cancelled".to_owned());
+        }
+        let Ok(biography) =
+            artist_candidate_biography(state, &artist_candidate, cancellation.clone())
+        else {
+            continue;
+        };
+        let biography = online_music::OnlineArtistBiography::from_source(
+            artist_candidate.channel_name,
+            biography,
+        );
+        if biography.summary.is_some() || !biography.sections.is_empty() {
+            return Ok(biography);
+        }
+        empty_biography = Some(biography);
+    }
+    empty_biography
+        .ok_or_else(|| "Artist biography is unavailable from the configured sources".to_owned())
 }
 
 #[tauri::command]

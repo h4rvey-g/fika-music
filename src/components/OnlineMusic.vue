@@ -35,6 +35,8 @@ import {
   cancelOnlineDownloadTask,
   createOnlineDownloadTask,
   getOnlineAlbumTracks,
+  getOnlineArtistAlbums,
+  getOnlineArtistBiography,
   getOnlineArtistTracks,
   getOnlineMusicPlaylists,
   getOnlineMusicRecommendations,
@@ -58,7 +60,9 @@ import {
   startOnlineMusicSearch,
   updateOnlineMusicSettings,
   type OnlineAlbum,
+  type OnlineAlbumPage,
   type OnlineArtist,
+  type OnlineArtistBiography,
   type OnlineMusicSettings,
   type OnlineDownloadProgressEvent,
   type OnlineDownloadTask,
@@ -86,6 +90,29 @@ type DetailState =
   | { kind: "artist"; entity: OnlineArtist }
   | { kind: "album"; entity: OnlineAlbum }
   | { kind: "playlist"; entity: OnlinePlaylist };
+
+type ArtistDetailTab = "topTracks" | "albums" | "biography";
+
+type ArtistDetailHistory = {
+  detail: Extract<DetailState, { kind: "artist" }>;
+  tracks: OnlineTrack[];
+  tracksLoading: boolean;
+  page: number;
+  hasMore: boolean;
+  retryAvailable: boolean;
+  error: string | null;
+  loginRequiredPluginId: string | null;
+  tab: ArtistDetailTab;
+  albums: OnlineAlbum[];
+  albumsLoaded: boolean;
+  albumsError: string | null;
+  albumsPage: number;
+  albumsHasMore: boolean;
+  biography: OnlineArtistBiography | null;
+  biographyLoaded: boolean;
+  biographyError: string | null;
+  scrollPosition: number;
+};
 
 type RecommendationEntry = {
   id: MusicRecommendationKind;
@@ -188,6 +215,19 @@ const detailLoadingMore = ref(false);
 const detailHasMore = ref(false);
 const detailPage = ref(1);
 const detailAppendGeneration = ref(0);
+const artistDetailTab = ref<ArtistDetailTab>("topTracks");
+const artistAlbums = ref<OnlineAlbum[]>([]);
+const artistAlbumsLoading = ref(false);
+const artistAlbumsLoadingMore = ref(false);
+const artistAlbumsLoaded = ref(false);
+const artistAlbumsError = ref<string | null>(null);
+const artistAlbumsPage = ref(1);
+const artistAlbumsHasMore = ref(false);
+const artistBiography = ref<OnlineArtistBiography | null>(null);
+const artistBiographyLoading = ref(false);
+const artistBiographyLoaded = ref(false);
+const artistBiographyError = ref<string | null>(null);
+const artistDetailHistory = ref<ArtistDetailHistory | null>(null);
 const downloadTasks = ref<OnlineDownloadTask[]>([]);
 const downloadActionId = ref<string | null>(null);
 const settings = ref<OnlineMusicSettings | null>(null);
@@ -223,6 +263,8 @@ let detailRequestGeneration = 0;
 let suggestionTimer: number | null = null;
 let suggestionRequestId: string | null = null;
 let detailRequestId: string | null = null;
+let artistAlbumsRequestId: string | null = null;
+let artistBiographyRequestId: string | null = null;
 let recommendationGeneration = 0;
 let privateRoamingBatchGeneration = 0;
 let privateRoamingBatchRequestId: string | null = null;
@@ -251,12 +293,37 @@ const visibleDetailTitle = computed(() => {
   if (detail.value.kind === "album") return detail.value.entity.title;
   return detail.value.entity.name;
 });
+const visibleDetailSubtitle = computed(() => {
+  if (!detail.value) return "";
+  if (detail.value.kind === "artist") {
+    return {
+      topTracks: "Top tracks",
+      albums: "All albums",
+      biography: "Artist bio",
+    }[artistDetailTab.value];
+  }
+  if (detail.value.kind === "album") return detail.value.entity.artist;
+  return detail.value.entity.ownerName || detail.value.entity.channelName;
+});
+const detailBackLabel = computed(() => {
+  if (detail.value?.kind === "album" && artistDetailHistory.value) {
+    return `Back to ${artistDetailHistory.value.detail.entity.name}`;
+  }
+  return "Back to search results";
+});
+const isArtistTopTracksTab = computed(() =>
+  detail.value?.kind !== "artist" || artistDetailTab.value === "topTracks"
+);
 const activeRecommendationEntry = computed(() =>
   recommendationEntries.find((entry) => entry.id === activeRecommendation.value) ?? null,
 );
 const visibleSongListKey = computed(() => {
   if (activeTab.value !== "search") return null;
-  if (detail.value) return `detail:${detail.value.kind}:${detail.value.entity.key}`;
+  if (detail.value) {
+    return isArtistTopTracksTab.value
+      ? `detail:${detail.value.kind}:${detail.value.entity.key}`
+      : null;
+  }
   if (activeRecommendation.value) return `recommendation:${activeRecommendation.value}`;
   if (!hasSubmittedSearch.value || (expandedSection.value && expandedSection.value !== "songs")) {
     return null;
@@ -264,7 +331,7 @@ const visibleSongListKey = computed(() => {
   return `search:${submittedQuery.value}:${expandedSection.value ?? "summary"}`;
 });
 const visibleSongTracks = computed(() => {
-  if (detail.value) return detailTracks.value;
+  if (detail.value) return isArtistTopTracksTab.value ? detailTracks.value : [];
   if (activeRecommendation.value) return recommendationTracks.value;
   if (hasSubmittedSearch.value && (!expandedSection.value || expandedSection.value === "songs")) {
     return sectionItems<OnlineTrack>("songs");
@@ -272,7 +339,7 @@ const visibleSongTracks = computed(() => {
   return [];
 });
 const visibleSongListLoading = computed(() => {
-  if (detail.value) return detailLoading.value;
+  if (detail.value) return isArtistTopTracksTab.value && detailLoading.value;
   if (activeRecommendation.value) return recommendationLoading.value;
   if (hasSubmittedSearch.value && (!expandedSection.value || expandedSection.value === "songs")) {
     const state = sectionStates.value.songs;
@@ -399,6 +466,7 @@ onBeforeUnmount(() => {
   if (suggestionTimer !== null) window.clearTimeout(suggestionTimer);
   if (suggestionRequestId) void cancelSourceRequest(suggestionRequestId);
   if (detailRequestId) void cancelSourceRequest(detailRequestId);
+  cancelArtistDetailRequests();
   cancelRecommendationLoads();
   cancelPlaylistLibraryLoad();
   cancelPrivateRoamingBatchLoad();
@@ -986,7 +1054,10 @@ async function submitSearch(suggestion?: string) {
   recommendationTracks.value = [];
   recommendationFailures.value = [];
   recommendationError.value = null;
+  cancelArtistDetailRequests();
+  resetArtistDetailState();
   detail.value = null;
+  artistDetailHistory.value = null;
   expandedSection.value = null;
   activeTab.value = "search";
   globalError.value = null;
@@ -1105,11 +1176,40 @@ async function retrySection(section: OnlineSearchSection) {
   }
 }
 
-async function openDetail(next: DetailState, rememberScroll = true) {
+function cancelArtistDetailRequests() {
+  if (artistAlbumsRequestId) void cancelSourceRequest(artistAlbumsRequestId);
+  if (artistBiographyRequestId) void cancelSourceRequest(artistBiographyRequestId);
+  artistAlbumsRequestId = null;
+  artistBiographyRequestId = null;
+}
+
+function resetArtistDetailState() {
+  artistDetailTab.value = "topTracks";
+  artistAlbums.value = [];
+  artistAlbumsLoading.value = false;
+  artistAlbumsLoadingMore.value = false;
+  artistAlbumsLoaded.value = false;
+  artistAlbumsError.value = null;
+  artistAlbumsPage.value = 1;
+  artistAlbumsHasMore.value = false;
+  artistBiography.value = null;
+  artistBiographyLoading.value = false;
+  artistBiographyLoaded.value = false;
+  artistBiographyError.value = null;
+}
+
+async function openDetail(
+  next: DetailState,
+  rememberScroll = true,
+  preserveArtistHistory = false,
+) {
+  if (!preserveArtistHistory) artistDetailHistory.value = null;
   if (rememberScroll) {
     resultScrollPosition.value = document.querySelector("main")?.scrollTop ?? 0;
   }
   detailAppendGeneration.value += 1;
+  cancelArtistDetailRequests();
+  resetArtistDetailState();
   detail.value = next;
   detailTracks.value = [];
   detailPage.value = 1;
@@ -1149,8 +1249,108 @@ async function openDetail(next: DetailState, rememberScroll = true) {
   }
 }
 
+async function openArtistAlbum(album: OnlineAlbum) {
+  if (detail.value?.kind !== "artist") return;
+  artistDetailHistory.value = {
+    detail: detail.value,
+    tracks: [...detailTracks.value],
+    tracksLoading: detailLoading.value,
+    page: detailPage.value,
+    hasMore: detailHasMore.value,
+    retryAvailable: detailRetryAvailable.value,
+    error: globalError.value,
+    loginRequiredPluginId: loginRequiredPluginId.value,
+    tab: artistDetailTab.value,
+    albums: [...artistAlbums.value],
+    albumsLoaded: artistAlbumsLoaded.value,
+    albumsError: artistAlbumsError.value,
+    albumsPage: artistAlbumsPage.value,
+    albumsHasMore: artistAlbumsHasMore.value,
+    biography: artistBiography.value,
+    biographyLoaded: artistBiographyLoaded.value,
+    biographyError: artistBiographyError.value,
+    scrollPosition: document.querySelector("main")?.scrollTop ?? 0,
+  };
+  await openDetail({ kind: "album", entity: album }, false, true);
+}
+
+async function selectArtistDetailTab(tab: ArtistDetailTab) {
+  if (detail.value?.kind !== "artist") return;
+  artistDetailTab.value = tab;
+  const listEntry = beginVisibleSongListEntry();
+  if (tab === "albums" && !artistAlbumsLoaded.value && !artistAlbumsLoading.value) {
+    await loadArtistAlbums();
+  }
+  if (tab === "biography" && !artistBiographyLoaded.value && !artistBiographyLoading.value) {
+    await loadArtistBiography();
+  }
+  await nextTick();
+  await finishVisibleSongListEntry(listEntry);
+}
+
+async function loadArtistAlbums(loadMore = false) {
+  if (detail.value?.kind !== "artist") return;
+  if (loadMore ? artistAlbumsLoadingMore.value : artistAlbumsLoading.value) return;
+  const page = loadMore ? artistAlbumsPage.value + 1 : 1;
+  const requestId = `online-artist-albums-${Date.now()}-${page}`;
+  artistAlbumsRequestId = requestId;
+  artistAlbumsError.value = null;
+  if (loadMore) artistAlbumsLoadingMore.value = true;
+  else {
+    artistAlbumsLoading.value = true;
+  }
+  try {
+    const result: OnlineAlbumPage = await getOnlineArtistAlbums(
+      detail.value.entity,
+      page,
+      50,
+      requestId,
+    );
+    if (artistAlbumsRequestId !== requestId) return;
+    artistAlbums.value = loadMore
+      ? [...artistAlbums.value, ...result.items.filter((album) =>
+        !artistAlbums.value.some((existing) => existing.key === album.key)
+      )]
+      : result.items;
+    artistAlbumsPage.value = page;
+    artistAlbumsHasMore.value = result.hasMore;
+    artistAlbumsLoaded.value = true;
+  } catch (error) {
+    if (artistAlbumsRequestId !== requestId) return;
+    artistAlbumsError.value = normalizeError(error);
+  } finally {
+    if (artistAlbumsRequestId === requestId) {
+      artistAlbumsRequestId = null;
+      artistAlbumsLoading.value = false;
+      artistAlbumsLoadingMore.value = false;
+    }
+  }
+}
+
+async function loadArtistBiography() {
+  if (detail.value?.kind !== "artist" || artistBiographyLoading.value) return;
+  const requestId = `online-artist-biography-${Date.now()}`;
+  artistBiographyRequestId = requestId;
+  artistBiographyLoading.value = true;
+  artistBiographyError.value = null;
+  try {
+    const result = await getOnlineArtistBiography(detail.value.entity, requestId);
+    if (artistBiographyRequestId !== requestId) return;
+    artistBiography.value = result;
+    artistBiographyLoaded.value = true;
+  } catch (error) {
+    if (artistBiographyRequestId !== requestId) return;
+    artistBiographyError.value = normalizeError(error);
+  } finally {
+    if (artistBiographyRequestId === requestId) {
+      artistBiographyRequestId = null;
+      artistBiographyLoading.value = false;
+    }
+  }
+}
+
 async function retryDetail() {
-  if (detail.value) await openDetail(detail.value, false);
+  if (detail.value) await openDetail(detail.value, false, true);
 }
 
 async function loadDetailPage(next: DetailState, page: number, requestId?: string) {
@@ -1161,11 +1361,16 @@ async function loadDetailPage(next: DetailState, page: number, requestId?: strin
 
 async function loadMoreDetail() {
   if (!detail.value || detailLoadingMore.value || !detailHasMore.value) return;
+  const generation = detailAppendGeneration.value;
+  const detailKey = detail.value.entity.key;
   detailLoadingMore.value = true;
   const page = detailPage.value + 1;
   const requestId = `online-detail-page-${Date.now()}`;
   try {
     const result = await loadDetailPage(detail.value, page, requestId);
+    if (generation !== detailAppendGeneration.value || detail.value?.entity.key !== detailKey) {
+      return;
+    }
     detailTracks.value.push(...result.items);
     detailHasMore.value = result.hasMore;
     detailPage.value = page;
@@ -1513,10 +1718,13 @@ function downloadItemStateLabel(state: OnlineDownloadTask["items"][number]["stat
 async function backToResults() {
   detailAppendGeneration.value += 1;
   if (detailRequestId) void cancelSourceRequest(detailRequestId);
+  cancelArtistDetailRequests();
   detailRequestId = null;
   detailLoading.value = false;
   detailLoadingMore.value = false;
   detail.value = null;
+  artistDetailHistory.value = null;
+  resetArtistDetailState();
   loginRequiredPluginId.value = null;
   detailRetryAvailable.value = false;
   const listEntry = beginVisibleSongListEntry();
@@ -1524,6 +1732,86 @@ async function backToResults() {
   const main = document.querySelector("main");
   if (main) main.scrollTop = resultScrollPosition.value;
   await finishVisibleSongListEntry(listEntry);
+}
+
+async function restoreArtistDetail() {
+  const history = artistDetailHistory.value;
+  if (!history || detail.value?.kind !== "album") {
+    await backToResults();
+    return;
+  }
+
+  detailAppendGeneration.value += 1;
+  detailRequestGeneration += 1;
+  if (detailRequestId) void cancelSourceRequest(detailRequestId);
+  cancelArtistDetailRequests();
+  detailRequestId = null;
+  artistDetailHistory.value = null;
+  detail.value = history.detail;
+  detailTracks.value = history.tracks;
+  detailPage.value = history.page;
+  detailHasMore.value = history.hasMore;
+  detailLoading.value = history.tracksLoading;
+  detailLoadingMore.value = false;
+  detailRetryAvailable.value = history.retryAvailable;
+  globalError.value = history.error;
+  loginRequiredPluginId.value = history.loginRequiredPluginId;
+  artistDetailTab.value = history.tab;
+  artistAlbums.value = history.albums;
+  artistAlbumsLoading.value = false;
+  artistAlbumsLoadingMore.value = false;
+  artistAlbumsLoaded.value = history.albumsLoaded;
+  artistAlbumsError.value = history.albumsError;
+  artistAlbumsPage.value = history.albumsPage;
+  artistAlbumsHasMore.value = history.albumsHasMore;
+  artistBiography.value = history.biography;
+  artistBiographyLoading.value = false;
+  artistBiographyLoaded.value = history.biographyLoaded;
+  artistBiographyError.value = history.biographyError;
+
+  const listEntry = beginVisibleSongListEntry();
+  await nextTick();
+  const main = document.querySelector("main");
+  if (main) main.scrollTop = history.scrollPosition;
+  if (history.tracksLoading) {
+    await reloadRestoredArtistTracks(history.detail);
+  } else {
+    await finishVisibleSongListEntry(listEntry);
+  }
+}
+
+async function reloadRestoredArtistTracks(artist: Extract<DetailState, { kind: "artist" }>) {
+  detailLoading.value = true;
+  detailRetryAvailable.value = false;
+  globalError.value = null;
+  const listEntry = beginVisibleSongListEntry();
+  const requestId = `online-detail-${Date.now()}-${++detailRequestGeneration}`;
+  detailRequestId = requestId;
+  try {
+    const page = await loadDetailPage(artist, 1, requestId);
+    if (detailRequestId !== requestId || detail.value?.entity.key !== artist.entity.key) return;
+    detailTracks.value = page.items;
+    detailPage.value = 1;
+    detailHasMore.value = page.hasMore;
+  } catch (error) {
+    if (detailRequestId !== requestId) return;
+    detailRetryAvailable.value = true;
+    globalError.value = normalizeError(error);
+  } finally {
+    if (detailRequestId === requestId) {
+      detailLoading.value = false;
+      detailRequestId = null;
+      await finishVisibleSongListEntry(listEntry);
+    }
+  }
+}
+
+async function backFromDetail() {
+  if (detail.value?.kind === "album" && artistDetailHistory.value) {
+    await restoreArtistDetail();
+    return;
+  }
+  await backToResults();
 }
 
 function selectTab(tab: "search" | "downloads") {
@@ -1564,8 +1852,11 @@ function showHome() {
   detailAppendGeneration.value += 1;
   detailRequestGeneration += 1;
   if (detailRequestId) void cancelSourceRequest(detailRequestId);
+  cancelArtistDetailRequests();
   detailRequestId = null;
   detail.value = null;
+  artistDetailHistory.value = null;
+  resetArtistDetailState();
   detailTracks.value = [];
   detailLoading.value = false;
   detailLoadingMore.value = false;
@@ -1803,7 +2094,7 @@ defineExpose({
 
     <div v-else-if="detail" class="min-w-0">
       <div class="mb-3 flex min-w-0 items-center gap-3 border-b border-base-300 pb-3">
-        <button class="btn btn-square btn-ghost btn-sm" type="button" aria-label="Back to search results" title="Back" @click="backToResults">
+        <button class="btn btn-square btn-ghost btn-sm" type="button" :aria-label="detailBackLabel" title="Back" @click="backFromDetail">
           <ArrowLeft :size="17" aria-hidden="true" />
         </button>
         <div class="flex size-12 shrink-0 items-center justify-center overflow-hidden rounded bg-base-200">
@@ -1813,10 +2104,10 @@ defineExpose({
         <div class="min-w-0 flex-1">
           <h2 class="truncate text-base font-semibold">{{ visibleDetailTitle }}</h2>
           <p class="truncate text-xs text-base-content/55">
-            {{ detail.kind === 'artist' ? 'Top tracks' : detail.kind === 'album' ? detail.entity.artist : detail.entity.ownerName || detail.entity.channelName }}
+            {{ visibleDetailSubtitle }}
           </p>
         </div>
-        <div v-if="detailTracks.length" class="flex shrink-0 gap-1">
+        <div v-if="detailTracks.length && isArtistTopTracksTab" class="flex shrink-0 gap-1">
           <button class="btn btn-sm" type="button" @click="playAllDetail">
             <Play :size="15" aria-hidden="true" />
             Play all
@@ -1827,30 +2118,162 @@ defineExpose({
         </div>
       </div>
 
-      <div v-if="detailLoading" class="space-y-2">
-        <div v-for="index in 7" :key="index" class="skeleton h-11 w-full"></div>
-      </div>
-      <OnlineTrackTable
-        v-else
-        :tracks="detailTracks"
-        :active-track="activeOnlineTrack"
-        :is-playing="isPlaying"
-        :track-action-id="trackActionId"
-        :supports-library-actions="supportsLibraryActions"
-        :supports-playlist-selection="supportsPlaylistSelection"
-        :is-favorite="isTrackFavorite"
-        @play="playTrack($event, detailTracks)"
-        @download="downloadTrack"
-        @download-selection="downloadTracks"
-        @favorite="addToFavorites"
-        @add-to-playlist="openPlaylistPicker"
-        @add-selection-to-playlist="openPlaylistPicker"
-      />
-      <div v-if="detailHasMore" class="flex justify-center py-4">
-        <button class="btn btn-sm" type="button" :disabled="detailLoadingMore" @click="loadMoreDetail">
-          <span v-if="detailLoadingMore" class="loading loading-spinner loading-xs"></span>
-          Load more
+      <div v-if="detail.kind === 'artist'" role="tablist" class="tabs tabs-border mb-3" aria-label="Artist details">
+        <button
+          role="tab"
+          class="tab"
+          :class="{ 'tab-active': artistDetailTab === 'topTracks' }"
+          :aria-selected="artistDetailTab === 'topTracks'"
+          data-online-artist-tab="top-tracks"
+          type="button"
+          @click="selectArtistDetailTab('topTracks')"
+        >
+          Top tracks
         </button>
+        <button
+          role="tab"
+          class="tab"
+          :class="{ 'tab-active': artistDetailTab === 'albums' }"
+          :aria-selected="artistDetailTab === 'albums'"
+          data-online-artist-tab="albums"
+          type="button"
+          @click="selectArtistDetailTab('albums')"
+        >
+          All albums
+        </button>
+        <button
+          role="tab"
+          class="tab"
+          :class="{ 'tab-active': artistDetailTab === 'biography' }"
+          :aria-selected="artistDetailTab === 'biography'"
+          data-online-artist-tab="biography"
+          type="button"
+          @click="selectArtistDetailTab('biography')"
+        >
+          Artist bio
+        </button>
+      </div>
+
+      <template v-if="isArtistTopTracksTab">
+        <div v-if="detailLoading" class="space-y-2">
+          <div v-for="index in 7" :key="index" class="skeleton h-11 w-full"></div>
+        </div>
+        <OnlineTrackTable
+          v-else
+          :tracks="detailTracks"
+          :active-track="activeOnlineTrack"
+          :is-playing="isPlaying"
+          :track-action-id="trackActionId"
+          :supports-library-actions="supportsLibraryActions"
+          :supports-playlist-selection="supportsPlaylistSelection"
+          :is-favorite="isTrackFavorite"
+          @play="playTrack($event, detailTracks)"
+          @download="downloadTrack"
+          @download-selection="downloadTracks"
+          @favorite="addToFavorites"
+          @add-to-playlist="openPlaylistPicker"
+          @add-selection-to-playlist="openPlaylistPicker"
+        />
+        <div v-if="detailHasMore" class="flex justify-center py-4">
+          <button class="btn btn-sm" type="button" :disabled="detailLoadingMore" @click="loadMoreDetail">
+            <span v-if="detailLoadingMore" class="loading loading-spinner loading-xs"></span>
+            Load more
+          </button>
+        </div>
+      </template>
+
+      <div v-else-if="artistDetailTab === 'albums'" data-online-artist-albums>
+        <div v-if="artistAlbumsLoading" class="space-y-2">
+          <div v-for="index in 6" :key="index" class="skeleton h-14 w-full"></div>
+        </div>
+        <div
+          v-else-if="artistAlbumsError && !artistAlbums.length"
+          class="flex min-h-24 items-center justify-between gap-3 text-sm text-base-content/60"
+        >
+          <span>{{ artistAlbumsError }}</span>
+          <button class="btn btn-sm" type="button" @click="loadArtistAlbums()">
+            <RefreshCw :size="15" aria-hidden="true" />
+            Retry
+          </button>
+        </div>
+        <div v-else>
+          <div v-if="!artistAlbums.length" class="flex min-h-20 items-center text-sm text-base-content/50">
+            No albums found
+          </div>
+          <ul v-else class="list divide-y divide-base-300">
+            <li v-for="album in artistAlbums" :key="album.key">
+              <button
+                class="list-row w-full px-0 py-2 text-left hover:bg-base-200/60"
+                type="button"
+                :aria-label="`Open album ${album.title}`"
+                :data-online-artist-album="album.key"
+                @click="openArtistAlbum(album)"
+              >
+                <div class="flex size-11 items-center justify-center overflow-hidden rounded bg-base-200">
+                  <img v-if="album.coverUrl" :src="album.coverUrl" class="size-full object-cover" alt="" />
+                  <Disc3 v-else :size="19" aria-hidden="true" />
+                </div>
+                <div class="min-w-0">
+                  <div class="truncate text-sm font-medium">{{ album.title }}</div>
+                  <div class="truncate text-xs text-base-content/55">
+                    {{ [album.artist, album.releaseYear].filter(Boolean).join(' · ') }}
+                  </div>
+                </div>
+                <span v-if="album.trackCount !== null" class="text-xs tabular-nums text-base-content/45">
+                  {{ album.trackCount }}
+                </span>
+                <ChevronRight :size="16" class="text-base-content/45" aria-hidden="true" />
+              </button>
+            </li>
+          </ul>
+          <div v-if="artistAlbumsError" role="alert" class="alert alert-error mt-3 py-2">
+            <AlertCircle :size="17" aria-hidden="true" />
+            <span class="min-w-0 flex-1 text-sm">{{ artistAlbumsError }}</span>
+            <button class="btn btn-sm" type="button" @click="loadArtistAlbums(true)">
+              <RefreshCw :size="15" aria-hidden="true" />
+              Retry
+            </button>
+          </div>
+          <div v-if="artistAlbumsHasMore" class="flex justify-center py-4">
+            <button class="btn btn-sm" type="button" :disabled="artistAlbumsLoadingMore" @click="loadArtistAlbums(true)">
+              <span v-if="artistAlbumsLoadingMore" class="loading loading-spinner loading-xs"></span>
+              Load more
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div v-else data-online-artist-biography>
+        <div v-if="artistBiographyLoading" class="space-y-3">
+          <div class="skeleton h-5 w-2/5"></div>
+          <div v-for="index in 4" :key="index" class="skeleton h-4 w-full"></div>
+        </div>
+        <div
+          v-else-if="artistBiographyError"
+          class="flex min-h-24 items-center justify-between gap-3 text-sm text-base-content/60"
+        >
+          <span>{{ artistBiographyError }}</span>
+          <button class="btn btn-sm" type="button" @click="loadArtistBiography()">
+            <RefreshCw :size="15" aria-hidden="true" />
+            Retry
+          </button>
+        </div>
+        <div
+          v-else-if="!artistBiography?.summary && !artistBiography?.sections.length"
+          class="flex min-h-20 items-center text-sm text-base-content/50"
+        >
+          No artist biography found
+        </div>
+        <div v-else class="space-y-5">
+          <p v-if="artistBiography?.summary" class="whitespace-pre-line text-sm leading-6 text-base-content/75">
+            {{ artistBiography.summary }}
+          </p>
+          <section v-for="section in artistBiography?.sections" :key="`${section.title}:${section.text}`" class="space-y-1">
+            <h3 class="text-sm font-semibold">{{ section.title }}</h3>
+            <p class="whitespace-pre-line text-sm leading-6 text-base-content/75">{{ section.text }}</p>
+          </section>
+          <p class="text-xs text-base-content/45">{{ artistBiography?.sourceName }}</p>
+        </div>
       </div>
     </div>
 

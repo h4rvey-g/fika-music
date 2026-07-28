@@ -5,7 +5,9 @@ import type {
   AudioSourceRecord,
   MusicRecommendationKind,
   OnlineAlbum,
+  OnlineAlbumPage,
   OnlineArtist,
+  OnlineArtistBiography,
   OnlineChannel,
   OnlineDownloadProgressEvent,
   OnlineDownloadTask,
@@ -34,7 +36,9 @@ import { cancelSourceRequest } from "./plugin-api";
 export type {
   MusicRecommendationKind,
   OnlineAlbum,
+  OnlineAlbumPage,
   OnlineArtist,
+  OnlineArtistBiography,
   OnlineChannel,
   OnlineDownloadProgressEvent,
   OnlineDownloadTask,
@@ -267,6 +271,27 @@ export function getOnlineMusicSearchPage(
 
 export function getOnlineArtistTracks(artist: OnlineArtist, requestId?: string) {
   return invoke<OnlineTrackPage>(TAURI_COMMANDS.onlineMusicArtistTracks, {
+    artist,
+    requestId,
+  });
+}
+
+export function getOnlineArtistAlbums(
+  artist: OnlineArtist,
+  page: number,
+  pageSize = 50,
+  requestId?: string,
+) {
+  return invoke<OnlineAlbumPage>(TAURI_COMMANDS.onlineMusicArtistAlbums, {
+    artist,
+    page,
+    pageSize,
+    requestId,
+  });
+}
+
+export function getOnlineArtistBiography(artist: OnlineArtist, requestId?: string) {
+  return invoke<OnlineArtistBiography>(TAURI_COMMANDS.onlineMusicArtistBiography, {
     artist,
     requestId,
   });

@@ -104,7 +104,13 @@ export type OnlineAlbum = { key: string, title: string, artist: string, releaseY
 
 export type OnlineAlbumCandidate = { channelId: string, pluginId: string, sourceId: string, channelName: string, id: string, title: string, artist: string, releaseYear: number | null, coverUrl: string | null, trackCount: number | null, platformIds: Record<string, string | number>, rawInfo: Record<string, unknown>, rank: number, };
 
+export type OnlineAlbumPage = { items: Array<OnlineAlbum>, hasMore: boolean, total: number | null, };
+
 export type OnlineArtist = { key: string, name: string, coverUrl: string | null, candidates: Array<OnlineArtistCandidate>, };
+
+export type OnlineArtistBiography = { summary: string | null, sections: Array<OnlineArtistBiographySection>, sourceName: string, };
+
+export type OnlineArtistBiographySection = { title: string, text: string, };
 
 export type OnlineArtistCandidate = { channelId: string, pluginId: string, sourceId: string, channelName: string, id: string, name: string, coverUrl: string | null, platformIds: Record<string, string | number>, rawInfo: Record<string, unknown>, rank: number, };
 
@@ -174,11 +180,15 @@ export type ScanProgressEvent = { status: ScanStatus, message: string | null, };
 
 export type ScanStatus = { isRunning: boolean, folderPath: string | null, discoveredFiles: number, scannedFiles: number, indexedTracks: number, skippedFiles: number, errorCount: number, lastError: string | null, startedAt: number | null, finishedAt: number | null, };
 
-export type SourceAction = "musicSearch" | "artistSearch" | "albumSearch" | "playlistSearch" | "searchSuggestions" | "artistTopTracks" | "albumRead" | "playlistReadPublic" | "musicUrl" | "lyric" | "pic" | "musicRecommendations" | "playlistList" | "playlistRead" | "playlistAddTrack" | "playlistRemoveTrack";
+export type SourceAction = "musicSearch" | "artistSearch" | "albumSearch" | "playlistSearch" | "searchSuggestions" | "artistTopTracks" | "artistAlbums" | "artistBiography" | "albumRead" | "playlistReadPublic" | "musicUrl" | "lyric" | "pic" | "musicRecommendations" | "playlistList" | "playlistRead" | "playlistAddTrack" | "playlistRemoveTrack";
 
 export type SourceAlbumSearchResponse = { isEnd: boolean, total: number | null, list: Array<SourceAlbumSearchResult>, };
 
 export type SourceAlbumSearchResult = { id: string, source: string, title: string, artist: string, releaseYear: number | null, coverUrl: string | null, trackCount: number | null, platformIds: Record<string, string | number>, rawInfo: Record<string, unknown>, };
+
+export type SourceArtistBiography = { summary: string | null, sections: Array<SourceArtistBiographySection>, };
+
+export type SourceArtistBiographySection = { title: string, text: string, };
 
 export type SourceArtistSearchResponse = { isEnd: boolean, total: number | null, list: Array<SourceArtistSearchResult>, };
 
@@ -210,11 +220,11 @@ export type SourceQuality = "128k" | "320k" | "flac" | "flac24bit";
 
 export type SourceRecommendationsResponse = { list: Array<SourceSearchResult>, };
 
-export type SourceRequest = { "action": "musicSearch", source: string, keyword: string, page: number, pageSize: number, } | { "action": "artistSearch", source: string, keyword: string, page: number, pageSize: number, } | { "action": "albumSearch", source: string, keyword: string, page: number, pageSize: number, } | { "action": "playlistSearch", source: string, keyword: string, page: number, pageSize: number, } | { "action": "searchSuggestions", source: string, keyword: string, limit: number, } | { "action": "artistTopTracks", source: string, artist: SourceEntityRef, limit: number, } | { "action": "albumRead", source: string, album: SourceEntityRef, page: number, pageSize: number, } | { "action": "playlistReadPublic", source: string, playlist: SourceEntityRef, page: number, pageSize: number, } | { "action": "musicUrl", source: string, musicInfo: Record<string, unknown>, quality: SourceQuality, } | { "action": "lyric", source: string, musicInfo: Record<string, unknown>, } | { "action": "pic", source: string, musicInfo: Record<string, unknown>, } | { "action": "musicRecommendations", source: string, accountRef: string, kind: MusicRecommendationKind, limit: number, } | { "action": "playlistList", source: string, accountRef: string, } | { "action": "playlistRead", source: string, accountRef: string, playlistId: string, } | { "action": "playlistAddTrack", source: string, accountRef: string, playlistId: string, track: SourceTrackRef, } | { "action": "playlistRemoveTrack", source: string, accountRef: string, playlistId: string, track: SourceTrackRef, };
+export type SourceRequest = { "action": "musicSearch", source: string, keyword: string, page: number, pageSize: number, } | { "action": "artistSearch", source: string, keyword: string, page: number, pageSize: number, } | { "action": "albumSearch", source: string, keyword: string, page: number, pageSize: number, } | { "action": "playlistSearch", source: string, keyword: string, page: number, pageSize: number, } | { "action": "searchSuggestions", source: string, keyword: string, limit: number, } | { "action": "artistTopTracks", source: string, artist: SourceEntityRef, limit: number, } | { "action": "artistAlbums", source: string, artist: SourceEntityRef, page: number, pageSize: number, } | { "action": "artistBiography", source: string, artist: SourceEntityRef, } | { "action": "albumRead", source: string, album: SourceEntityRef, page: number, pageSize: number, } | { "action": "playlistReadPublic", source: string, playlist: SourceEntityRef, page: number, pageSize: number, } | { "action": "musicUrl", source: string, musicInfo: Record<string, unknown>, quality: SourceQuality, } | { "action": "lyric", source: string, musicInfo: Record<string, unknown>, } | { "action": "pic", source: string, musicInfo: Record<string, unknown>, } | { "action": "musicRecommendations", source: string, accountRef: string, kind: MusicRecommendationKind, limit: number, } | { "action": "playlistList", source: string, accountRef: string, } | { "action": "playlistRead", source: string, accountRef: string, playlistId: string, } | { "action": "playlistAddTrack", source: string, accountRef: string, playlistId: string, track: SourceTrackRef, } | { "action": "playlistRemoveTrack", source: string, accountRef: string, playlistId: string, track: SourceTrackRef, };
 
 export type SourceRequestOutcome = { response: SourceResponse, diagnostics: Array<SourceDiagnostic>, };
 
-export type SourceResponse = { "action": "musicSearch", "data": SourceSearchResponse } | { "action": "artistSearch", "data": SourceArtistSearchResponse } | { "action": "albumSearch", "data": SourceAlbumSearchResponse } | { "action": "playlistSearch", "data": SourcePlaylistSearchResponse } | { "action": "searchSuggestions", "data": SourceSuggestionsResponse } | { "action": "artistTopTracks", "data": SourceSearchResponse } | { "action": "albumRead", "data": SourceSearchResponse } | { "action": "playlistReadPublic", "data": SourceSearchResponse } | { "action": "musicUrl", "data": string } | { "action": "lyric", "data": LyricResponse } | { "action": "pic", "data": string } | { "action": "musicRecommendations", "data": SourceRecommendationsResponse } | { "action": "playlistList", "data": Array<SourcePlaylist> } | { "action": "playlistRead", "data": SourcePlaylistDetail } | { "action": "playlistAddTrack", "data": SourcePlaylistMutation } | { "action": "playlistRemoveTrack", "data": SourcePlaylistMutation };
+export type SourceResponse = { "action": "musicSearch", "data": SourceSearchResponse } | { "action": "artistSearch", "data": SourceArtistSearchResponse } | { "action": "albumSearch", "data": SourceAlbumSearchResponse } | { "action": "playlistSearch", "data": SourcePlaylistSearchResponse } | { "action": "searchSuggestions", "data": SourceSuggestionsResponse } | { "action": "artistTopTracks", "data": SourceSearchResponse } | { "action": "artistAlbums", "data": SourceAlbumSearchResponse } | { "action": "artistBiography", "data": SourceArtistBiography } | { "action": "albumRead", "data": SourceSearchResponse } | { "action": "playlistReadPublic", "data": SourceSearchResponse } | { "action": "musicUrl", "data": string } | { "action": "lyric", "data": LyricResponse } | { "action": "pic", "data": string } | { "action": "musicRecommendations", "data": SourceRecommendationsResponse } | { "action": "playlistList", "data": Array<SourcePlaylist> } | { "action": "playlistRead", "data": SourcePlaylistDetail } | { "action": "playlistAddTrack", "data": SourcePlaylistMutation } | { "action": "playlistRemoveTrack", "data": SourcePlaylistMutation };
 
 export type SourceRuntimeApiVersion = { major: number, minor: number, };
 
@@ -265,6 +275,8 @@ export const TAURI_COMMANDS = {
   startOnlineMusicSearch: "start_online_music_search",
   onlineMusicSearchPage: "online_music_search_page",
   onlineMusicArtistTracks: "online_music_artist_tracks",
+  onlineMusicArtistAlbums: "online_music_artist_albums",
+  onlineMusicArtistBiography: "online_music_artist_biography",
   onlineMusicAlbumTracks: "online_music_album_tracks",
   onlineMusicPlaylistTracks: "online_music_playlist_tracks",
   clearOnlineSearchHistory: "clear_online_search_history",

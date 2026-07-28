@@ -1,12 +1,13 @@
 use crate::database::AppCredentialStore;
 use crate::source_runtime::{
     self, JsonScalar, MusicRecommendationKind, RemoteTrack, SourceAction,
-    SourceAlbumSearchResponse, SourceAlbumSearchResult, SourceArtistSearchResponse,
-    SourceArtistSearchResult, SourceCapability, SourceEntityRef, SourceInfo, SourcePlaylist,
-    SourcePlaylistDetail, SourcePlaylistMutation, SourcePlaylistMutationKind,
-    SourcePlaylistSearchResponse, SourcePlaylistSearchResult, SourceProvider, SourceQuality,
-    SourceRecommendationsResponse, SourceRequest, SourceResponse, SourceRuntimeContext,
-    SourceRuntimeError, SourceSearchResponse, SourceSuggestionsResponse, SourceTrackRef,
+    SourceAlbumSearchResponse, SourceAlbumSearchResult, SourceArtistBiography,
+    SourceArtistBiographySection, SourceArtistSearchResponse, SourceArtistSearchResult,
+    SourceCapability, SourceEntityRef, SourceInfo, SourcePlaylist, SourcePlaylistDetail,
+    SourcePlaylistMutation, SourcePlaylistMutationKind, SourcePlaylistSearchResponse,
+    SourcePlaylistSearchResult, SourceProvider, SourceQuality, SourceRecommendationsResponse,
+    SourceRequest, SourceResponse, SourceRuntimeContext, SourceRuntimeError, SourceSearchResponse,
+    SourceSuggestionsResponse, SourceTrackRef,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
@@ -220,6 +221,18 @@ pub trait NeteaseProviderBridge: Send + Sync {
         artist: &SourceEntityRef,
         limit: u64,
     ) -> Result<SourceSearchResponse, NeteaseBridgeError>;
+
+    fn artist_albums(
+        &self,
+        artist: &SourceEntityRef,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceAlbumSearchResponse, NeteaseBridgeError>;
+
+    fn artist_biography(
+        &self,
+        artist: &SourceEntityRef,
+    ) -> Result<SourceArtistBiography, NeteaseBridgeError>;
 
     fn album_tracks(
         &self,
@@ -902,6 +915,39 @@ impl NeteaseProviderBridge for NeteaseServiceBridge {
         })
     }
 
+    fn artist_albums(
+        &self,
+        artist: &SourceEntityRef,
+        page: u64,
+        page_size: u64,
+    ) -> Result<SourceAlbumSearchResponse, NeteaseBridgeError> {
+        validate_netease_track_id(&artist.id)?;
+        let offset = page.saturating_sub(1).saturating_mul(page_size);
+        let body = new_client()?
+            .raw_weapi(
+                &format!("https://music.163.com/weapi/artist/albums/{}", artist.id),
+                json!({ "limit": page_size, "offset": offset, "total": true }),
+            )
+            .map_err(|error| bridge_failure("read artist albums", error))
+            .and_then(|response| checked_body(response, "read artist albums"))?;
+        Ok(netease_artist_albums_from_json(&body, page, page_size))
+    }
+
+    fn artist_biography(
+        &self,
+        artist: &SourceEntityRef,
+    ) -> Result<SourceArtistBiography, NeteaseBridgeError> {
+        validate_netease_track_id(&artist.id)?;
+        let body = new_client()?
+            .raw_weapi(
+                "https://music.163.com/weapi/artist/introduction",
+                json!({ "id": artist.id }),
+            )
+            .map_err(|error| bridge_failure("read artist biography", error))
+            .and_then(|response| checked_body(response, "read artist biography"))?;
+        Ok(netease_artist_biography_from_json(&body))
+    }
+
     fn album_tracks(
         &self,
         album: &SourceEntityRef,
@@ -1488,6 +1534,54 @@ fn netease_album_from_json(value: &JsonValue) -> Option<SourceAlbumSearchResult>
     })
 }
 
+fn netease_artist_albums_from_json(
+    body: &JsonValue,
+    page: u64,
+    page_size: u64,
+) -> SourceAlbumSearchResponse {
+    let list = body
+        .get("hotAlbums")
+        .or_else(|| body.get("albums"))
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(netease_album_from_json)
+        .collect::<Vec<_>>();
+    let total = body
+        .pointer("/artist/albumSize")
+        .or_else(|| body.get("total"))
+        .and_then(JsonValue::as_u64);
+    let is_end = body
+        .get("more")
+        .and_then(JsonValue::as_bool)
+        .map(|more| !more)
+        .or_else(|| total.map(|total| page.saturating_mul(page_size) >= total))
+        .unwrap_or(list.len() < page_size as usize);
+    SourceAlbumSearchResponse {
+        is_end,
+        total,
+        list,
+    }
+}
+
+fn netease_artist_biography_from_json(body: &JsonValue) -> SourceArtistBiography {
+    let summary = json_string(body.get("briefDesc")).map(|text| text.trim().to_owned());
+    let sections = body
+        .get("introduction")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|section| {
+            let text = json_string(section.get("txt"))?.trim().to_owned();
+            let title = json_string(section.get("ti"))
+                .map(|title| title.trim().to_owned())
+                .unwrap_or_else(|| "Biography".to_owned());
+            Some(SourceArtistBiographySection { title, text })
+        })
+        .collect();
+    SourceArtistBiography { summary, sections }
+}
+
 fn system_time_year(time: SystemTime) -> Option<u32> {
     let seconds = time.duration_since(UNIX_EPOCH).ok()?.as_secs();
     let days = seconds / 86_400;
@@ -1574,6 +1668,8 @@ impl SourceProvider for NeteaseSourceProvider {
                     SourceAction::PlaylistSearch,
                     SourceAction::SearchSuggestions,
                     SourceAction::ArtistTopTracks,
+                    SourceAction::ArtistAlbums,
+                    SourceAction::ArtistBiography,
                     SourceAction::AlbumRead,
                     SourceAction::PlaylistReadPublic,
                     SourceAction::MusicUrl,
@@ -1673,6 +1769,27 @@ impl SourceProvider for NeteaseSourceProvider {
                     self.bridge.artist_top_tracks(&artist, limit),
                 )
                 .map(SourceResponse::ArtistTopTracks)
+            }
+            SourceRequest::ArtistAlbums {
+                artist,
+                page,
+                page_size,
+                ..
+            } => {
+                let operation = "read NetEase artist albums";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(
+                    context,
+                    operation,
+                    self.bridge.artist_albums(&artist, page, page_size),
+                )
+                .map(SourceResponse::ArtistAlbums)
+            }
+            SourceRequest::ArtistBiography { artist, .. } => {
+                let operation = "read NetEase artist biography";
+                Self::prepare_bridge(context, operation)?;
+                Self::finish(context, operation, self.bridge.artist_biography(&artist))
+                    .map(SourceResponse::ArtistBiography)
             }
             SourceRequest::AlbumRead {
                 album,
@@ -2432,6 +2549,25 @@ mod tests {
             self.music_search("", 1, 1)
         }
 
+        fn artist_albums(
+            &self,
+            _artist: &SourceEntityRef,
+            _page: u64,
+            _page_size: u64,
+        ) -> Result<SourceAlbumSearchResponse, NeteaseBridgeError> {
+            self.album_search("", 1, 1)
+        }
+
+        fn artist_biography(
+            &self,
+            _artist: &SourceEntityRef,
+        ) -> Result<SourceArtistBiography, NeteaseBridgeError> {
+            Ok(SourceArtistBiography {
+                summary: None,
+                sections: Vec::new(),
+            })
+        }
+
         fn album_tracks(
             &self,
             _album: &SourceEntityRef,
@@ -2633,7 +2769,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_should_expose_only_the_slice_four_source_actions() {
+    fn provider_should_expose_supported_source_actions() {
         let capabilities = provider_capabilities();
         let runtime = SourceRuntime::new();
         let provider = NeteaseSourceProvider::new(
@@ -2655,6 +2791,8 @@ mod tests {
                 SourceAction::PlaylistSearch,
                 SourceAction::SearchSuggestions,
                 SourceAction::ArtistTopTracks,
+                SourceAction::ArtistAlbums,
+                SourceAction::ArtistBiography,
                 SourceAction::AlbumRead,
                 SourceAction::PlaylistReadPublic,
                 SourceAction::MusicUrl,
@@ -2664,6 +2802,56 @@ mod tests {
                 SourceAction::PlaylistAddTrack,
                 SourceAction::PlaylistRemoveTrack,
             ]
+        );
+    }
+
+    #[test]
+    fn artist_albums_parser_should_normalize_page_and_album_metadata() {
+        let response = netease_artist_albums_from_json(
+            &json!({
+                "artist": { "albumSize": 2 },
+                "hotAlbums": [{
+                    "id": 10,
+                    "name": "First Album",
+                    "artists": [{ "name": "Test Artist" }],
+                    "picUrl": "http://cdn.test/album.jpg",
+                    "publishTime": 1_577_836_800_000_u64,
+                    "size": 12
+                }],
+                "more": true
+            }),
+            1,
+            1,
+        );
+
+        assert_eq!(
+            (
+                response.is_end,
+                response.total,
+                response.list[0].title.as_str(),
+                response.list[0].release_year,
+                response.list[0].track_count,
+            ),
+            (false, Some(2), "First Album", Some(2020), Some(12))
+        );
+    }
+
+    #[test]
+    fn artist_biography_parser_should_preserve_summary_and_sections() {
+        let biography = netease_artist_biography_from_json(&json!({
+            "briefDesc": " Test summary ",
+            "introduction": [{ "ti": "Early life", "txt": " First chapter " }]
+        }));
+
+        assert_eq!(
+            biography,
+            SourceArtistBiography {
+                summary: Some("Test summary".to_owned()),
+                sections: vec![SourceArtistBiographySection {
+                    title: "Early life".to_owned(),
+                    text: "First chapter".to_owned(),
+                }],
+            }
         );
     }
 

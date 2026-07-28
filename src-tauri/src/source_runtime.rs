@@ -30,7 +30,7 @@ pub const LX_SOURCE_WY: &str = "wy";
 pub const LX_SOURCE_MG: &str = "mg";
 pub const LX_SOURCE_LOCAL: &str = "local";
 
-pub const SOURCE_RUNTIME_API_VERSION: SourceRuntimeApiVersion = SourceRuntimeApiVersion::new(1, 3);
+pub const SOURCE_RUNTIME_API_VERSION: SourceRuntimeApiVersion = SourceRuntimeApiVersion::new(1, 4);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
@@ -122,6 +122,8 @@ pub enum SourceAction {
     PlaylistSearch,
     SearchSuggestions,
     ArtistTopTracks,
+    ArtistAlbums,
+    ArtistBiography,
     AlbumRead,
     PlaylistReadPublic,
     MusicUrl,
@@ -256,6 +258,17 @@ pub enum SourceRequest {
         artist: SourceEntityRef,
         limit: u64,
     },
+    ArtistAlbums {
+        source: String,
+        artist: SourceEntityRef,
+        page: u64,
+        #[serde(rename = "pageSize")]
+        page_size: u64,
+    },
+    ArtistBiography {
+        source: String,
+        artist: SourceEntityRef,
+    },
     AlbumRead {
         source: String,
         album: SourceEntityRef,
@@ -337,6 +350,8 @@ impl SourceRequest {
             | Self::PlaylistSearch { source, .. }
             | Self::SearchSuggestions { source, .. }
             | Self::ArtistTopTracks { source, .. }
+            | Self::ArtistAlbums { source, .. }
+            | Self::ArtistBiography { source, .. }
             | Self::AlbumRead { source, .. }
             | Self::PlaylistReadPublic { source, .. }
             | Self::MusicUrl { source, .. }
@@ -358,6 +373,8 @@ impl SourceRequest {
             Self::PlaylistSearch { .. } => SourceAction::PlaylistSearch,
             Self::SearchSuggestions { .. } => SourceAction::SearchSuggestions,
             Self::ArtistTopTracks { .. } => SourceAction::ArtistTopTracks,
+            Self::ArtistAlbums { .. } => SourceAction::ArtistAlbums,
+            Self::ArtistBiography { .. } => SourceAction::ArtistBiography,
             Self::AlbumRead { .. } => SourceAction::AlbumRead,
             Self::PlaylistReadPublic { .. } => SourceAction::PlaylistReadPublic,
             Self::MusicUrl { .. } => SourceAction::MusicUrl,
@@ -432,6 +449,16 @@ impl SourceRequest {
                     return Err("artistTopTracks limit must be between 1 and 50".to_owned());
                 }
             }
+            Self::ArtistAlbums {
+                artist,
+                page,
+                page_size,
+                ..
+            } => {
+                artist.validate("artist")?;
+                validate_detail_page(*page, *page_size, "artistAlbums")?;
+            }
+            Self::ArtistBiography { artist, .. } => artist.validate("artist")?,
             Self::AlbumRead {
                 album,
                 page,
@@ -690,6 +717,22 @@ pub struct SourceArtistSearchResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "bindings.ts")]
+pub struct SourceArtistBiographySection {
+    pub title: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct SourceArtistBiography {
+    pub summary: Option<String>,
+    pub sections: Vec<SourceArtistBiographySection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
 pub struct SourceAlbumSearchResult {
     pub id: String,
     pub source: String,
@@ -814,6 +857,8 @@ pub enum SourceResponse {
     PlaylistSearch(SourcePlaylistSearchResponse),
     SearchSuggestions(SourceSuggestionsResponse),
     ArtistTopTracks(SourceSearchResponse),
+    ArtistAlbums(SourceAlbumSearchResponse),
+    ArtistBiography(SourceArtistBiography),
     AlbumRead(SourceSearchResponse),
     PlaylistReadPublic(SourceSearchResponse),
     MusicUrl(String),
@@ -2488,6 +2533,11 @@ fn validate_response(
                 SourceAction::ArtistTopTracks,
                 SourceResponse::ArtistTopTracks(_)
             )
+            | (SourceAction::ArtistAlbums, SourceResponse::ArtistAlbums(_))
+            | (
+                SourceAction::ArtistBiography,
+                SourceResponse::ArtistBiography(_)
+            )
             | (SourceAction::AlbumRead, SourceResponse::AlbumRead(_))
             | (
                 SourceAction::PlaylistReadPublic,
@@ -2566,6 +2616,30 @@ fn validate_response(
         }
         SourceResponse::ArtistTopTracks(search) => {
             validate_track_page(source_key, search, "artistTopTracks", context)?;
+        }
+        SourceResponse::ArtistAlbums(search) => {
+            if search.list.iter().any(|item| {
+                item.source != source_key
+                    || item.id.trim().is_empty()
+                    || item.title.trim().is_empty()
+                    || item.artist.trim().is_empty()
+                    || validate_platform_ids(&item.platform_ids).is_err()
+                    || !item.raw_info.is_object()
+            }) {
+                return Err(context.provider_error("artistAlbums returned an invalid entity"));
+            }
+        }
+        SourceResponse::ArtistBiography(biography) => {
+            if biography
+                .summary
+                .as_ref()
+                .is_some_and(|summary| summary.trim().is_empty())
+                || biography.sections.iter().any(|section| {
+                    section.title.trim().is_empty() || section.text.trim().is_empty()
+                })
+            {
+                return Err(context.provider_error("artistBiography returned invalid text"));
+            }
         }
         SourceResponse::AlbumRead(search) => {
             validate_track_page(source_key, search, "albumRead", context)?;
