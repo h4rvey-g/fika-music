@@ -1376,15 +1376,19 @@ function syncPlaybackTimeline() {
   playbackDuration.value = Number.isFinite(audio.duration) ? audio.duration : 0;
 }
 
-function seekPlayback(event: Event) {
+function seekPlaybackTo(position: number) {
   const audio = audioElement.value;
-  if (!audio || playbackDuration.value <= 0) {
+  if (!audio || playbackDuration.value <= 0 || !Number.isFinite(position)) {
     return;
   }
 
-  const nextPosition = Number((event.currentTarget as HTMLInputElement).value);
+  const nextPosition = Math.min(playbackDuration.value, Math.max(0, position));
   audio.currentTime = nextPosition;
   playbackPosition.value = nextPosition;
+}
+
+function seekPlayback(event: Event) {
+  seekPlaybackTo(Number((event.currentTarget as HTMLInputElement).value));
 }
 
 function onAudioError() {
@@ -1579,6 +1583,7 @@ function trackSubtitle(track: LocalTrack) {
             :playback-position="playbackPosition"
             :can-retry="Boolean(activeTrack || activeRemoteLyricsQuery)"
             @retry-lyrics="retryLyrics"
+            @seek-playback="seekPlaybackTo"
           />
 
         </aside>
@@ -1653,6 +1658,7 @@ function trackSubtitle(track: LocalTrack) {
               :playback-position="playbackPosition"
               :can-retry="Boolean(activeTrack || activeRemoteLyricsQuery)"
               @retry-lyrics="retryLyrics"
+              @seek-playback="seekPlaybackTo"
             />
           </div>
         </section>
@@ -1703,6 +1709,7 @@ function trackSubtitle(track: LocalTrack) {
             :playback-position="playbackPosition"
             :can-retry="Boolean(activeTrack || activeRemoteLyricsQuery)"
             @retry-lyrics="retryLyrics"
+            @seek-playback="seekPlaybackTo"
           />
         </section>
 

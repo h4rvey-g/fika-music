@@ -8,6 +8,7 @@ import {
   ChevronRight,
   Disc3,
   Download,
+  History,
   House,
   ListPlus,
   ListMusic,
@@ -568,20 +569,49 @@ function newRecommendationPreviewStates(): Record<
 
 function onQueryInput() {
   globalError.value = null;
-  suggestionsOpen.value = query.value.trim().length >= 2;
-  if (suggestionTimer !== null) window.clearTimeout(suggestionTimer);
-  if (suggestionRequestId) void cancelSourceRequest(suggestionRequestId);
-  const generation = ++suggestionGeneration;
   const keyword = query.value.trim();
-  if (keyword.length < 2) {
-    suggestions.value = [];
-    suggestionLoading.value = false;
+  if (keyword.length !== 1) {
+    requestSuggestions(keyword, keyword ? 300 : 0);
     return;
   }
+
+  suggestionsOpen.value = false;
+  if (suggestionTimer !== null) window.clearTimeout(suggestionTimer);
+  if (suggestionRequestId) void cancelSourceRequest(suggestionRequestId);
+  suggestionTimer = null;
+  suggestionRequestId = null;
+  suggestionGeneration += 1;
+  suggestions.value = [];
+  suggestionLoading.value = false;
+}
+
+function openSuggestions() {
+  const keyword = query.value.trim();
+  if (!keyword) {
+    suggestionsOpen.value = true;
+    if (!suggestionLoading.value && !suggestions.value.length) {
+      requestSuggestions(keyword);
+    }
+    return;
+  }
+  suggestionsOpen.value = keyword.length >= 2;
+}
+
+function requestSuggestions(keyword: string, delayMs = 0) {
+  if (suggestionTimer !== null) window.clearTimeout(suggestionTimer);
+  if (suggestionRequestId) void cancelSourceRequest(suggestionRequestId);
+  suggestionTimer = null;
+  suggestionRequestId = null;
+  const generation = ++suggestionGeneration;
+  suggestionsOpen.value = true;
   suggestionLoading.value = true;
-  suggestionTimer = window.setTimeout(async () => {
-    const requestId = `online-suggest-${Date.now()}-${generation}`;
-    suggestionRequestId = requestId;
+
+  const load = async () => {
+    suggestionTimer = null;
+    const requestId = keyword
+      ? `online-suggest-${Date.now()}-${generation}`
+      : undefined;
+    suggestionRequestId = requestId ?? null;
     try {
       const result = await getOnlineMusicSuggestions(keyword, requestId);
       if (generation === suggestionGeneration) suggestions.value = result.suggestions;
@@ -589,9 +619,15 @@ function onQueryInput() {
       if (generation === suggestionGeneration) suggestions.value = [];
     } finally {
       if (generation === suggestionGeneration) suggestionLoading.value = false;
-      if (suggestionRequestId === requestId) suggestionRequestId = null;
+      if (requestId && suggestionRequestId === requestId) suggestionRequestId = null;
     }
-  }, 300);
+  };
+
+  if (delayMs) {
+    suggestionTimer = window.setTimeout(() => void load(), delayMs);
+  } else {
+    void load();
+  }
 }
 
 function recommendationCoverUrl(kind: MusicRecommendationKind) {
@@ -2049,7 +2085,8 @@ defineExpose({
               placeholder="Search songs, artists, albums, and playlists"
               aria-label="Search Online Music"
               @input="onQueryInput"
-              @focus="suggestionsOpen = query.trim().length >= 2"
+              @focus="openSuggestions"
+              @click="openSuggestions"
             />
           </label>
           <button class="btn btn-primary btn-sm join-item" type="submit" :disabled="!query.trim()">
@@ -2064,12 +2101,17 @@ defineExpose({
         >
           <div v-if="suggestionLoading" class="flex h-10 items-center gap-2 px-3 text-xs text-base-content/60">
             <span class="loading loading-spinner loading-xs"></span>
-            Loading suggestions
+            {{ query.trim() ? "Loading suggestions" : "Loading search history" }}
           </div>
-          <ul v-else class="menu menu-sm w-full p-1">
+          <ul
+            v-else
+            class="menu menu-sm w-full p-1"
+            :aria-label="query.trim() ? 'Search suggestions' : 'Search history'"
+          >
             <li v-for="suggestion in suggestions" :key="suggestion">
               <button type="button" @mousedown.prevent="submitSearch(suggestion)">
-                <Search :size="14" aria-hidden="true" />
+                <History v-if="!query.trim()" :size="14" aria-hidden="true" />
+                <Search v-else :size="14" aria-hidden="true" />
                 <span class="truncate">{{ suggestion }}</span>
               </button>
             </li>

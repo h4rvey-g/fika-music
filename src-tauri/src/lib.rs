@@ -2200,6 +2200,23 @@ async fn online_music_suggestions(
     request_id: Option<String>,
 ) -> CommandResult<online_music::OnlineSuggestionsResult> {
     let keyword = keyword.trim().to_owned();
+    if keyword.is_empty() {
+        let suggestions = {
+            let db = state
+                .db
+                .lock()
+                .map_err(|_| "database lock was poisoned".to_owned())?;
+            online_music::search_history(&db)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|entry| entry.query)
+                .collect()
+        };
+        return Ok(online_music::OnlineSuggestionsResult {
+            suggestions,
+            failures: Vec::new(),
+        });
+    }
     if keyword.chars().count() < 2 {
         return Ok(online_music::OnlineSuggestionsResult {
             suggestions: Vec::new(),

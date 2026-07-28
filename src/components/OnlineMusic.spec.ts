@@ -269,6 +269,12 @@ describe("Online Music workspace", () => {
       if (command === "get_online_music_settings") return Promise.resolve(settings);
       if (command === "list_online_download_tasks") return Promise.resolve([]);
       if (command === "start_online_music_search") return Promise.resolve("search-1");
+      if (command === "online_music_suggestions") {
+        return Promise.resolve({
+          suggestions: ["Midnight Drive", "Jazz Mix"],
+          failures: [],
+        });
+      }
       if (command === "online_music_playlists") {
         return Promise.resolve({
           items: [],
@@ -296,6 +302,23 @@ describe("Online Music workspace", () => {
         button.attributes("aria-label")
       ),
     ).toEqual(["每日推荐", "私人漫游", "私人雷达"]);
+    wrapper.unmount();
+  });
+
+  it("shows recent search history when the empty search input is clicked", async () => {
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+
+    await wrapper.get('input[aria-label="Search Online Music"]').trigger("click");
+    await flushPromises();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("online_music_suggestions", {
+      keyword: "",
+      requestId: undefined,
+    });
+    expect(
+      wrapper.findAll('ul[aria-label="Search history"] button').map((button) => button.text()),
+    ).toEqual(["Midnight Drive", "Jazz Mix"]);
     wrapper.unmount();
   });
 

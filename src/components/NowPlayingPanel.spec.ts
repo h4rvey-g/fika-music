@@ -2,6 +2,21 @@ import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import NowPlayingPanel from "./NowPlayingPanel.vue";
 
+function dispatchPointerEvent(
+  element: Element,
+  type: string,
+  options: { pointerId: number; clientY?: number; button?: number },
+) {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    button: options.button ?? 0,
+    clientY: options.clientY ?? 0,
+  });
+  Object.defineProperty(event, "pointerId", { value: options.pointerId });
+  element.dispatchEvent(event);
+}
+
 describe("NowPlayingPanel", () => {
   it("shows the actual network lyric provider", () => {
     const wrapper = mount(NowPlayingPanel, {
@@ -117,5 +132,103 @@ describe("NowPlayingPanel", () => {
     await wrapper.vm.$nextTick();
 
     expect(scrollTo).toHaveBeenCalledWith({ behavior: "smooth", top: 200 });
+  });
+
+  it("seeks to the synchronized lyric centered by a drag", async () => {
+    const wrapper = mount(NowPlayingPanel, {
+      props: {
+        title: "Track",
+        subtitle: "Artist",
+        coverUrl: null,
+        lyricsLoading: false,
+        lyricsError: null,
+        playbackPosition: 1.5,
+        canRetry: true,
+        lyrics: {
+          source: "embedded",
+          provider: null,
+          isSynced: true,
+          savedPath: null,
+          matchScore: null,
+          lines: [
+            { startMs: 1_000, endMs: 3_000, text: "First line", words: [] },
+            { startMs: 3_000, endMs: 5_000, text: "Second line", words: [] },
+            { startMs: 5_000, endMs: null, text: "Third line", words: [] },
+          ],
+        },
+      },
+    });
+    const viewportWrapper = wrapper.get('[data-testid="lyrics-viewport"]');
+    const viewport = viewportWrapper.element as HTMLElement;
+    Object.defineProperties(viewport, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 600 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+      setPointerCapture: { configurable: true, value: vi.fn() },
+      hasPointerCapture: { configurable: true, value: vi.fn(() => true) },
+      releasePointerCapture: { configurable: true, value: vi.fn() },
+    });
+    wrapper.findAll('[data-lyric-index]').forEach((line, index) => {
+      Object.defineProperties(line.element, {
+        offsetHeight: { configurable: true, value: 40 },
+        offsetTop: { configurable: true, value: 80 + index * 100 },
+      });
+    });
+
+    dispatchPointerEvent(viewport, "pointerdown", {
+      button: 0,
+      clientY: 100,
+      pointerId: 1,
+    });
+    dispatchPointerEvent(viewport, "pointermove", {
+      clientY: -80,
+      pointerId: 1,
+    });
+    await wrapper.vm.$nextTick();
+
+    expect(viewport.scrollTop).toBe(180);
+    expect(wrapper.find('[data-testid="lyric-seek-guide"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="lyric-seek-time"]').text()).toBe("0:05");
+    expect(wrapper.get('[data-active="true"]').text()).toBe("Third line");
+
+    dispatchPointerEvent(viewport, "pointerup", { pointerId: 1 });
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.emitted("seekPlayback")).toEqual([[5]]);
+    expect(wrapper.find('[data-testid="lyric-seek-guide"]').exists()).toBe(false);
+  });
+
+  it("does not seek when dragging unsynchronized lyrics", async () => {
+    const wrapper = mount(NowPlayingPanel, {
+      props: {
+        title: "Track",
+        subtitle: "Artist",
+        coverUrl: null,
+        lyricsLoading: false,
+        lyricsError: null,
+        playbackPosition: 0,
+        canRetry: false,
+        lyrics: {
+          source: "embedded",
+          provider: null,
+          isSynced: false,
+          savedPath: null,
+          matchScore: null,
+          lines: [{ startMs: null, endMs: null, text: "Plain lyric", words: [] }],
+        },
+      },
+    });
+    const viewport = wrapper.get('[data-testid="lyrics-viewport"]');
+
+    dispatchPointerEvent(viewport.element, "pointerdown", {
+      button: 0,
+      clientY: 100,
+      pointerId: 1,
+    });
+    dispatchPointerEvent(viewport.element, "pointermove", { clientY: 20, pointerId: 1 });
+    dispatchPointerEvent(viewport.element, "pointerup", { pointerId: 1 });
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.emitted("seekPlayback")).toBeUndefined();
   });
 });

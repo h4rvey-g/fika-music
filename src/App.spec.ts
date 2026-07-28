@@ -986,6 +986,46 @@ describe("application shell", () => {
     delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   });
 
+  it("seeks the audio timeline from the now playing lyrics panel", async () => {
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "get_scan_status") return Promise.resolve(createScanStatus());
+      if (command === "list_plugins") return Promise.resolve([]);
+      if (command === "list_audio_sources") return Promise.resolve([]);
+      if (command === "get_online_music_settings") {
+        return Promise.resolve(onlineMusicSettings);
+      }
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "list_online_music_channels") return Promise.resolve([]);
+      if (command === "local_track_media_source") {
+        return Promise.resolve({ filePath: "/music/second.mp3" });
+      }
+      if (command === "local_track_playback_details") {
+        return Promise.resolve({ coverDataUrl: null, lyrics: null, lyricsError: null });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get('button[aria-label="Play Second"]').trigger("click");
+    await flushPromises();
+
+    const audio = wrapper.get("audio").element;
+    Object.defineProperties(audio, {
+      currentTime: { configurable: true, writable: true, value: 0 },
+      duration: { configurable: true, value: 180 },
+    });
+    audio.dispatchEvent(new Event("loadedmetadata"));
+    await wrapper.vm.$nextTick();
+
+    wrapper.getComponent({ name: "NowPlayingPanel" }).vm.$emit("seekPlayback", 42);
+    await wrapper.vm.$nextTick();
+
+    expect(audio.currentTime).toBe(42);
+    expect(wrapper.get<HTMLInputElement>('input[aria-label="Seek playback"]').element.value)
+      .toBe("42");
+    wrapper.unmount();
+  });
+
   it("navigates local tracks and wraps at the end in repeat mode", async () => {
     tauriMocks.invoke.mockImplementation((command: string, payload?: { trackId?: number; index?: number }) => {
       if (command === "get_scan_status") {
