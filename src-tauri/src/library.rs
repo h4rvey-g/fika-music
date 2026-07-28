@@ -309,6 +309,7 @@ struct QueryAlbum<'a> {
     album: &'a AlbumIndex,
     matches: SmallVec<[(usize, u64); 16]>,
     max_score: u64,
+    representative_index: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -323,7 +324,6 @@ struct QuerySnapshot {
     id: String,
     order: Vec<usize>,
     groups: Vec<LibraryAlbumGroup>,
-    group_total: usize,
     collapsed_group_ids: HashSet<String>,
     view: Vec<SnapshotViewItem>,
 }
@@ -447,74 +447,58 @@ impl LibraryService {
                 .collect::<Vec<_>>()
         };
 
-        let has_search = !atoms.is_empty();
         let matched_total = matches.len();
-        let group_total = matches
-            .iter()
-            .map(|(index, _)| self.tracks[*index].group_id.as_str())
-            .collect::<HashSet<_>>()
-            .len();
-        let is_grouped = request.sort_field == LibrarySortField::Relevance;
-        let (order, groups) = if is_grouped {
-            let mut grouped = HashMap::<&str, QueryAlbum<'_>>::new();
-            for (index, score) in matches.drain(..) {
-                let group_id = self.tracks[index].group_id.as_str();
-                let group = grouped.entry(group_id).or_insert_with(|| {
-                    let album = self
-                        .albums
-                        .get(group_id)
-                        .expect("indexed track should belong to an album");
-                    QueryAlbum {
-                        album,
-                        matches: SmallVec::new(),
-                        max_score: 0,
-                    }
-                });
-                group.max_score = group.max_score.max(score);
-                group.matches.push((index, score));
-            }
-            let mut query_albums = grouped.into_values().collect::<Vec<_>>();
-            for album in &mut query_albums {
-                if album.matches.len() > 1 {
-                    sort_track_matches(
-                        album.matches.as_mut_slice(),
-                        &self.tracks,
-                        &request,
-                        has_search,
-                    );
+        let mut grouped = HashMap::<&str, QueryAlbum<'_>>::new();
+        for (index, score) in matches.drain(..) {
+            let group_id = self.tracks[index].group_id.as_str();
+            let group = grouped.entry(group_id).or_insert_with(|| {
+                let album = self
+                    .albums
+                    .get(group_id)
+                    .expect("indexed track should belong to an album");
+                QueryAlbum {
+                    album,
+                    matches: SmallVec::new(),
+                    max_score: 0,
+                    representative_index: album.track_indices.first().copied().unwrap_or(index),
                 }
+            });
+            group.max_score = group.max_score.max(score);
+            group.matches.push((index, score));
+        }
+        let has_search = !atoms.is_empty();
+        let mut query_albums = grouped.into_values().collect::<Vec<_>>();
+        for album in &mut query_albums {
+            if album.matches.len() > 1 {
+                sort_track_matches(
+                    album.matches.as_mut_slice(),
+                    &self.tracks,
+                    &request,
+                    has_search,
+                );
             }
-            sort_query_albums(&mut query_albums, has_search);
+        }
+        sort_query_albums(&mut query_albums, &self.tracks, &request, has_search);
 
-            let mut order = Vec::with_capacity(matched_total);
-            let mut groups = Vec::with_capacity(query_albums.len());
-            for album in query_albums {
-                let start_index = order.len();
-                order.extend(album.matches.iter().map(|(index, _)| *index));
-                let end_index = order.len().saturating_sub(1);
-                groups.push(LibraryAlbumGroup {
-                    id: album.album.identity.id.clone(),
-                    title: album.album.identity.title.clone(),
-                    album_artist: album.album.identity.album_artist.clone(),
-                    year: album.album.year,
-                    matched_tracks: album.matches.len(),
-                    total_tracks: album.album.track_indices.len(),
-                    total_duration_seconds: album.album.total_duration_seconds,
-                    start_index,
-                    end_index,
-                    is_ungrouped: album.album.identity.is_ungrouped,
-                });
-            }
-            (order, groups)
-        } else {
-            if matches.len() > 1 {
-                sort_track_matches(&mut matches, &self.tracks, &request, has_search);
-            }
-            (
-                matches.into_iter().map(|(index, _)| index).collect(),
-                Vec::new(),
-            )
-        };
+        let mut order = Vec::with_capacity(matched_total);
+        let mut groups = Vec::with_capacity(query_albums.len());
+        for album in query_albums {
+            let start_index = order.len();
+            order.extend(album.matches.iter().map(|(index, _)| *index));
+            let end_index = order.len().saturating_sub(1);
+            groups.push(LibraryAlbumGroup {
+                id: album.album.identity.id.clone(),
+                title: album.album.identity.title.clone(),
+                album_artist: album.album.identity.album_artist.clone(),
+                year: album.album.year,
+                matched_tracks: album.matches.len(),
+                total_tracks: album.album.track_indices.len(),
+                total_duration_seconds: album.album.total_duration_seconds,
+                start_index,
+                end_index,
+                is_ungrouped: album.album.identity.is_ungrouped,
+            });
+        }
         let total_duration_seconds = order
             .iter()
             .filter_map(|index| self.tracks[*index].track.duration_seconds)
@@ -524,16 +508,11 @@ impl LibraryService {
             .collapsed_group_ids
             .into_iter()
             .collect::<HashSet<_>>();
-        let view = if is_grouped {
-            build_snapshot_view(&groups, &collapsed_group_ids)
-        } else {
-            (0..order.len()).map(SnapshotViewItem::Track).collect()
-        };
+        let view = build_snapshot_view(&groups, &collapsed_group_ids);
         let snapshot = QuerySnapshot {
             id: id.clone(),
             order,
             groups,
-            group_total,
             collapsed_group_ids,
             view,
         };
@@ -544,7 +523,7 @@ impl LibraryService {
             library_total: self.tracks.len(),
             total_duration_seconds,
             needs_reindex: self.needs_reindex,
-            group_total: snapshot.group_total,
+            group_total: snapshot.groups.len(),
             virtual_total: snapshot.view.len(),
             offset: 0,
             items,
@@ -904,7 +883,9 @@ fn sort_track_matches(
         let right = &tracks[*right_index];
         let ordering = if request.sort_field == LibrarySortField::Relevance && has_search {
             right_score.cmp(left_score)
-        } else if request.sort_field == LibrarySortField::Relevance {
+        } else if request.sort_field == LibrarySortField::Relevance
+            || is_album_sort_field(request.sort_field)
+        {
             default_track_order(left, right)
         } else {
             field_order(left, right, request.sort_field, request.sort_direction)
@@ -915,7 +896,12 @@ fn sort_track_matches(
     });
 }
 
-fn sort_query_albums(albums: &mut [QueryAlbum<'_>], has_search: bool) {
+fn sort_query_albums(
+    albums: &mut [QueryAlbum<'_>],
+    tracks: &[IndexedTrack],
+    request: &LibraryQueryRequest,
+    has_search: bool,
+) {
     albums.par_sort_unstable_by(|left, right| {
         if left.album.identity.is_ungrouped != right.album.identity.is_ungrouped {
             return if left.album.identity.is_ungrouped {
@@ -924,10 +910,28 @@ fn sort_query_albums(albums: &mut [QueryAlbum<'_>], has_search: bool) {
                 Ordering::Less
             };
         }
-        let ordering = if has_search {
+        let ordering = if request.sort_field == LibrarySortField::Relevance && has_search {
             right.max_score.cmp(&left.max_score)
-        } else {
+        } else if is_album_sort_field(request.sort_field) {
+            album_field_order(
+                left,
+                right,
+                tracks,
+                request.sort_field,
+                request.sort_direction,
+            )
+        } else if request.sort_field == LibrarySortField::Relevance {
             Ordering::Equal
+        } else {
+            match (left.matches.first(), right.matches.first()) {
+                (Some((left_index, _)), Some((right_index, _))) => field_order(
+                    &tracks[*left_index],
+                    &tracks[*right_index],
+                    request.sort_field,
+                    request.sort_direction,
+                ),
+                _ => Ordering::Equal,
+            }
         };
         ordering.then_with(|| {
             left.album
@@ -935,6 +939,71 @@ fn sort_query_albums(albums: &mut [QueryAlbum<'_>], has_search: bool) {
                 .cmp(&right.album.default_sort_rank)
         })
     });
+}
+
+fn is_album_sort_field(field: LibrarySortField) -> bool {
+    matches!(
+        field,
+        LibrarySortField::Album | LibrarySortField::AlbumArtist | LibrarySortField::Year
+    )
+}
+
+fn album_field_order(
+    left: &QueryAlbum<'_>,
+    right: &QueryAlbum<'_>,
+    tracks: &[IndexedTrack],
+    field: LibrarySortField,
+    direction: LibrarySortDirection,
+) -> Ordering {
+    let left_track = &tracks[left.representative_index];
+    let right_track = &tracks[right.representative_index];
+    let ordering = match field {
+        LibrarySortField::Album => optional_search_order(
+            left_track.search.album.as_ref(),
+            right_track.search.album.as_ref(),
+        ),
+        LibrarySortField::AlbumArtist => optional_search_order(
+            left_track
+                .search
+                .album_artist
+                .as_ref()
+                .or(left_track.search.artist.as_ref()),
+            right_track
+                .search
+                .album_artist
+                .as_ref()
+                .or(right_track.search.artist.as_ref()),
+        ),
+        LibrarySortField::Year => optional_value_order(left.album.year, right.album.year),
+        _ => Ordering::Equal,
+    };
+    match direction {
+        LibrarySortDirection::Ascending => ordering,
+        LibrarySortDirection::Descending => {
+            let left_missing = album_sort_value_is_missing(left, left_track, field);
+            let right_missing = album_sort_value_is_missing(right, right_track, field);
+            if left_missing || right_missing {
+                ordering
+            } else {
+                ordering.reverse()
+            }
+        }
+    }
+}
+
+fn album_sort_value_is_missing(
+    album: &QueryAlbum<'_>,
+    representative: &IndexedTrack,
+    field: LibrarySortField,
+) -> bool {
+    match field {
+        LibrarySortField::Album => representative.track.album.is_none(),
+        LibrarySortField::AlbumArtist => {
+            representative.track.album_artist.is_none() && representative.track.artist.is_none()
+        }
+        LibrarySortField::Year => album.album.year.is_none(),
+        _ => false,
+    }
 }
 
 fn default_album_track_order(left_track: &IndexedTrack, right_track: &IndexedTrack) -> Ordering {
@@ -1411,7 +1480,7 @@ mod tests {
     }
 
     #[test]
-    fn title_sort_should_order_tracks_across_album_groups() {
+    fn title_sort_should_order_album_groups_by_their_leading_track() {
         let mut service = service(vec![
             track(1, "Zulu", "Artist", "Album A"),
             track(2, "Alpha", "Artist", "Album A"),
@@ -1423,8 +1492,17 @@ mod tests {
         query.sort_direction = LibrarySortDirection::Ascending;
 
         let page = service.query(query);
+        let album_titles = page
+            .items
+            .iter()
+            .filter(|item| item.kind == LibraryViewItemKind::AlbumHeader)
+            .filter_map(|item| item.group.as_ref()?.title.as_deref())
+            .collect::<Vec<_>>();
 
-        assert_eq!(page_track_ids(&page), vec![4, 2, 3, 1]);
+        assert_eq!(
+            (album_titles, page_track_ids(&page)),
+            (vec!["Album B", "Album A"], vec![4, 3, 2, 1])
+        );
     }
 
     #[test]
@@ -1445,17 +1523,23 @@ mod tests {
         query.sort_direction = LibrarySortDirection::Ascending;
 
         let page = service.query(query);
-        let tail = service
-            .view_in_range(&page.snapshot_id, MAX_PAGE_SIZE, MAX_PAGE_SIZE)
-            .expect("sorted snapshot should load its remaining tracks");
-        let track_ids = page
-            .items
-            .iter()
-            .chain(&tail.items)
-            .filter_map(|item| item.track.as_ref().map(|track| track.id))
-            .collect::<Vec<_>>();
+        let mut track_ids = Vec::with_capacity(page.total);
+        for offset in (0..page.virtual_total).step_by(MAX_PAGE_SIZE) {
+            let range = service
+                .view_in_range(&page.snapshot_id, offset, MAX_PAGE_SIZE)
+                .expect("sorted snapshot should load every view range");
+            track_ids.extend(
+                range
+                    .items
+                    .iter()
+                    .filter_map(|item| item.track.as_ref().map(|track| track.id)),
+            );
+        }
 
-        assert_eq!(track_ids, (0..205).rev().collect::<Vec<_>>());
+        assert_eq!(
+            (page.virtual_total, track_ids),
+            (205 * 3, (0..205).rev().collect::<Vec<_>>())
+        );
     }
 
     #[test]
@@ -1538,7 +1622,7 @@ mod tests {
     }
 
     #[test]
-    fn track_position_should_follow_the_flat_sorted_snapshot_order() {
+    fn track_position_should_follow_the_grouped_sorted_snapshot_order() {
         let mut service = service(vec![
             track(1, "Zulu", "Artist", "Album A"),
             track(2, "Alpha", "Artist", "Album B"),
@@ -1551,8 +1635,13 @@ mod tests {
         let position = service
             .track_position(&page.snapshot_id, 1)
             .expect("query snapshot should remain available");
+        let album_header_count = page
+            .items
+            .iter()
+            .filter(|item| item.kind == LibraryViewItemKind::AlbumHeader)
+            .count();
 
-        assert_eq!(position, Some(1));
+        assert_eq!((album_header_count, position), (2, Some(5)));
     }
 
     #[test]
