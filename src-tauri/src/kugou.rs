@@ -5,8 +5,8 @@ use crate::source_runtime::{
     SourceCapability, SourceEntityRef, SourceInfo, SourcePlaylist, SourcePlaylistDetail,
     SourcePlaylistMutation, SourcePlaylistMutationKind, SourcePlaylistSearchResponse,
     SourcePlaylistSearchResult, SourceProvider, SourceQuality, SourceRecommendationsResponse,
-    SourceRequest, SourceResponse, SourceRuntimeContext, SourceRuntimeError, SourceSearchResponse,
-    SourceSuggestionsResponse, SourceTrackRef,
+    SourceRequest, SourceResponse, SourceRuntimeApiVersion, SourceRuntimeContext,
+    SourceRuntimeError, SourceSearchResponse, SourceSuggestionsResponse, SourceTrackRef,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
@@ -26,6 +26,8 @@ use uuid::Uuid;
 
 pub const KUGOU_PLUGIN_ID: &str = "fika.kugou";
 pub const KUGOU_PROVIDER_ID: &str = "fika-kugou";
+pub const KUGOU_PROVIDER_ENTRYPOINT: &str = "builtin:kugou";
+pub const KUGOU_PROVIDER_API_VERSION: SourceRuntimeApiVersion = SourceRuntimeApiVersion::new(1, 4);
 pub const KUGOU_HOST_BRIDGE_ID: &str = "kugou-music-api";
 pub const KUGOU_API_BASIS_VERSION: &str = "1.5.1 (283f1e9)";
 
@@ -1626,6 +1628,10 @@ impl KugouSourceProvider {
 impl SourceProvider for KugouSourceProvider {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn api_version(&self) -> SourceRuntimeApiVersion {
+        KUGOU_PROVIDER_API_VERSION
     }
 
     fn required_capabilities(&self) -> BTreeSet<SourceCapability> {

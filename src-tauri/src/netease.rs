@@ -6,8 +6,8 @@ use crate::source_runtime::{
     SourceCapability, SourceEntityRef, SourceInfo, SourcePlaylist, SourcePlaylistDetail,
     SourcePlaylistMutation, SourcePlaylistMutationKind, SourcePlaylistSearchResponse,
     SourcePlaylistSearchResult, SourceProvider, SourceQuality, SourceRecommendationsResponse,
-    SourceRequest, SourceResponse, SourceRuntimeContext, SourceRuntimeError, SourceSearchResponse,
-    SourceSuggestionsResponse, SourceTrackRef,
+    SourceRequest, SourceResponse, SourceRuntimeApiVersion, SourceRuntimeContext,
+    SourceRuntimeError, SourceSearchResponse, SourceSuggestionsResponse, SourceTrackRef,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
@@ -29,6 +29,9 @@ use uuid::Uuid;
 
 pub const NETEASE_PLUGIN_ID: &str = "fika.netease";
 pub const NETEASE_PROVIDER_ID: &str = "fika-netease";
+pub const NETEASE_PROVIDER_ENTRYPOINT: &str = "builtin:netease";
+pub const NETEASE_PROVIDER_API_VERSION: SourceRuntimeApiVersion =
+    SourceRuntimeApiVersion::new(1, 4);
 pub const NETEASE_HOST_BRIDGE_ID: &str = "netease-api-enhanced";
 pub const NETEASE_API_BASIS_VERSION: &str = "4.32.1";
 
@@ -1643,6 +1646,10 @@ fn paginate_tracks(
 impl SourceProvider for NeteaseSourceProvider {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn api_version(&self) -> SourceRuntimeApiVersion {
+        NETEASE_PROVIDER_API_VERSION
     }
 
     fn required_capabilities(&self) -> BTreeSet<SourceCapability> {

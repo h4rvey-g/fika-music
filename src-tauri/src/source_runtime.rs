@@ -33,7 +33,7 @@ pub const LX_SOURCE_LOCAL: &str = "local";
 pub const SOURCE_RUNTIME_API_VERSION: SourceRuntimeApiVersion = SourceRuntimeApiVersion::new(1, 4);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export_to = "bindings.ts")]
 pub struct SourceRuntimeApiVersion {
     pub major: u16,
@@ -191,7 +191,7 @@ pub enum SourceKind {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export_to = "bindings.ts")]
 pub struct SourceInfo {
     pub id: String,
@@ -1699,22 +1699,37 @@ impl SourceRuntimeContext {
     }
 }
 
+/// Host-executed implementation behind a registered Plugin Provider entrypoint.
+///
+/// Implementations are compiled into Fika Music and registered through
+/// [`crate::plugin_system::PluginProviderCatalog`]. The runtime catches panics,
+/// validates catalogs, requests, and responses, and exposes only capability-
+/// checked operations through [`SourceRuntimeContext`].
+///
+/// Implementations must return stable metadata: `id`, `api_version`, and
+/// `required_capabilities` are read during initialization and dispatch. The ID
+/// and capabilities must match the corresponding Plugin manifest entrypoint.
 pub trait SourceProvider: Send + Sync {
+    /// Returns the globally unique Provider ID declared by `plugin.json`.
     fn id(&self) -> &str;
 
+    /// Returns the oldest Source Runtime contract required by this Provider.
     fn api_version(&self) -> SourceRuntimeApiVersion {
         SOURCE_RUNTIME_API_VERSION
     }
 
+    /// Returns every host capability the Provider may request at runtime.
     fn required_capabilities(&self) -> BTreeSet<SourceCapability> {
         BTreeSet::new()
     }
 
+    /// Initializes the Provider and returns its complete source/action catalog.
     fn initialize(
         &self,
         context: &mut SourceRuntimeContext,
     ) -> Result<BTreeMap<String, SourceInfo>, SourceRuntimeError>;
 
+    /// Handles one validated request and returns the matching response variant.
     fn handle_request(
         &self,
         context: &mut SourceRuntimeContext,

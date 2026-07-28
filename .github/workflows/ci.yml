@@ -32,6 +32,9 @@ jobs:
       - name: Check generated TypeScript bindings
         run: npm run bindings:check
 
+      - name: Validate bundled Plugin contracts
+        run: npm run plugins:check
+
       - name: Audit dependencies
         run: npm audit
 

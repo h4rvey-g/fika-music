@@ -124,6 +124,7 @@ Earlier provisional terms such as **Track**, **Library**, **Playlist**, **Connec
 - ADR 0012: [Plugin System built on the Source Runtime](./adr/0012-plugin-system-built-on-source-runtime.md).
 - ADR 0013: [Separate imported Audio Sources from Plugins](./adr/0013-separate-audio-source-lifecycle.md).
 - ADR 0014: [Embedded QuickJS for imported Audio Sources](./adr/0014-embedded-quickjs-audio-sources.md).
+- ADR 0015: [Registered Plugin Provider contracts](./adr/0015-registered-plugin-provider-contracts.md).
 
 ## Earlier provisional domain terms
 
@@ -460,9 +461,10 @@ Implementation notes for the completed Slice 4 NetEase Plugin:
   built-in `netease-api-enhanced` Service Bridge is available. Its Account Ref,
   Playlist read/write, and bridge capability declarations remain inspectable
   and are granted together when the Plugin is enabled.
-- Runtime API 1.1 adds typed recommendation and Playlist requests. The Provider
-  normalizes upstream song objects into Remote Tracks and rejects non-NetEase
-  tracks before Playlist mutations.
+- Runtime API 1.1 added typed recommendation and Playlist requests. The current
+  1.4 contract also includes expanded artist, album, Playlist, suggestion, and
+  biography actions. The Provider normalizes upstream song objects into Remote
+  Tracks and rejects non-NetEase tracks before Playlist mutations.
 - The Node-free Rust bridge implements the selected v4.32.1 QR login,
   recommendation, user Playlist, Playlist detail, playable song URL, and
   Playlist manipulation behavior. No Express server, dynamic module loading,

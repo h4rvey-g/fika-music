@@ -1,7 +1,3 @@
-use crate::kugou::{KugouProviderBridge, KugouSourceProvider, KUGOU_PLUGIN_ID, KUGOU_PROVIDER_ID};
-use crate::netease::{
-    NeteaseProviderBridge, NeteaseSourceProvider, NETEASE_PLUGIN_ID, NETEASE_PROVIDER_ID,
-};
 use crate::registry_support::{
     manifest_fingerprint, now_timestamp, operation_nonce, remove_path, valid_identifier,
 };
@@ -24,6 +20,13 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod provider_catalog;
+
+pub use provider_catalog::{
+    PluginProviderBuildContext, PluginProviderCatalog, PluginProviderContract,
+    PluginProviderRegistration,
+};
+
 pub const PLUGIN_MANIFEST_FILE: &str = "plugin.json";
 pub const PLUGIN_MANIFEST_VERSION: u32 = 1;
 pub const PLUGIN_COMPATIBILITY_TARGET: &str = "fika-music";
@@ -32,7 +35,7 @@ pub const PLUGIN_RUNTIME_API_VERSION: SourceRuntimeApiVersion =
 const IMPORTED_LX_ENTRYPOINT_PREFIX: &str = "builtin:lx-js:";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export_to = "bindings.ts")]
 pub struct PluginManifest {
     pub manifest_version: u32,
@@ -61,7 +64,7 @@ pub struct PluginManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export_to = "bindings.ts")]
 pub struct PluginProviderEntrypoint {
     pub id: String,
@@ -143,22 +146,10 @@ impl PluginManifest {
                 );
             }
             #[cfg(not(test))]
-            if matches!(
-                provider.entrypoint.as_str(),
-                "builtin:runtime-demo" | "builtin:catalog" | "catalog"
-            ) {
+            if provider.entrypoint == "builtin:runtime-demo" {
                 errors.push(format!(
                     "test-only provider entrypoint is not available: {}",
                     provider.entrypoint
-                ));
-            }
-
-            if matches!(provider.entrypoint.as_str(), "catalog" | "builtin:catalog")
-                && provider.source_catalog.is_empty()
-            {
-                errors.push(format!(
-                    "catalog provider {} must declare at least one source",
-                    provider.id
                 ));
             }
 
@@ -181,6 +172,32 @@ impl PluginManifest {
                         provider.id, source_id
                     ));
                 }
+                if source
+                    .actions
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    != source.actions.len()
+                {
+                    errors.push(format!(
+                        "provider {} source {} declares duplicate actions",
+                        provider.id, source_id
+                    ));
+                }
+                if source
+                    .qualities
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    != source.qualities.len()
+                {
+                    errors.push(format!(
+                        "provider {} source {} declares duplicate qualities",
+                        provider.id, source_id
+                    ));
+                }
                 for action in &source.actions {
                     let route = (source.id.clone(), *action);
                     if let Some(existing_provider) =
@@ -198,8 +215,10 @@ impl PluginManifest {
         }
 
         for bridge in &self.required_host_bridges {
-            if bridge.trim().is_empty() || bridge.chars().any(char::is_whitespace) {
-                errors.push("requiredHostBridges must contain non-empty identifiers".to_owned());
+            if !valid_identifier(bridge) {
+                errors.push(format!(
+                    "requiredHostBridges contains an invalid identifier: {bridge}"
+                ));
             }
         }
 
@@ -430,6 +449,8 @@ pub enum PluginSystemError {
     },
     #[error("plugin package is invalid: {0}")]
     Package(String),
+    #[error("plugin Provider registration is invalid: {0}")]
+    InvalidRegistration(String),
 }
 
 impl PluginSystemError {
@@ -654,9 +675,7 @@ pub struct PluginRegistry {
     user_plugins_dir: PathBuf,
     bundled_plugins_dir: PathBuf,
     runtime: Arc<SourceRuntime>,
-    available_host_bridges: BTreeSet<String>,
-    netease_bridge: Option<Arc<dyn NeteaseProviderBridge>>,
-    kugou_bridge: Option<Arc<dyn KugouProviderBridge>>,
+    provider_catalog: PluginProviderCatalog,
     plugins: BTreeMap<String, PluginEntryRuntime>,
 }
 
@@ -666,9 +685,7 @@ impl std::fmt::Debug for PluginRegistry {
             .debug_struct("PluginRegistry")
             .field("user_plugins_dir", &self.user_plugins_dir)
             .field("bundled_plugins_dir", &self.bundled_plugins_dir)
-            .field("available_host_bridges", &self.available_host_bridges)
-            .field("has_netease_bridge", &self.netease_bridge.is_some())
-            .field("has_kugou_bridge", &self.kugou_bridge.is_some())
+            .field("provider_catalog", &self.provider_catalog)
             .field("plugin_count", &self.plugins.len())
             .finish_non_exhaustive()
     }
@@ -680,32 +697,22 @@ impl PluginRegistry {
         bundled_plugins_dir: impl Into<PathBuf>,
         runtime: Arc<SourceRuntime>,
     ) -> Self {
+        #[cfg(test)]
+        let provider_catalog = test_provider_catalog();
+        #[cfg(not(test))]
+        let provider_catalog = PluginProviderCatalog::new();
+
         Self {
             user_plugins_dir: user_plugins_dir.into(),
             bundled_plugins_dir: bundled_plugins_dir.into(),
             runtime,
-            available_host_bridges: BTreeSet::new(),
-            netease_bridge: None,
-            kugou_bridge: None,
+            provider_catalog,
             plugins: BTreeMap::new(),
         }
     }
 
-    pub fn with_available_host_bridges(
-        mut self,
-        bridges: impl IntoIterator<Item = String>,
-    ) -> Self {
-        self.available_host_bridges = bridges.into_iter().collect();
-        self
-    }
-
-    pub fn with_netease_bridge(mut self, bridge: Arc<dyn NeteaseProviderBridge>) -> Self {
-        self.netease_bridge = Some(bridge);
-        self
-    }
-
-    pub fn with_kugou_bridge(mut self, bridge: Arc<dyn KugouProviderBridge>) -> Self {
-        self.kugou_bridge = Some(bridge);
+    pub fn with_provider_catalog(mut self, provider_catalog: PluginProviderCatalog) -> Self {
+        self.provider_catalog = provider_catalog;
         self
     }
 
@@ -789,7 +796,7 @@ impl PluginRegistry {
                 continue;
             }
 
-            if let Err(errors) = manifest.validate() {
+            if let Err(errors) = self.provider_catalog.validate_manifest(&manifest) {
                 self.insert_invalid_record(origin, path, errors.join("; "));
                 continue;
             }
@@ -824,7 +831,7 @@ impl PluginRegistry {
             let saved = persisted.get(&manifest.id);
             let compatibility = manifest.compatibility_diagnostics(
                 self.runtime.api_version(),
-                &self.available_host_bridges,
+                self.provider_catalog.available_host_bridges(),
             );
             let mut record = record_for_manifest(&manifest, &path, origin, saved, compatibility)?;
             if record.state == PluginState::Incompatible {
@@ -1110,7 +1117,7 @@ impl PluginRegistry {
     ) -> Result<PluginRecord, PluginSystemError> {
         let package_path = normalize_package_path(package_path)?;
         let manifest = read_manifest(&package_path)?;
-        if let Err(errors) = manifest.validate() {
+        if let Err(errors) = self.provider_catalog.validate_manifest(&manifest) {
             return Err(PluginSystemError::InvalidManifest(errors.join("; ")));
         }
         if self
@@ -1402,19 +1409,22 @@ impl PluginRegistry {
         let mut configured_provider_ids: Vec<String> = Vec::new();
 
         for entry in entries {
-            let provider = match build_provider(
-                &manifest,
-                &entry,
-                &package_path,
-                self.netease_bridge.clone(),
-                self.kugou_bridge.clone(),
-            ) {
-                Ok(provider) => provider,
-                Err(error) => {
-                    clear_runtime_provider_state(&runtime, configured_provider_ids);
-                    return self.activation_failed(connection, plugin_id, provider_states, error);
-                }
-            };
+            let provider =
+                match self
+                    .provider_catalog
+                    .build_provider(&manifest, &entry, package_path.clone())
+                {
+                    Ok(provider) => provider,
+                    Err(error) => {
+                        clear_runtime_provider_state(&runtime, configured_provider_ids);
+                        return self.activation_failed(
+                            connection,
+                            plugin_id,
+                            provider_states,
+                            error,
+                        );
+                    }
+                };
             let provider_id = provider.id().to_owned();
             let provider_grants = granted
                 .intersection(&provider_declared_capabilities(&manifest, &entry))
@@ -2083,65 +2093,26 @@ fn update_action_flags(record: &mut PluginRecord) {
         && record.state != PluginState::Incompatible;
 }
 
-fn build_provider(
-    manifest: &PluginManifest,
-    entrypoint: &PluginProviderEntrypoint,
-    _package_path: &Path,
-    netease_bridge: Option<Arc<dyn NeteaseProviderBridge>>,
-    kugou_bridge: Option<Arc<dyn KugouProviderBridge>>,
-) -> Result<Arc<dyn SourceProvider>, PluginSystemError> {
-    let capabilities = provider_declared_capabilities(manifest, entrypoint);
-    match entrypoint.entrypoint.as_str() {
-        #[cfg(test)]
-        "builtin:runtime-demo" => Ok(Arc::new(DemoSourceProvider::new(
-            entrypoint.id.clone(),
-            capabilities,
-            entrypoint.source_catalog.clone(),
-        ))),
-        #[cfg(test)]
-        "catalog" | "builtin:catalog" => Ok(Arc::new(CatalogSourceProvider::new(
-            entrypoint.id.clone(),
-            capabilities,
-            entrypoint.source_catalog.clone(),
-        ))),
-        "builtin:netease"
-            if manifest.id == NETEASE_PLUGIN_ID && entrypoint.id == NETEASE_PROVIDER_ID =>
-        {
-            netease_bridge
-                .map(|bridge| {
-                    Arc::new(NeteaseSourceProvider::new(
-                        entrypoint.id.clone(),
-                        capabilities,
-                        bridge,
-                    )) as Arc<dyn SourceProvider>
-                })
-                .ok_or_else(|| PluginSystemError::ProviderLoad {
-                    plugin_id: manifest.id.clone(),
-                    entrypoint: entrypoint.entrypoint.clone(),
-                    message: "the NetEase Service Bridge is unavailable".to_owned(),
-                })
-        }
-        "builtin:kugou" if manifest.id == KUGOU_PLUGIN_ID && entrypoint.id == KUGOU_PROVIDER_ID => {
-            kugou_bridge
-                .map(|bridge| {
-                    Arc::new(KugouSourceProvider::new(
-                        entrypoint.id.clone(),
-                        capabilities,
-                        bridge,
-                    )) as Arc<dyn SourceProvider>
-                })
-                .ok_or_else(|| PluginSystemError::ProviderLoad {
-                    plugin_id: manifest.id.clone(),
-                    entrypoint: entrypoint.entrypoint.clone(),
-                    message: "the KuGou Service Bridge is unavailable".to_owned(),
-                })
-        }
-        _ => Err(PluginSystemError::ProviderLoad {
-            plugin_id: manifest.id.clone(),
-            entrypoint: entrypoint.entrypoint.clone(),
-            message: "only built-in provider entrypoints are loadable in this runtime".to_owned(),
-        }),
-    }
+#[cfg(test)]
+fn test_provider_catalog() -> PluginProviderCatalog {
+    with_test_provider_registration(PluginProviderCatalog::new())
+        .expect("the test Provider registration should be valid")
+}
+
+#[cfg(test)]
+pub(crate) fn with_test_provider_registration(
+    provider_catalog: PluginProviderCatalog,
+) -> Result<PluginProviderCatalog, PluginSystemError> {
+    let contract = PluginProviderContract::unscoped_test_entrypoint("builtin:runtime-demo");
+    let registration = PluginProviderRegistration::new(contract, |context| {
+        let provider: Arc<dyn SourceProvider> = Arc::new(DemoSourceProvider::new(
+            context.provider_id,
+            context.declared_capabilities,
+            context.source_catalog,
+        ));
+        Ok(provider)
+    });
+    provider_catalog.with_registration(registration)
 }
 
 #[cfg(test)]
@@ -2247,58 +2218,6 @@ impl SourceProvider for DemoSourceProvider {
             ))),
             request => Err(context.unsupported_action(request.source(), request.action())),
         }
-    }
-}
-
-#[cfg(test)]
-#[derive(Debug)]
-struct CatalogSourceProvider {
-    id: String,
-    capabilities: BTreeSet<SourceCapability>,
-    sources: BTreeMap<String, SourceInfo>,
-}
-
-#[cfg(test)]
-impl CatalogSourceProvider {
-    fn new(
-        id: String,
-        capabilities: BTreeSet<SourceCapability>,
-        sources: BTreeMap<String, SourceInfo>,
-    ) -> Self {
-        Self {
-            id,
-            capabilities,
-            sources,
-        }
-    }
-}
-
-#[cfg(test)]
-impl SourceProvider for CatalogSourceProvider {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn required_capabilities(&self) -> BTreeSet<SourceCapability> {
-        self.capabilities.clone()
-    }
-
-    fn initialize(
-        &self,
-        context: &mut SourceRuntimeContext,
-    ) -> Result<BTreeMap<String, SourceInfo>, SourceRuntimeError> {
-        context.info("initialized catalog-only Plugin Source Provider");
-        Ok(self.sources.clone())
-    }
-
-    fn handle_request(
-        &self,
-        context: &mut SourceRuntimeContext,
-        _request: SourceRequest,
-    ) -> Result<SourceResponse, SourceRuntimeError> {
-        Err(context.provider_error(
-            "catalog-only provider has no executable Source Provider implementation",
-        ))
     }
 }
 
@@ -2481,6 +2400,21 @@ fn runtime_error(plugin_id: &str, error: SourceRuntimeError) -> PluginSystemErro
         message: error.to_string(),
         diagnostics,
     }
+}
+
+/// Loads and validates a Plugin package against the supplied host contracts.
+///
+/// `package_path` may point to the package directory or its `plugin.json`.
+pub fn validate_plugin_package(
+    package_path: &Path,
+    provider_catalog: &PluginProviderCatalog,
+) -> Result<PluginManifest, PluginSystemError> {
+    let package_path = normalize_package_path(package_path)?;
+    let manifest = read_manifest(&package_path)?;
+    provider_catalog
+        .validate_manifest(&manifest)
+        .map_err(|errors| PluginSystemError::InvalidManifest(errors.join("; ")))?;
+    Ok(manifest)
 }
 
 fn read_manifest(package_path: &Path) -> Result<PluginManifest, PluginSystemError> {
@@ -2675,7 +2609,6 @@ mod tests {
     use super::*;
     use crate::source_runtime::SourceQuality;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Mutex;
 
     static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -2741,113 +2674,213 @@ mod tests {
     }
 
     #[test]
-    fn bundled_netease_manifest_should_validate() {
+    fn bundled_netease_manifest_should_match_the_registered_contract() {
         let manifest =
             serde_json::from_str::<PluginManifest>(include_str!("../plugins/netease/plugin.json"))
                 .expect("bundled NetEase manifest should deserialize");
+        let catalog = crate::bundled_plugins::contract_catalog()
+            .expect("bundled Provider contracts should register");
 
-        manifest
-            .validate()
-            .expect("bundled NetEase manifest should validate");
-        let mut connection = Connection::open_in_memory().expect("test database should open");
-        crate::database::initialize(&mut connection).expect("test database should initialize");
-        let bridge: Arc<dyn NeteaseProviderBridge> = Arc::new(
-            crate::netease::NeteaseServiceBridge::new(
-                Arc::new(Mutex::new(connection)),
-                Arc::new(source_runtime::DefaultSourceHost::new(
-                    std::time::Duration::from_secs(1),
-                    1024,
-                )),
-            )
-            .expect("NetEase Service Bridge should initialize"),
-        );
-        let provider = build_provider(
-            &manifest,
-            &manifest.provider_entrypoints[0],
-            Path::new("."),
-            Some(bridge),
-            None,
-        )
-        .expect("bundled NetEase Provider should load through its Plugin entrypoint");
-
-        assert_eq!(provider.id(), crate::netease::NETEASE_PROVIDER_ID);
+        catalog
+            .validate_manifest(&manifest)
+            .expect("bundled NetEase manifest should match its host contract");
     }
 
     #[test]
     fn builtin_netease_entrypoint_should_be_reserved_for_the_bundled_package() {
         let mut impostor = manifest("user.netease", "builtin:netease", &[]);
-        impostor.provider_entrypoints[0].id = NETEASE_PROVIDER_ID.to_owned();
+        impostor.provider_entrypoints[0].id = crate::netease::NETEASE_PROVIDER_ID.to_owned();
+        impostor.supported_api_version = crate::netease::NETEASE_PROVIDER_API_VERSION;
+        impostor.required_host_bridges = [crate::netease::NETEASE_HOST_BRIDGE_ID.to_owned()]
+            .into_iter()
+            .collect();
+        impostor.provider_entrypoints[0].capabilities = [
+            SourceCapability::AccountRef,
+            SourceCapability::PlaylistRead,
+            SourceCapability::PlaylistWrite,
+            SourceCapability::BridgeNeteaseApiEnhanced,
+        ]
+        .into_iter()
+        .collect();
+        let catalog = crate::bundled_plugins::contract_catalog()
+            .expect("bundled Provider contracts should register");
 
-        let error = match build_provider(
-            &impostor,
-            &impostor.provider_entrypoints[0],
-            Path::new("."),
-            None,
-            None,
-        ) {
-            Ok(_) => panic!("a noncanonical package must not construct the NetEase Provider"),
-            Err(error) => error,
-        };
+        let errors = catalog
+            .validate_manifest(&impostor)
+            .expect_err("a noncanonical package must not claim the NetEase entrypoint");
 
-        assert!(matches!(
-            error,
-            PluginSystemError::ProviderLoad { message, .. }
-                if message.contains("only built-in provider entrypoints")
-        ));
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("reserved for Plugin fika.netease")));
     }
 
     #[test]
-    fn bundled_kugou_manifest_should_validate_and_load() {
+    fn bundled_kugou_manifest_should_match_the_registered_contract() {
         let manifest =
             serde_json::from_str::<PluginManifest>(include_str!("../plugins/kugou/plugin.json"))
                 .expect("bundled KuGou manifest should deserialize");
-        manifest
-            .validate()
-            .expect("bundled KuGou manifest should validate");
-        let mut connection = Connection::open_in_memory().expect("test database should open");
-        crate::database::initialize(&mut connection).expect("test database should initialize");
-        let bridge: Arc<dyn KugouProviderBridge> = Arc::new(
-            crate::kugou::KugouServiceBridge::new(
-                Arc::new(Mutex::new(connection)),
-                Arc::new(source_runtime::DefaultSourceHost::new(
-                    std::time::Duration::from_secs(1),
-                    1024,
-                )),
-            )
-            .expect("KuGou Service Bridge should initialize"),
-        );
-        let provider = build_provider(
-            &manifest,
-            &manifest.provider_entrypoints[0],
-            Path::new("."),
-            None,
-            Some(bridge),
-        )
-        .expect("bundled KuGou Provider should load through its Plugin entrypoint");
+        let catalog = crate::bundled_plugins::contract_catalog()
+            .expect("bundled Provider contracts should register");
 
-        assert_eq!(provider.id(), crate::kugou::KUGOU_PROVIDER_ID);
+        catalog
+            .validate_manifest(&manifest)
+            .expect("bundled KuGou manifest should match its host contract");
     }
 
     #[test]
     fn builtin_kugou_entrypoint_should_be_reserved_for_the_bundled_package() {
         let mut impostor = manifest("user.kugou", "builtin:kugou", &[]);
-        impostor.provider_entrypoints[0].id = KUGOU_PROVIDER_ID.to_owned();
+        impostor.provider_entrypoints[0].id = crate::kugou::KUGOU_PROVIDER_ID.to_owned();
+        impostor.supported_api_version = crate::kugou::KUGOU_PROVIDER_API_VERSION;
+        impostor.required_host_bridges = [crate::kugou::KUGOU_HOST_BRIDGE_ID.to_owned()]
+            .into_iter()
+            .collect();
+        impostor.provider_entrypoints[0].capabilities = [
+            SourceCapability::AccountRef,
+            SourceCapability::PlaylistRead,
+            SourceCapability::PlaylistWrite,
+            SourceCapability::BridgeKugouMusicApi,
+        ]
+        .into_iter()
+        .collect();
+        let catalog = crate::bundled_plugins::contract_catalog()
+            .expect("bundled Provider contracts should register");
 
-        let error = match build_provider(
-            &impostor,
-            &impostor.provider_entrypoints[0],
-            Path::new("."),
-            None,
-            None,
+        let errors = catalog
+            .validate_manifest(&impostor)
+            .expect_err("a noncanonical package must not claim the KuGou entrypoint");
+
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("reserved for Plugin fika.kugou")));
+    }
+
+    #[test]
+    fn manifest_deserialization_rejects_unknown_fields() {
+        let error = serde_json::from_value::<PluginManifest>(json!({
+            "manifestVersion": 1,
+            "id": "test.plugin",
+            "name": "Test Plugin",
+            "version": "1.0.0",
+            "providerEntrypoints": [{
+                "id": "test-provider",
+                "entrypoint": "builtin:runtime-demo",
+                "capabilites": []
+            }],
+            "capabilities": [],
+            "compatibilityTarget": "fika-music",
+            "supportedApiVersion": { "major": 1, "minor": 4 },
+            "requiredHostBridges": []
+        }))
+        .expect_err("a misspelled field must not be ignored");
+
+        assert!(error.to_string().contains("capabilites"));
+    }
+
+    #[test]
+    fn provider_catalog_rejects_an_unregistered_entrypoint() {
+        let plugin = manifest("test.plugin", "builtin:missing", &[]);
+
+        let errors = test_provider_catalog()
+            .validate_manifest(&plugin)
+            .expect_err("an unknown entrypoint must fail contract validation");
+
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("unregistered entrypoint builtin:missing")));
+    }
+
+    #[test]
+    fn provider_catalog_rejects_a_missing_required_host_bridge() {
+        let mut manifest =
+            serde_json::from_str::<PluginManifest>(include_str!("../plugins/netease/plugin.json"))
+                .expect("bundled NetEase manifest should deserialize");
+        manifest.required_host_bridges.clear();
+        let catalog = crate::bundled_plugins::contract_catalog()
+            .expect("bundled Provider contracts should register");
+
+        let errors = catalog
+            .validate_manifest(&manifest)
+            .expect_err("a required host bridge must be declared");
+
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("requires host bridge netease-api-enhanced")));
+    }
+
+    #[test]
+    fn provider_factory_capabilities_must_match_the_manifest() {
+        let contract = PluginProviderContract::unscoped_test_entrypoint("builtin:mismatch");
+        let registration = PluginProviderRegistration::new(contract, |context| {
+            let provider: Arc<dyn SourceProvider> = Arc::new(DemoSourceProvider::new(
+                context.provider_id,
+                BTreeSet::new(),
+                context.source_catalog,
+            ));
+            Ok(provider)
+        });
+        let catalog = PluginProviderCatalog::new()
+            .with_registration(registration)
+            .expect("test Provider registration should be valid");
+        let plugin = manifest(
+            "test.plugin",
+            "builtin:mismatch",
+            &[SourceCapability::NetworkAny],
+        );
+
+        let error = match catalog.build_provider(
+            &plugin,
+            &plugin.provider_entrypoints[0],
+            PathBuf::from("."),
         ) {
-            Ok(_) => panic!("a noncanonical package must not construct the KuGou Provider"),
+            Ok(_) => panic!("factory capabilities must match the manifest"),
             Err(error) => error,
         };
 
         assert!(matches!(
             error,
             PluginSystemError::ProviderLoad { message, .. }
-                if message.contains("only built-in provider entrypoints")
+                if message.contains("capabilities do not match")
+        ));
+    }
+
+    #[test]
+    fn provider_factory_api_version_must_match_the_registered_contract() {
+        let contract = PluginProviderContract::new(
+            "test.plugin",
+            "test.plugin-provider",
+            "builtin:api-mismatch",
+            SourceRuntimeApiVersion::new(1, 3),
+            [],
+            std::iter::empty::<String>(),
+        );
+        let registration = PluginProviderRegistration::new(contract, |context| {
+            let provider: Arc<dyn SourceProvider> = Arc::new(DemoSourceProvider::new(
+                context.provider_id,
+                context.declared_capabilities,
+                context.source_catalog,
+            ));
+            Ok(provider)
+        });
+        let catalog = PluginProviderCatalog::new()
+            .with_registration(registration)
+            .expect("test Provider registration should be valid");
+        let mut plugin = manifest("test.plugin", "builtin:api-mismatch", &[]);
+        plugin.supported_api_version = SourceRuntimeApiVersion::new(1, 3);
+
+        let error = match catalog.build_provider(
+            &plugin,
+            &plugin.provider_entrypoints[0],
+            PathBuf::from("."),
+        ) {
+            Ok(_) => panic!("factory API version must match the registered contract"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            PluginSystemError::ProviderLoad { message, .. }
+                if message.contains("Provider API 1.4, expected 1.3")
         ));
     }
 
@@ -3697,26 +3730,40 @@ mod tests {
         let user = root.join("user");
         fs::create_dir_all(&bundled).expect("bundled directory should be created");
         fs::create_dir_all(&user).expect("user directory should be created");
-        let mut plugin = manifest(
+        let plugin = manifest(
             "broken.plugin",
-            "builtin:runtime-demo",
+            "builtin:broken-demo",
             &[SourceCapability::NetworkAny],
         );
         let provider_id = plugin.provider_entrypoints[0].id.clone();
-        plugin.provider_entrypoints[0].source_catalog.insert(
-            "broken-source".to_owned(),
-            source_runtime::lx_music_source(
-                "broken-source",
-                "Broken Source",
-                vec![SourceAction::MusicSearch, SourceAction::MusicSearch],
-                Vec::new(),
-            ),
-        );
         write_package(&bundled, &plugin);
 
         let connection = database();
         let runtime = Arc::new(SourceRuntime::new());
-        let mut registry = PluginRegistry::new(&user, &bundled, Arc::clone(&runtime));
+        let broken_contract =
+            PluginProviderContract::unscoped_test_entrypoint("builtin:broken-demo");
+        let broken_registration = PluginProviderRegistration::new(broken_contract, |context| {
+            let sources = BTreeMap::from([(
+                "broken-source".to_owned(),
+                source_runtime::lx_music_source(
+                    "broken-source",
+                    "Broken Source",
+                    vec![SourceAction::MusicSearch, SourceAction::MusicSearch],
+                    Vec::new(),
+                ),
+            )]);
+            let provider: Arc<dyn SourceProvider> = Arc::new(DemoSourceProvider::new(
+                context.provider_id,
+                context.declared_capabilities,
+                sources,
+            ));
+            Ok(provider)
+        });
+        let provider_catalog = PluginProviderCatalog::new()
+            .with_registration(broken_registration)
+            .expect("broken test Provider registration should be valid");
+        let mut registry = PluginRegistry::new(&user, &bundled, Arc::clone(&runtime))
+            .with_provider_catalog(provider_catalog);
         registry
             .refresh(&connection)
             .expect("registry should refresh");

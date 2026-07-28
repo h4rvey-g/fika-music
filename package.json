@@ -8,6 +8,8 @@
     "build": "vue-tsc --noEmit && vite build",
     "bindings:generate": "cargo run --manifest-path src-tauri/Cargo.toml --bin export-bindings",
     "bindings:check": "cargo run --manifest-path src-tauri/Cargo.toml --bin export-bindings -- --check",
+    "plugins:validate": "cargo run --manifest-path src-tauri/Cargo.toml --bin validate-plugin --",
+    "plugins:check": "npm run plugins:validate",
     "test": "vitest run --environment jsdom",
     "preview": "vite preview",
     "tauri": "tauri"

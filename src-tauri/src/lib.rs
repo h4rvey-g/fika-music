@@ -22,6 +22,7 @@ use walkdir::WalkDir;
 mod account_commands;
 mod album_art;
 pub mod audio_source_system;
+pub mod bundled_plugins;
 mod database;
 mod download_source_router;
 pub mod kugou;
@@ -454,17 +455,16 @@ impl AppState {
         }
         let mut audio_source_registry =
             AudioSourceRegistry::new(audio_sources_dir, Arc::clone(&source_runtime));
+        let provider_catalog =
+            bundled_plugins::provider_catalog(provider_bridge, kugou_provider_bridge)?;
+        #[cfg(test)]
+        let provider_catalog = plugin_system::with_test_provider_registration(provider_catalog)?;
         let mut plugin_registry = PluginRegistry::new(
             user_plugins_dir,
             bundled_plugins_dir,
             Arc::clone(&source_runtime),
         )
-        .with_available_host_bridges([
-            netease::NETEASE_HOST_BRIDGE_ID.to_owned(),
-            kugou::KUGOU_HOST_BRIDGE_ID.to_owned(),
-        ])
-        .with_netease_bridge(provider_bridge)
-        .with_kugou_bridge(kugou_provider_bridge);
+        .with_provider_catalog(provider_catalog);
         {
             let connection = db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
             audio_source_registry.refresh(&connection)?;

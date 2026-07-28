@@ -36,6 +36,7 @@ Frontend-only checks:
 
 ```sh
 npm run bindings:check
+npm run plugins:check
 npm test
 npm run build
 ```
@@ -53,3 +54,9 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml
 
 Bundled Plugins start disabled. Enabling one automatically grants the
 capabilities declared by its current manifest.
+
+## Documentation
+
+- [Documentation index](./docs/README.md)
+- [Writing Plugins](./docs/PLUGINS.md)
+- [Plugin manifest reference](./docs/PLUGIN_MANIFEST.md)

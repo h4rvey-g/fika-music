@@ -1,155 +1,195 @@
-# Plugin Manifest
+# Plugin manifest reference
 
-Plugin packages are directories containing a `plugin.json` file. The
-manifest is metadata and permission policy; it is not permission to execute
-arbitrary native code. Imported playback-only Audio Sources are not Plugins;
-their separate format is documented in [`AUDIO_SOURCES.md`](./AUDIO_SOURCES.md).
+`plugin.json` is the versioned package and permission contract consumed by the
+Plugin System. It does not load code from the package. A Provider can run only
+when its symbolic entrypoint is registered by the host.
 
-## Schema
+> Production currently has no unreserved third-party Provider entrypoint.
+> Installing a package cannot add Rust code, a dynamic library, JavaScript, or
+> a sidecar. See [Writing Plugins](./PLUGINS.md) for the supported extension
+> workflow.
+
+## Validate a package
+
+Validate all bundled packages:
+
+```sh
+npm run plugins:check
+```
+
+Validate one package directory or its `plugin.json`:
+
+```sh
+npm run plugins:validate -- path/to/package
+```
+
+The command uses the same Rust deserializer, structural checks, and registered
+Provider contracts as the application. Unknown JSON fields are rejected, so a
+misspelled field cannot silently fall back to a default.
+
+## Canonical example
+
+This is the complete bundled KuGou manifest:
 
 ```json
 {
   "manifestVersion": 1,
-  "id": "fika.netease",
-  "name": "NetEase Cloud Music",
+  "id": "fika.kugou",
+  "name": "KuGou Music",
   "version": "0.1.0",
-  "description": "Bundled recommendations and Playlist integration",
+  "description": "Bundled KuGou search, QR login, playback, recommendations, and Playlist integration.",
   "author": "Fika Music",
+  "homepage": "https://github.com/MakcRe/KuGouMusicApi",
   "providerEntrypoints": [
     {
-      "id": "fika-netease",
-      "entrypoint": "builtin:netease",
+      "id": "fika-kugou",
+      "entrypoint": "builtin:kugou",
       "capabilities": [
         "account:ref",
         "playlist:read",
         "playlist:write",
-        "bridge:netease-api-enhanced"
-      ],
-      "sourceCatalog": {}
+        "bridge:kugou-music-api"
+      ]
     }
   ],
   "capabilities": [],
   "compatibilityTarget": "fika-music",
   "supportedApiVersion": {
     "major": 1,
-    "minor": 1
+    "minor": 4
   },
-  "requiredHostBridges": ["netease-api-enhanced"]
+  "requiredHostBridges": ["kugou-music-api"]
 }
 ```
 
-`version` uses semantic versioning. Provider IDs must be unique within the
-package and across bundled and user-installed packages; a colliding package is
-shown as invalid. Package IDs must also be unique across bundled and
-user-installed packages. Each `(source, action)` route must belong to exactly
-one Provider within a package; overlapping declared routes are rejected during
-manifest validation and overlapping runtime catalogs reject activation. The
-supported Source Runtime API version must be compatible with the host runtime.
-Unknown host bridges leave a package visible but incompatible.
+## Package fields
 
-Provider capabilities can be declared at package level or entrypoint level;
-the effective declaration for a Provider is the union of package-level and that
-entrypoint's declarations. Enabling a Plugin grants its complete declared set,
-and each Source Provider receives only its own intersection. Installation does
-not execute a Provider, and an entrypoint-only capability is not exposed to
-sibling Providers.
+| Field | Type | Required | Rule |
+| --- | --- | --- | --- |
+| `manifestVersion` | integer | Yes | Must equal `1`. |
+| `id` | string | Yes | Globally unique Plugin ID. Maximum 128 bytes; starts with an ASCII letter or digit; remaining characters are ASCII letters, digits, `.`, `_`, or `-`. |
+| `name` | string | Yes | Non-empty after trimming. |
+| `version` | string | Yes | Valid semantic version, including SemVer prerelease rules. |
+| `description` | string or `null` | No | Display text. Defaults to `null`. |
+| `author` | string or `null` | No | Display text. Defaults to `null`. |
+| `homepage` | string or `null` | No | Display text; the current validator does not parse it as a URL. |
+| `providerEntrypoints` | array | Yes | At least one Provider entry. Provider IDs must be globally unique across discovered packages. |
+| `capabilities` | capability array | No | Capabilities inherited by every Provider in this package. Defaults to `[]`. |
+| `compatibilityTarget` | string | Yes | `fika-music` or `*` is compatible with this host. Any other non-empty value makes the package incompatible. |
+| `supportedApiVersion` | object | Yes | Source Runtime contract required by the package. The registered entrypoint contract must declare the same version. |
+| `requiredHostBridges` | string array | No | Host bridge IDs required before activation. Uses the same identifier grammar as `id`. Defaults to `[]`. |
 
-The production runtime accepts reserved entrypoints for bundled integrations:
-`builtin:netease` requires the `netease-api-enhanced` Service Bridge, while
-`builtin:kugou` requires the `kugou-music-api` Service Bridge. User packages
-cannot load a dynamic library or launch a sidecar. This keeps package
-discovery, capability enforcement, and lifecycle management in place without
-turning installation into an untrusted native-code execution boundary.
+Canonical manifests use exactly the field names above. The deserializer still
+accepts older aliases (`providers`, `sourceProviders`,
+`sourceProviderEntrypoints`, `sourceRuntimeApiVersion`, and `hostBridges`) for
+migration, but new packages must not use them. A legacy `manifest.json` file is
+also readable; `plugin.json` is the only current package filename.
 
-`builtin:runtime-demo` and `builtin:catalog` exist only in Rust test builds.
-`builtin:qishui` is not a production entrypoint. Legacy
-`builtin:lx-js:<adapter>:<source-fingerprint>` manifests are recognized only
-for startup migration and are rejected as new Plugin packages.
+## Provider fields
 
-`builtin:netease` is reserved for package `fika.netease` and Provider
-`fika-netease`; another package cannot use that host bridge entrypoint.
-`builtin:kugou` is likewise reserved for package `fika.kugou` and Provider
-`fika-kugou`.
+| Field | Type | Required | Rule |
+| --- | --- | --- | --- |
+| `id` | string | Yes | Globally unique Provider ID using the Plugin ID grammar. |
+| `entrypoint` | string | Yes | Symbolic host entrypoint with no `/`, `\`, or control characters. It must exist in `PluginProviderCatalog`. |
+| `capabilities` | capability array | No | Provider-specific declarations. Defaults to `[]`. |
+| `sourceCatalog` | object keyed by source ID | No | Optional pre-activation metadata. Built-in Rust Providers normally omit it and return the authoritative catalog from `initialize`. |
 
-## Audio Source boundary
+The effective capability set for one Provider is:
 
-LX JavaScript source import is owned by the Audio Source Registry and the
-Audio Sources view. It never creates a `PluginRecord`, `plugin.json`, Plugin
-sidebar entry, or Plugin permission state. The Source Runtime remains shared
-internally, but the two registries have separate package formats, directories,
-SQLite tables, commands, diagnostics, and lifecycle records.
-
-At startup, legacy user Plugin packages with an importer-owned
-`builtin:lx-js:*` entrypoint are converted to managed Audio Source packages.
-Their enabled state, permission review, grants, and diagnostics are moved before
-the old Plugin rows and directory are removed.
-
-## Locations and lifecycle
-
-- Bundled packages live under the app resource `plugins` directory.
-- User packages are copied into the platform app-data `plugins` directory.
-- A newly installed package starts disabled and can be enabled immediately.
-- Enabling automatically grants every capability declared by the current
-  manifest. The Plugin manager presents these declarations as read-only data.
-- Bundled packages can be disabled but cannot be removed.
-- Removing a user package deactivates its Providers before the package and
-  persisted state are deleted.
-
-The registry persists enabled state, capability grants, and the latest bounded
-diagnostic history in SQLite. Grant state is bound to a SHA-256 digest of the
-normalized manifest, so changing a package manifest disables the package and
-clears prior grants; the next Enable action grants the new declaration.
-Reinstalling identical manifest content preserves the existing lifecycle state.
-Enabled Providers are initialized again during application startup and registry
-refresh. Refresh, removal, lifecycle, capability, and diagnostic writes use
-SQLite transactions or savepoints. Refresh and removal also restore the prior
-Provider handles, runtime grants, in-memory records, and package directory when
-a database or filesystem step fails.
-Runtime initialization reports, load failures, compatibility failures, and
-security denials are exposed per package through the Plugin System commands
-and UI.
-
-## Runtime requests
-
-Enabled packages can receive typed Source Runtime requests through the
-`dispatch_plugin_request` Tauri command:
-
-```json
-{
-  "pluginId": "example.source",
-  "request": {
-    "action": "musicSearch",
-    "source": "wy",
-    "keyword": "fika",
-    "page": 1,
-    "pageSize": 20
-  },
-  "requestId": "optional-cancellation-key"
-}
+```text
+package capabilities union Provider capabilities
 ```
 
-The request uses the serialized `SourceRequest` contract. Runtime API 1.0
-includes `musicSearch`, `musicUrl`, `lyric`, and `pic`. Runtime API 1.1 adds
-`musicRecommendations`, `playlistList`, `playlistRead`, `playlistAddTrack`, and
-`playlistRemoveTrack`, with normalized Remote Track and Playlist response
-types. The request is rejected unless the package is enabled, its Provider
-exposes the requested source/action, and the required capabilities are granted.
-Playlist mutations require both `playlist:read` and `playlist:write` so the
-bridge can verify Playlist ownership before writing; account-backed calls
-resolve an opaque Account Ref through the Provider-scoped host boundary.
+The Provider factory must return exactly that set from
+`SourceProvider::required_capabilities`. Entry-point capabilities never leak to
+a sibling Provider.
 
-A request ID can be cancelled with `cancel_source_request`; cancellation is
-cooperative and bounded by the host operation timeout. Database and Plugin
-registry locks are released while Provider code runs; completion diagnostics
-are attached only if the same Provider instance is still active. A diagnostic
-persistence failure is retained as an in-memory warning when possible and never
-replaces the Provider response or runtime error returned to the caller.
+If `sourceCatalog` is present, every object key must equal its source `id`, the
+source name must be non-empty, and `actions` must be non-empty and contain no
+duplicates. `qualities` must not contain duplicates. Routes are unique by
+`(source ID, action)` across Providers in one package. Runtime initialization
+also rejects empty catalogs, whitespace in source IDs, key/ID mismatches, and
+duplicate actions or qualities.
 
-Package replacement uses a non-overlapping staged copy and revalidates the
-manifest before activation. A source package that contains, or is contained by,
-the destination or staging workspace is rejected. The previous package and
-SQLite lifecycle state are restored if replacement or registry refresh fails.
-Removal first moves a user package to a same-filesystem quarantine; it deletes
-that quarantine only after the SQLite transaction commits. If quarantine
-cleanup fails, the registry restores the package, persisted lifecycle state,
-and active Provider state before reporting the failed removal.
+## Registered entrypoints
+
+| Entrypoint | Plugin ID | Provider ID | Runtime API | Required host bridge |
+| --- | --- | --- | --- | --- |
+| `builtin:netease` | `fika.netease` | `fika-netease` | `1.4` | `netease-api-enhanced` |
+| `builtin:kugou` | `fika.kugou` | `fika-kugou` | `1.4` | `kugou-music-api` |
+
+Both production entrypoints are reserved for their listed Plugin and Provider
+IDs. `builtin:runtime-demo` exists only in Rust tests. Legacy
+`builtin:lx-js:*` entries are recognized only for migration to the separate
+Audio Source Registry and are rejected for Plugin installation.
+
+## Capabilities
+
+| Value | Host operation it gates |
+| --- | --- |
+| `network:any` | General host-mediated network requests. |
+| `account:ref` | Resolution of an opaque, Provider-scoped Account Ref. |
+| `playlist:read` | Account Playlist listing and detail access. |
+| `playlist:write` | Playlist mutation; mutation paths also require read access. |
+| `metadata:read` | Reserved for host-mediated metadata reads; no current production Provider uses it. |
+| `cache:read-write` | Provider-scoped runtime cache reads and writes. |
+| `bridge:netease-api-enhanced` | Calls through the NetEase host bridge. |
+| `bridge:kugou-music-api` | Calls through the KuGou host bridge. |
+
+A bridge has two independent declarations:
+
+- `requiredHostBridges` makes host availability part of package compatibility.
+- The matching `bridge:*` capability authorizes Provider calls at runtime.
+
+Registered Provider contracts require both declarations where applicable.
+Enabling a Plugin grants its complete current manifest declaration. Changing
+the normalized manifest changes its SHA-256 fingerprint, disables the Plugin,
+and clears the previous grants until it is enabled again.
+
+## Runtime versions
+
+Compatibility requires the same major version and a package minor version less
+than or equal to the host minor version. The current host is `1.4`.
+
+| Version | Contract introduced |
+| --- | --- |
+| `1.0` | `musicSearch`, `musicUrl`, `lyric`, `pic` |
+| `1.1` | `musicRecommendations`, `playlistList`, `playlistRead`, `playlistAddTrack`, `playlistRemoveTrack` |
+| `1.2` | `artistSearch`, `albumSearch`, `playlistSearch`, `searchSuggestions`, `artistTopTracks`, `albumRead`, `playlistReadPublic` |
+| `1.3` | Recommendation kinds: `daily`, `roaming`, and `radar`; omitted `kind` defaults to `daily`. |
+| `1.4` | `artistAlbums`, `artistBiography` |
+
+The serialized request and response DTOs are generated from Rust into
+`src/generated/bindings.ts`. Do not maintain a second handwritten type list.
+
+## Validation and lifecycle
+
+Validation occurs in this order:
+
+1. JSON decoding rejects missing required fields, unknown fields, unknown enum
+   values, and wrong JSON types.
+2. `PluginManifest::validate` checks identifiers, SemVer, Provider/source
+   structure, bridge IDs, and declared route collisions.
+3. `PluginProviderCatalog::validate_manifest` checks that every entrypoint is
+   registered and matches its fixed Plugin ID, Provider ID, Runtime API,
+   required capabilities, and required host bridges.
+4. Compatibility checks compare the target, Runtime API, and available host
+   bridges.
+5. Activation builds the Provider, verifies its ID, Runtime API, and
+   capabilities, then lets the Source Runtime validate the returned catalog
+   and every request/response.
+
+Malformed or contract-invalid discovered packages are visible as `invalid`.
+Target, Runtime API, or host availability failures are `incompatible`.
+Provider factory or initialization failures are `error`. Valid packages start
+`disabled` and become `enabled` only after all Providers initialize.
+
+Bundled packages cannot be removed. User packages are copied into the platform
+app-data `plugins` directory and can be removed. Installation rejects symbolic
+links and overlapping source, destination, or staging paths. Refresh,
+replacement, removal, capability changes, and activation use database and
+runtime compensation so a failed operation restores the previous package and
+Provider state where possible.
+
+Imported LX JavaScript is not a Plugin. Its format and lifecycle are documented
+in [Audio Sources](./AUDIO_SOURCES.md).
