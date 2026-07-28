@@ -101,10 +101,24 @@ describe("desktop lyrics window coordination", () => {
     });
   });
 
-  it("hides the menu bar item for playback status messages", async () => {
+  it("keeps the menu bar item enabled for playback status messages", async () => {
     const payload = state(false);
     payload.preferences.menuBarEnabled = true;
     payload.currentLineKey = "message:Lyrics unavailable";
+
+    await syncMenuBarLyrics(payload);
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("set_menu_bar_lyrics", {
+      enabled: true,
+      line: "",
+      title: "Track",
+      subtitle: "Artist",
+      maxWidth: 40,
+    });
+  });
+
+  it("disables the menu bar item when the preference is off", async () => {
+    const payload = state(false);
 
     await syncMenuBarLyrics(payload);
 

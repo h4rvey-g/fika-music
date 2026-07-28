@@ -47,13 +47,12 @@ export async function broadcastDesktopLyricsState(state: DesktopLyricsState) {
 export async function syncMenuBarLyrics(state: DesktopLyricsState) {
   if (!hasDesktopWindowRuntime()) return;
 
-  const enabled = state.preferences.menuBarEnabled
-    && !state.currentLineKey.startsWith("message:")
+  const hasDisplayableLine = !state.currentLineKey.startsWith("message:")
     && state.currentLine.trim().length > 0;
 
   await ignoreUnsupported(() => invoke(TAURI_COMMANDS.setMenuBarLyrics, {
-    enabled,
-    line: state.currentLine,
+    enabled: state.preferences.menuBarEnabled,
+    line: hasDisplayableLine ? state.currentLine : "",
     title: state.title,
     subtitle: state.subtitle,
     maxWidth: state.preferences.menuBarMaxWidth,

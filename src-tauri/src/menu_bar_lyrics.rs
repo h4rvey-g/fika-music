@@ -29,7 +29,7 @@ pub fn update(
     max_width: u16,
 ) -> tauri::Result<()> {
     let line = normalize_line(line);
-    if !enabled || line.is_empty() {
+    if !enabled {
         if let Some(tray) = app.tray_by_id(MENU_BAR_LYRICS_ID) {
             tray.set_visible(false)?;
         }
@@ -37,7 +37,7 @@ pub fn update(
     }
 
     let max_width = usize::from(max_width.clamp(MIN_MENU_BAR_WIDTH, MAX_MENU_BAR_WIDTH));
-    let display_line = truncate_line(&line, max_width);
+    let display_line = display_line(&line, max_width);
     let tooltip = tooltip(title, subtitle, &line);
     let tray = match app.tray_by_id(MENU_BAR_LYRICS_ID) {
         Some(tray) => tray,
@@ -45,6 +45,8 @@ pub fn update(
     };
     tray.set_title(Some(display_line))?;
     tray.set_tooltip(Some(tooltip))?;
+    // tray-icon removes the NSStatusItem when hidden. Keeping it alive while the
+    // preference is enabled preserves its position in menu bar managers.
     tray.set_visible(true)
 }
 
@@ -98,10 +100,19 @@ fn tooltip(title: &str, subtitle: &str, line: &str) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(" - ");
-    if track.is_empty() {
-        line.to_owned()
+    match (track.is_empty(), line.is_empty()) {
+        (true, _) => line.to_owned(),
+        (false, true) => track,
+        (false, false) => format!("{track}\n{line}"),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn display_line(line: &str, max_width: usize) -> String {
+    if line.is_empty() {
+        ELLIPSIS.to_owned()
     } else {
-        format!("{track}\n{line}")
+        truncate_line(line, max_width)
     }
 }
 
@@ -182,5 +193,15 @@ mod tests {
             tooltip("Song", "Artist", "A lyric"),
             "Song - Artist\nA lyric"
         );
+    }
+
+    #[test]
+    fn tooltip_should_omit_empty_lyric_line() {
+        assert_eq!(tooltip("Song", "Artist", ""), "Song - Artist");
+    }
+
+    #[test]
+    fn display_line_should_keep_a_placeholder_for_empty_lyrics() {
+        assert_eq!(display_line("", 40), ELLIPSIS);
     }
 }
