@@ -56,6 +56,7 @@ import {
   refreshOnlineDownloadItemCandidates,
   retryOnlineDownloadItem,
   selectOnlineDownloadDirectory,
+  splitOnlineArtistNames,
   startOnlineDownloadTask,
   startOnlineMusicSearch,
   updateOnlineMusicSettings,
@@ -249,6 +250,7 @@ const playlistLibraryError = ref<string | null>(null);
 const pendingPlaylistTracks = ref<OnlineTrack[]>([]);
 const selectedPlaylistTargetKey = ref("");
 const trackActionId = ref<string | null>(null);
+const entityActionId = ref<string | null>(null);
 const trackActionMessage = ref<string | null>(null);
 const favoriteTrackKeys = ref<Set<string>>(new Set());
 const favoriteTrackIdentities = ref<Set<string>>(new Set());
@@ -272,6 +274,8 @@ let pendingPrivateRoamingBatch: Promise<OnlineRecommendationsResult | null> | nu
 let playlistLibraryGeneration = 0;
 let playlistLibraryRequestId: string | null = null;
 let pendingPlaylistLibraryLoad: Promise<OnlinePlaylistsResult | null> | null = null;
+let entityResolveRequestId: string | null = null;
+let entityResolveGeneration = 0;
 let trackActionMessageTimer: number | null = null;
 let pendingSearchEvents: OnlineSearchSectionEvent[] = [];
 let listEntryGeneration = 0;
@@ -429,8 +433,10 @@ watch(
       void finishVisibleSongListEntry(entryGeneration);
     } else if (playlistLibraryRequestId) {
       cancelPlaylistLibraryLoad();
+      cancelTrackEntityResolution();
       songListFollow.cancelPending();
     } else {
+      cancelTrackEntityResolution();
       songListFollow.cancelPending();
     }
   },
@@ -466,6 +472,7 @@ onBeforeUnmount(() => {
   if (suggestionTimer !== null) window.clearTimeout(suggestionTimer);
   if (suggestionRequestId) void cancelSourceRequest(suggestionRequestId);
   if (detailRequestId) void cancelSourceRequest(detailRequestId);
+  cancelTrackEntityResolution();
   cancelArtistDetailRequests();
   cancelRecommendationLoads();
   cancelPlaylistLibraryLoad();
@@ -1006,6 +1013,7 @@ async function loadNextPrivateRoamingBatch(targetQueue = recommendationTracks.va
 }
 
 async function openRecommendation(kind: MusicRecommendationKind, force = false) {
+  cancelTrackEntityResolution();
   abandonRecommendationRequest();
   activeRecommendation.value = kind;
   recommendationTracks.value = [];
@@ -1031,6 +1039,7 @@ function abandonRecommendationRequest() {
 }
 
 function closeRecommendation() {
+  cancelTrackEntityResolution();
   abandonRecommendationRequest();
   activeRecommendation.value = null;
   recommendationTracks.value = [];
@@ -1047,6 +1056,7 @@ function closeRecommendation() {
 async function submitSearch(suggestion?: string) {
   const keyword = (suggestion ?? query.value).trim();
   if (!keyword) return;
+  cancelTrackEntityResolution();
   query.value = keyword;
   suggestionsOpen.value = false;
   abandonRecommendationRequest();
@@ -1183,6 +1193,131 @@ function cancelArtistDetailRequests() {
   artistBiographyRequestId = null;
 }
 
+function cancelTrackEntityResolution() {
+  entityResolveGeneration += 1;
+  entityActionId.value = null;
+  if (entityResolveRequestId) void cancelSourceRequest(entityResolveRequestId);
+  entityResolveRequestId = null;
+}
+
+function normalizedEntityText(value: string) {
+  return value.normalize("NFKC").toLowerCase().trim().split(/\s+/u).join(" ");
+}
+
+function artistIdentity(value: string) {
+  return [...new Set(
+    splitOnlineArtistNames(value)
+      .map(normalizedEntityText)
+      .filter(Boolean),
+  )].sort().join("\u001f");
+}
+
+function artistNamesMatch(left: string, right: string) {
+  return artistIdentity(left) === artistIdentity(right);
+}
+
+function artistNameIncluded(artists: string, artist: string) {
+  const target = normalizedEntityText(artist);
+  return splitOnlineArtistNames(artists)
+    .some((candidate) => normalizedEntityText(candidate) === target);
+}
+
+function resolveTrackArtist(result: OnlineSearchSectionResult, artistName: string) {
+  if (result.data.section !== "artists") return null;
+  const artists = result.data.items as OnlineArtist[];
+  const exact = artists.find((item) =>
+    normalizedEntityText(item.name) === normalizedEntityText(artistName)
+  );
+  if (exact) return exact;
+  return artists.find((item) => artistNamesMatch(item.name, artistName)) ?? null;
+}
+
+function resolveTrackAlbum(result: OnlineSearchSectionResult, track: OnlineTrack) {
+  if (result.data.section !== "albums" || !track.album) return null;
+  const albums = result.data.items as OnlineAlbum[];
+  const title = normalizedEntityText(track.album);
+  const titleMatches = albums.filter((item) => normalizedEntityText(item.title) === title);
+  return titleMatches.find((item) => artistNamesMatch(item.artist, track.artist))
+    ?? (titleMatches.length === 1 ? titleMatches[0] : null);
+}
+
+async function searchTrackEntity(
+  track: OnlineTrack,
+  kind: "artist" | "album",
+  label: string,
+) {
+  cancelTrackEntityResolution();
+  const generation = entityResolveGeneration;
+  const requestId = `online-track-${kind}-${Date.now()}-${generation}`;
+  entityResolveRequestId = requestId;
+  entityActionId.value = kind === "artist"
+    ? `artist:${track.key}:${label}`
+    : `album:${track.key}`;
+  globalError.value = null;
+  try {
+    const result = await getOnlineMusicSearchPage(
+      label,
+      kind === "artist" ? "artists" : "albums",
+      1,
+      20,
+      requestId,
+    );
+    return generation === entityResolveGeneration ? result : null;
+  } catch (error) {
+    if (generation === entityResolveGeneration) globalError.value = normalizeError(error);
+    return null;
+  } finally {
+    if (generation === entityResolveGeneration) {
+      entityResolveRequestId = null;
+      entityActionId.value = null;
+    }
+  }
+}
+
+async function openTrackArtist(track: OnlineTrack, artistName: string) {
+  if (detail.value?.kind === "artist"
+    && artistNamesMatch(detail.value.entity.name, artistName)) {
+    return;
+  }
+  if (detail.value?.kind === "album" && artistDetailHistory.value
+    && artistNamesMatch(artistDetailHistory.value.detail.entity.name, artistName)) {
+    await restoreArtistDetail();
+    return;
+  }
+
+  const result = await searchTrackEntity(track, "artist", artistName);
+  if (!result) return;
+  const artist = resolveTrackArtist(result, artistName);
+  if (!artist) {
+    globalError.value = `Could not find the artist page for "${artistName}".`;
+    return;
+  }
+  await openDetail({ kind: "artist", entity: artist });
+}
+
+async function openTrackAlbum(track: OnlineTrack) {
+  if (!track.album) return;
+  if (detail.value?.kind === "album"
+    && normalizedEntityText(detail.value.entity.title) === normalizedEntityText(track.album)
+    && artistNamesMatch(detail.value.entity.artist, track.artist)) {
+    return;
+  }
+
+  const result = await searchTrackEntity(track, "album", track.album);
+  if (!result) return;
+  const album = resolveTrackAlbum(result, track);
+  if (!album) {
+    globalError.value = `Could not find the album page for "${track.album}".`;
+    return;
+  }
+  if (detail.value?.kind === "artist"
+    && artistNameIncluded(album.artist, detail.value.entity.name)) {
+    await openArtistAlbum(album);
+    return;
+  }
+  await openDetail({ kind: "album", entity: album });
+}
+
 function resetArtistDetailState() {
   artistDetailTab.value = "topTracks";
   artistAlbums.value = [];
@@ -1203,6 +1338,7 @@ async function openDetail(
   rememberScroll = true,
   preserveArtistHistory = false,
 ) {
+  cancelTrackEntityResolution();
   if (!preserveArtistHistory) artistDetailHistory.value = null;
   if (rememberScroll) {
     resultScrollPosition.value = document.querySelector("main")?.scrollTop ?? 0;
@@ -1439,6 +1575,7 @@ async function openSection(section: OnlineSearchSection) {
 }
 
 async function closeSection() {
+  cancelTrackEntityResolution();
   expandedSection.value = null;
   const listEntry = beginVisibleSongListEntry();
   await nextTick();
@@ -1716,6 +1853,7 @@ function downloadItemStateLabel(state: OnlineDownloadTask["items"][number]["stat
 }
 
 async function backToResults() {
+  cancelTrackEntityResolution();
   detailAppendGeneration.value += 1;
   if (detailRequestId) void cancelSourceRequest(detailRequestId);
   cancelArtistDetailRequests();
@@ -1735,6 +1873,7 @@ async function backToResults() {
 }
 
 async function restoreArtistDetail() {
+  cancelTrackEntityResolution();
   const history = artistDetailHistory.value;
   if (!history || detail.value?.kind !== "album") {
     await backToResults();
@@ -1818,6 +1957,7 @@ function selectTab(tab: "search" | "downloads") {
   if (activeTab.value === tab) {
     return;
   }
+  cancelTrackEntityResolution();
   activeTab.value = tab;
   const listEntry = beginVisibleSongListEntry();
   void finishVisibleSongListEntry(listEntry);
@@ -1830,6 +1970,7 @@ function dismissGlobalError() {
 }
 
 function showHome() {
+  cancelTrackEntityResolution();
   activeTab.value = "search";
   query.value = "";
   submittedQuery.value = "";
@@ -2164,6 +2305,7 @@ defineExpose({
           :active-track="activeOnlineTrack"
           :is-playing="isPlaying"
           :track-action-id="trackActionId"
+          :entity-action-id="entityActionId"
           :supports-library-actions="supportsLibraryActions"
           :supports-playlist-selection="supportsPlaylistSelection"
           :is-favorite="isTrackFavorite"
@@ -2173,6 +2315,8 @@ defineExpose({
           @favorite="addToFavorites"
           @add-to-playlist="openPlaylistPicker"
           @add-selection-to-playlist="openPlaylistPicker"
+          @open-artist="openTrackArtist"
+          @open-album="openTrackAlbum"
         />
         <div v-if="detailHasMore" class="flex justify-center py-4">
           <button class="btn btn-sm" type="button" :disabled="detailLoadingMore" @click="loadMoreDetail">
@@ -2377,6 +2521,7 @@ defineExpose({
         :active-track="activeOnlineTrack"
         :is-playing="isPlaying"
         :track-action-id="trackActionId"
+        :entity-action-id="entityActionId"
         :supports-library-actions="supportsLibraryActions"
         :supports-playlist-selection="supportsPlaylistSelection"
         :is-favorite="isTrackFavorite"
@@ -2386,6 +2531,8 @@ defineExpose({
         @favorite="addToFavorites"
         @add-to-playlist="openPlaylistPicker"
         @add-selection-to-playlist="openPlaylistPicker"
+        @open-artist="openTrackArtist"
+        @open-album="openTrackAlbum"
       />
       <div
         v-if="activeRecommendationEntry.id === 'roaming' && recommendationTracks.length"
@@ -2726,6 +2873,7 @@ defineExpose({
           :active-track="activeOnlineTrack"
           :is-playing="isPlaying"
           :track-action-id="trackActionId"
+          :entity-action-id="entityActionId"
           :supports-library-actions="supportsLibraryActions"
           :supports-playlist-selection="supportsPlaylistSelection"
           :is-favorite="isTrackFavorite"
@@ -2735,6 +2883,8 @@ defineExpose({
           @favorite="addToFavorites"
           @add-to-playlist="openPlaylistPicker"
           @add-selection-to-playlist="openPlaylistPicker"
+          @open-artist="openTrackArtist"
+          @open-album="openTrackAlbum"
         />
 
         <ul v-else class="list divide-y divide-base-300">

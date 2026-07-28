@@ -12,6 +12,7 @@ import {
   refreshOnlineDownloadItemCandidates,
   resolveOnlineTrack,
   selectOnlineDownloadDirectory,
+  splitOnlineArtistNames,
 } from "./online-music-api";
 import {
   createAudioSourceRecord,
@@ -102,6 +103,14 @@ describe("online music playback routing", () => {
     });
 
     expect(onlineTracksMatch(left, right)).toBe(true);
+  });
+
+  it("splits and deduplicates artist display names", () => {
+    expect(splitOnlineArtistNames("镜予歌、陈亦洺、喧笑 / 陈亦洺")).toEqual([
+      "镜予歌",
+      "陈亦洺",
+      "喧笑",
+    ]);
   });
 
   it("does not match online tracks whose durations differ by more than five seconds", () => {

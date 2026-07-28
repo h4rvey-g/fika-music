@@ -126,6 +126,41 @@ describe("OnlineTrackTable", () => {
     expect(wrapper.emitted("addToPlaylist")?.[0]).toEqual([track]);
   });
 
+  it("opens artist and album metadata without selecting the row", async () => {
+    const wrapper = mountTable();
+    const row = wrapper.get('[data-online-track-key="song-1"]');
+
+    await wrapper.get('[data-online-track-artist="song-1"]').trigger("click");
+    await wrapper.get('[data-online-track-album="song-1"]').trigger("click");
+
+    expect(wrapper.emitted("openArtist")?.[0]).toEqual([track, track.artist]);
+    expect(wrapper.emitted("openAlbum")?.[0]).toEqual([track]);
+    expect(row.attributes("aria-selected")).toBe("false");
+  });
+
+  it("emits the selected artist from multi-artist metadata", async () => {
+    const collaboration = createOnlineTrack({
+      key: "collaboration",
+      artist: "镜予歌、陈亦洺、喧笑",
+    });
+    const wrapper = mountTable(true, false, [collaboration]);
+    const artists = wrapper.findAll('[data-online-track-artist="collaboration"]');
+
+    expect(artists.map((button) => button.text())).toEqual(["镜予歌", "陈亦洺", "喧笑"]);
+    await artists[1].trigger("click");
+
+    expect(wrapper.emitted("openArtist")?.[0]).toEqual([collaboration, "陈亦洺"]);
+  });
+
+  it("does not render an album action when album metadata is missing", () => {
+    const wrapper = mountTable(true, false, [
+      createOnlineTrack({ key: "single", album: null }),
+    ]);
+
+    expect(wrapper.find("[data-online-track-album]").exists()).toBe(false);
+    expect(wrapper.findAll("tbody td")[2].text()).toBe("-");
+  });
+
   it("disables library actions when the track has no NetEase or KuGou candidate", () => {
     const wrapper = mountTable(false);
 

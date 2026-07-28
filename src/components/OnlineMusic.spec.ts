@@ -393,6 +393,110 @@ describe("Online Music workspace", () => {
     wrapper.unmount();
   });
 
+  it("opens artist and album pages from song metadata", async () => {
+    const linkedTrack = createOnlineTrack({
+      key: "linked-song",
+      title: "Linked Song",
+      artist: "镜予歌、陈亦洺、喧笑",
+      album: "First Album",
+      candidates: [createOnlineTrackCandidate({
+        channelId: "fika.netease:wy",
+        id: "linked-song",
+        title: "Linked Song",
+        artist: "镜予歌、陈亦洺、喧笑",
+        album: "First Album",
+      })],
+    });
+    const selectedArtist: OnlineArtist = {
+      ...artist,
+      key: "artist-chen-yiming",
+      name: "陈亦洺",
+      candidates: artist.candidates.map((candidate) => ({
+        ...candidate,
+        id: "chen-yiming",
+        name: "陈亦洺",
+      })),
+    };
+    const linkedAlbum: OnlineAlbum = {
+      ...artistAlbum,
+      artist: linkedTrack.artist,
+      candidates: artistAlbum.candidates.map((candidate) => ({
+        ...candidate,
+        artist: linkedTrack.artist,
+      })),
+    };
+    tauriMocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_online_music_settings") return Promise.resolve(settings);
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "start_online_music_search") return Promise.resolve("search-1");
+      if (command === "online_music_playlists") {
+        return Promise.resolve({
+          items: [],
+          failures: [],
+          supportedChannels: 0,
+          completedChannels: 0,
+        });
+      }
+      if (command === "online_music_search_page" && args?.section === "artists") {
+        return Promise.resolve({
+          section: "artists",
+          data: { section: "artists", items: [selectedArtist] },
+          failures: [],
+          supportedChannels: 1,
+          completedChannels: 1,
+          hasMore: false,
+        });
+      }
+      if (command === "online_music_search_page" && args?.section === "albums") {
+        return Promise.resolve({
+          section: "albums",
+          data: { section: "albums", items: [linkedAlbum] },
+          failures: [],
+          supportedChannels: 1,
+          completedChannels: 1,
+          hasMore: false,
+        });
+      }
+      if (command === "online_music_artist_tracks") {
+        return Promise.resolve({ items: [linkedTrack], hasMore: false, total: 1 });
+      }
+      if (command === "online_music_album_tracks") {
+        return Promise.resolve({ items: [linkedTrack], hasMore: false, total: 1 });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+    await search(wrapper, "Linked Song", "songs", [linkedTrack]);
+
+    const artistLinks = wrapper.findAll('[data-online-track-artist="linked-song"]');
+    expect(artistLinks.map((button) => button.text())).toEqual(["镜予歌", "陈亦洺", "喧笑"]);
+    await artistLinks[1].trigger("click");
+    await flushPromises();
+    expect(wrapper.get("h2").text()).toBe("陈亦洺");
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("online_music_search_page", {
+      keyword: "陈亦洺",
+      section: "artists",
+      page: 1,
+      pageSize: 20,
+      requestId: expect.stringMatching(/^online-track-artist-/),
+    });
+
+    await wrapper.get('button[aria-label="Back to search results"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-online-track-album="linked-song"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.get("h2").text()).toBe("First Album");
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("online_music_search_page", {
+      keyword: "First Album",
+      section: "albums",
+      page: 1,
+      pageSize: 20,
+      requestId: expect.stringMatching(/^online-track-album-/),
+    });
+    wrapper.unmount();
+  });
+
   it("preloads recommendation covers only while Online Music is active", async () => {
     const wrapper = mountOnlineMusic(false);
     await flushPromises();

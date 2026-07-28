@@ -110,13 +110,22 @@ function normalizeTrackText(value: string) {
   return value.normalize("NFKC").toLowerCase().trim().split(/\s+/u).join(" ");
 }
 
+export function splitOnlineArtistNames(value: string) {
+  const seen = new Set<string>();
+  return value
+    .split(/\s+(?:feat\.?|ft\.?)\s+|[\/＆&、，,]/giu)
+    .map((artist) => artist.trim())
+    .filter((artist) => {
+      const key = normalizeTrackText(artist);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
 function artistSetKey(value: string) {
-  const normalized = value
-    .replace(/[＆&、，,]/gu, "/")
-    .replace(/ feat\. | feat | ft\. | ft /gu, "/");
   return [...new Set(
-    normalized
-      .split("/")
+    splitOnlineArtistNames(value)
       .map(normalizeTrackText)
       .filter(Boolean),
   )].sort().join("\u001f");

@@ -1,13 +1,18 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Download, Heart, ListPlus, Music2, Pause, RefreshCw, Volume2 } from "@lucide/vue";
-import { onlineTracksMatch, type OnlineTrack } from "../lib/online-music-api";
+import {
+  onlineTracksMatch,
+  splitOnlineArtistNames,
+  type OnlineTrack,
+} from "../lib/online-music-api";
 
 const props = defineProps<{
   tracks: OnlineTrack[];
   activeTrack: OnlineTrack | null;
   isPlaying: boolean;
   trackActionId: string | null;
+  entityActionId?: string | null;
   supportsLibraryActions: (track: OnlineTrack) => boolean;
   supportsPlaylistSelection: (tracks: OnlineTrack[]) => boolean;
   isFavorite: (track: OnlineTrack) => boolean;
@@ -20,6 +25,8 @@ const emit = defineEmits<{
   favorite: [track: OnlineTrack];
   addToPlaylist: [track: OnlineTrack];
   addSelectionToPlaylist: [tracks: OnlineTrack[]];
+  openArtist: [track: OnlineTrack, artist: string];
+  openAlbum: [track: OnlineTrack];
 }>();
 
 const selectedKeys = ref<Set<string>>(new Set());
@@ -132,6 +139,10 @@ function duration(seconds: number | null) {
   if (seconds === null) return "--:--";
   return `${Math.floor(seconds / 60)}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`;
 }
+
+function artistActionId(track: OnlineTrack, artist: string) {
+  return `artist:${track.key}:${artist}`;
+}
 </script>
 
 <template>
@@ -201,8 +212,59 @@ function duration(seconds: number | null) {
               <span class="truncate text-sm font-medium">{{ track.title }}</span>
             </div>
           </td>
-          <td class="hidden max-w-44 truncate text-xs md:table-cell">{{ track.artist }}</td>
-          <td class="hidden max-w-48 truncate text-xs text-base-content/60 lg:table-cell">{{ track.album || "-" }}</td>
+          <td class="hidden max-w-44 text-xs md:table-cell">
+            <div class="flex min-w-0 max-w-full flex-wrap items-center gap-x-1">
+              <template
+                v-for="(artist, artistIndex) in splitOnlineArtistNames(track.artist)"
+                :key="`${track.key}:${artist}`"
+              >
+                <span v-if="artistIndex > 0" class="opacity-60" aria-hidden="true">/</span>
+                <button
+                  class="link link-hover inline-flex min-w-0 max-w-full items-center gap-1 text-left disabled:cursor-wait"
+                  type="button"
+                  :disabled="entityActionId === artistActionId(track, artist)"
+                  :aria-busy="entityActionId === artistActionId(track, artist) ? 'true' : undefined"
+                  :aria-label="`Open artist ${artist}`"
+                  :data-online-track-artist="track.key"
+                  :data-online-artist-name="artist"
+                  @click.stop="$emit('openArtist', track, artist)"
+                  @dblclick.stop
+                  @keydown.enter.stop
+                >
+                  <span class="truncate">{{ artist }}</span>
+                  <RefreshCw
+                    v-if="entityActionId === artistActionId(track, artist)"
+                    class="shrink-0 animate-spin"
+                    :size="11"
+                    aria-hidden="true"
+                  />
+                </button>
+              </template>
+            </div>
+          </td>
+          <td class="hidden max-w-48 text-xs lg:table-cell">
+            <button
+              v-if="track.album"
+              class="link link-hover inline-flex min-w-0 max-w-full items-center gap-1 text-left opacity-60 disabled:cursor-wait"
+              type="button"
+              :disabled="entityActionId === `album:${track.key}`"
+              :aria-busy="entityActionId === `album:${track.key}` ? 'true' : undefined"
+              :aria-label="`Open album ${track.album}`"
+              :data-online-track-album="track.key"
+              @click.stop="$emit('openAlbum', track)"
+              @dblclick.stop
+              @keydown.enter.stop
+            >
+              <span class="truncate">{{ track.album }}</span>
+              <RefreshCw
+                v-if="entityActionId === `album:${track.key}`"
+                class="shrink-0 animate-spin"
+                :size="11"
+                aria-hidden="true"
+              />
+            </button>
+            <span v-else class="opacity-60">-</span>
+          </td>
           <td>
             <div class="flex max-w-28 gap-1 overflow-hidden">
               <span
