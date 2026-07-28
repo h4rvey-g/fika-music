@@ -228,6 +228,44 @@ describe("application shell", () => {
     wrapper.unmount();
   });
 
+  it("navigates view history with mouse back and forward buttons", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const navigation = wrapper.get('nav[aria-label="Primary navigation"]');
+    const selectSection = async (label: string) => {
+      const button = navigation
+        .findAll("button")
+        .find((candidate) => candidate.text() === label);
+      expect(button).toBeDefined();
+      await button?.trigger("click");
+    };
+    const pressMouseButton = async (button: number) => {
+      window.dispatchEvent(new MouseEvent("mousedown", { button, cancelable: true }));
+      const mouseup = new MouseEvent("mouseup", { button, cancelable: true });
+      window.dispatchEvent(mouseup);
+      window.dispatchEvent(new MouseEvent("auxclick", { button, cancelable: true }));
+      await wrapper.vm.$nextTick();
+      expect(mouseup.defaultPrevented).toBe(true);
+    };
+
+    await selectSection("Settings");
+    await selectSection("Online Music");
+    expect(wrapper.get("h1").text()).toBe("Online Music");
+
+    await pressMouseButton(3);
+    expect(wrapper.get("h1").text()).toBe("Settings");
+    await pressMouseButton(3);
+    expect(wrapper.get("h1").text()).toBe("Local Music");
+    await pressMouseButton(4);
+    expect(wrapper.get("h1").text()).toBe("Settings");
+
+    await selectSection("Audio Sources");
+    await pressMouseButton(4);
+    expect(wrapper.get("h1").text()).toBe("Audio Sources");
+    wrapper.unmount();
+  });
+
   it("opens and persists Now Playing lyric settings from the lyrics context menu", async () => {
     const wrapper = mount(App);
     await flushPromises();

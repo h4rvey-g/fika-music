@@ -191,6 +191,12 @@ const STREAM_QUALITY_OPTIONS: ReadonlyArray<{ value: StreamQuality; label: strin
 const sections = [...mainSections, settingsSection];
 type AppSection = (typeof sections)[number]["id"];
 type ActiveSection = AppSection | "plugin";
+type AppLocation =
+  | { section: AppSection; pluginId: null }
+  | { section: "plugin"; pluginId: string };
+
+const MOUSE_BACK_BUTTON = 3;
+const MOUSE_FORWARD_BUTTON = 4;
 
 const savedUiPreferences = loadUiPreferences();
 const savedDesktopLyricsPreferences = loadDesktopLyricsPreferences();
@@ -259,6 +265,8 @@ const remoteQuality = ref(savedUiPreferences.streamQuality);
 const audioSourceSelectionMode = ref<AudioSourceSelectionMode>("automatic");
 const onlineMusicConfig = useOnlineMusicConfig();
 
+const navigationHistory: AppLocation[] = [{ section: "local", pluginId: null }];
+let navigationHistoryIndex = 0;
 let playbackDetailsGeneration = 0;
 let onlinePlaybackController: AbortController | null = null;
 let onlinePreloadController: AbortController | null = null;
@@ -485,6 +493,9 @@ watch(
 
 onMounted(async () => {
   document.addEventListener("click", handlePlaybackOptionsOutsideClick);
+  window.addEventListener("mousedown", suppressMouseNavigationDefault);
+  window.addEventListener("mouseup", handleMouseNavigation);
+  window.addEventListener("auxclick", suppressMouseNavigationDefault);
   await setupDesktopLyricsEvents();
   await Promise.all([
     libraryScan.initialize(),
@@ -505,6 +516,9 @@ onBeforeUnmount(() => {
   dynamicThemeGeneration += 1;
   clearCoverTheme(document.documentElement);
   document.removeEventListener("click", handlePlaybackOptionsOutsideClick);
+  window.removeEventListener("mousedown", suppressMouseNavigationDefault);
+  window.removeEventListener("mouseup", handleMouseNavigation);
+  window.removeEventListener("auxclick", suppressMouseNavigationDefault);
   libraryScan.dispose();
   if (sourceChangeMessageTimer) clearTimeout(sourceChangeMessageTimer);
   playbackDetailsGeneration += 1;
@@ -530,9 +544,7 @@ async function setupDesktopLyricsEvents() {
 
 function selectSection(section: AppSection) {
   const resetOnlineHome = section === "online" && activeSection.value === "online";
-  activeSection.value = section;
-  activePluginId.value = null;
-  sidebarOpen.value = false;
+  navigateTo({ section, pluginId: null });
   if (resetOnlineHome) {
     void nextTick(() => onlineMusic.value?.showHome());
   }
@@ -547,9 +559,69 @@ async function openNowPlayingLyricsSettings() {
 }
 
 function selectPlugin(pluginId: string) {
-  activePluginId.value = pluginId;
-  activeSection.value = "plugin";
+  navigateTo({ section: "plugin", pluginId });
+}
+
+function locationsMatch(left: AppLocation, right: AppLocation) {
+  return left.section === right.section && left.pluginId === right.pluginId;
+}
+
+function applyLocation(location: AppLocation) {
+  activeSection.value = location.section;
+  activePluginId.value = location.pluginId;
   sidebarOpen.value = false;
+}
+
+function navigateTo(location: AppLocation) {
+  const current = navigationHistory[navigationHistoryIndex];
+  if (current && locationsMatch(current, location)) {
+    applyLocation(location);
+    return;
+  }
+
+  navigationHistory.splice(navigationHistoryIndex + 1);
+  navigationHistory.push(location);
+  navigationHistoryIndex = navigationHistory.length - 1;
+  applyLocation(location);
+}
+
+function replaceCurrentLocation(location: AppLocation) {
+  navigationHistory[navigationHistoryIndex] = location;
+  applyLocation(location);
+}
+
+function isLocationAvailable(location: AppLocation) {
+  return location.section !== "plugin"
+    || enabledPlugins.value.some((plugin) => plugin.id === location.pluginId);
+}
+
+function moveThroughNavigationHistory(direction: -1 | 1) {
+  let nextIndex = navigationHistoryIndex + direction;
+  while (
+    nextIndex >= 0
+    && nextIndex < navigationHistory.length
+    && !isLocationAvailable(navigationHistory[nextIndex])
+  ) {
+    nextIndex += direction;
+  }
+  if (nextIndex < 0 || nextIndex >= navigationHistory.length) return;
+
+  navigationHistoryIndex = nextIndex;
+  applyLocation(navigationHistory[navigationHistoryIndex]);
+}
+
+function isMouseNavigationButton(event: MouseEvent) {
+  return event.button === MOUSE_BACK_BUTTON || event.button === MOUSE_FORWARD_BUTTON;
+}
+
+function suppressMouseNavigationDefault(event: MouseEvent) {
+  if (isMouseNavigationButton(event)) event.preventDefault();
+}
+
+function handleMouseNavigation(event: MouseEvent) {
+  if (!isMouseNavigationButton(event)) return;
+  event.preventDefault();
+  moveThroughNavigationHistory(event.button === MOUSE_BACK_BUTTON ? -1 : 1);
 }
 
 async function loadPluginNavigation() {
@@ -575,8 +647,7 @@ function updatePluginRecords(records: PluginRecord[]) {
     activeSection.value === "plugin" &&
     !records.some((plugin) => plugin.id === activePluginId.value && plugin.enabled)
   ) {
-    activeSection.value = "plugins";
-    activePluginId.value = null;
+    replaceCurrentLocation({ section: "plugins", pluginId: null });
   }
 }
 
