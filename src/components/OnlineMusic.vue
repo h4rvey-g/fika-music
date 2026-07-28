@@ -141,6 +141,9 @@ type PlaylistSelectionTarget = {
   candidates: OnlineTrack["candidates"];
 };
 
+const FAVORITE_TRACK_PAGE_SIZE = 200;
+const MAX_FAVORITE_TRACK_PAGES = 100;
+
 const props = defineProps<{
   isActive: boolean;
   audioSources: AudioSourceRecord[];
@@ -256,6 +259,7 @@ const entityActionId = ref<string | null>(null);
 const trackActionMessage = ref<string | null>(null);
 const favoriteTrackKeys = ref<Set<string>>(new Set());
 const favoriteTrackIdentities = ref<Set<string>>(new Set());
+const optimisticFavoriteTrackIdentities = ref<Set<string>>(new Set());
 
 let unlistenSearch: (() => void) | null = null;
 let unlistenDownloads: (() => void) | null = null;
@@ -276,6 +280,11 @@ let pendingPrivateRoamingBatch: Promise<OnlineRecommendationsResult | null> | nu
 let playlistLibraryGeneration = 0;
 let playlistLibraryRequestId: string | null = null;
 let pendingPlaylistLibraryLoad: Promise<OnlinePlaylistsResult | null> | null = null;
+let favoriteTrackLoadGeneration = 0;
+let favoriteTrackLoadSignature: string | null = null;
+let pendingFavoriteTrackLoadSignature: string | null = null;
+let pendingFavoriteTrackLoad: Promise<void> | null = null;
+const favoriteTrackRequestIds = new Set<string>();
 let entityResolveRequestId: string | null = null;
 let entityResolveGeneration = 0;
 let trackActionMessageTimer: number | null = null;
@@ -431,19 +440,22 @@ watch(
   (isActive) => {
     if (isActive) {
       mainScrollViewport.value = workspaceRoot.value?.closest("main") ?? null;
-      void preloadForYou(true);
+      if (visibleSongListKey.value === null) void preloadForYou(true);
+      else void loadPlaylistLibrary();
       const entryGeneration = beginVisibleSongListEntry();
       void finishVisibleSongListEntry(entryGeneration);
-    } else if (playlistLibraryRequestId) {
-      cancelPlaylistLibraryLoad();
-      cancelTrackEntityResolution();
-      songListFollow.cancelPending();
     } else {
+      if (playlistLibraryRequestId) cancelPlaylistLibraryLoad();
+      cancelFavoriteTrackLoad();
       cancelTrackEntityResolution();
       songListFollow.cancelPending();
     }
   },
 );
+
+watch(visibleSongListKey, (listKey) => {
+  if (listKey !== null && props.isActive) void loadPlaylistLibrary();
+});
 
 watch(
   () => props.activeOnlineTrack,
@@ -480,6 +492,7 @@ onBeforeUnmount(() => {
   cancelArtistDetailRequests();
   cancelRecommendationLoads();
   cancelPlaylistLibraryLoad();
+  cancelFavoriteTrackLoad();
   cancelPrivateRoamingBatchLoad();
   if (searchId.value) void cancelSourceRequest(searchId.value);
   if (trackActionMessageTimer !== null) window.clearTimeout(trackActionMessageTimer);
@@ -701,7 +714,10 @@ async function loadRecommendation(
 
 async function loadPlaylistLibrary(force = false): Promise<OnlinePlaylistsResult | null> {
   if (!force && pendingPlaylistLibraryLoad) return pendingPlaylistLibraryLoad;
-  if (!force && playlistLibraryResult.value) return playlistLibraryResult.value;
+  if (!force && playlistLibraryResult.value) {
+    void loadFavoriteTrackIdentities(playlistLibraryResult.value);
+    return playlistLibraryResult.value;
+  }
 
   if (playlistLibraryRequestId) void cancelSourceRequest(playlistLibraryRequestId);
   const generation = ++playlistLibraryGeneration;
@@ -715,6 +731,7 @@ async function loadPlaylistLibrary(force = false): Promise<OnlinePlaylistsResult
       const result = await getOnlineMusicPlaylists(requestId);
       if (generation !== playlistLibraryGeneration) return null;
       playlistLibraryResult.value = result;
+      void loadFavoriteTrackIdentities(result, force);
       return result;
     } catch (error) {
       if (generation === playlistLibraryGeneration) {
@@ -743,6 +760,107 @@ function cancelPlaylistLibraryLoad() {
   pendingPlaylistLibraryLoad = null;
 }
 
+function favoritePlaylistSignature(playlists: OnlinePlaylist[]) {
+  return playlists
+    .map((playlist) => `${playlist.key}:${playlist.trackCount ?? "unknown"}`)
+    .sort()
+    .join("|");
+}
+
+async function loadFavoritePlaylistIdentities(
+  playlist: OnlinePlaylist,
+  playlistIndex: number,
+  generation: number,
+) {
+  const identities = new Set<string>();
+  if (playlist.trackCount === 0) return identities;
+
+  for (let page = 1; page <= MAX_FAVORITE_TRACK_PAGES; page += 1) {
+    const requestId = `online-favorites-${Date.now()}-${generation}-${playlistIndex}-${page}`;
+    favoriteTrackRequestIds.add(requestId);
+    try {
+      const result = await getOnlinePlaylistTracks(
+        playlist,
+        page,
+        FAVORITE_TRACK_PAGE_SIZE,
+        requestId,
+      );
+      if (generation !== favoriteTrackLoadGeneration) return identities;
+      for (const track of result.items) {
+        for (const candidate of track.candidates) {
+          identities.add(trackIdentity(candidate));
+        }
+      }
+      if (!result.hasMore) return identities;
+      if (!result.items.length) throw new Error("Favorite playlist pagination did not advance.");
+    } finally {
+      favoriteTrackRequestIds.delete(requestId);
+    }
+  }
+
+  throw new Error("Favorite playlist exceeded the supported page limit.");
+}
+
+function loadFavoriteTrackIdentities(result: OnlinePlaylistsResult, force = false) {
+  const playlists = result.items.filter((playlist) => playlist.isFavorite);
+  const signature = favoritePlaylistSignature(playlists);
+  if (!force && favoriteTrackLoadSignature === signature) return Promise.resolve();
+  if (
+    !force
+    && pendingFavoriteTrackLoad
+    && pendingFavoriteTrackLoadSignature === signature
+  ) {
+    return pendingFavoriteTrackLoad;
+  }
+
+  cancelFavoriteTrackLoad();
+  const generation = favoriteTrackLoadGeneration;
+  pendingFavoriteTrackLoadSignature = signature;
+  const load = (async () => {
+    if (!playlists.length) {
+      if (!result.failures.length) favoriteTrackIdentities.value = new Set();
+      favoriteTrackLoadSignature = signature;
+      return;
+    }
+
+    const outcomes = await Promise.allSettled(
+      playlists.map((playlist, index) =>
+        loadFavoritePlaylistIdentities(playlist, index, generation)
+      ),
+    );
+    if (generation !== favoriteTrackLoadGeneration) return;
+
+    const complete = !result.failures.length
+      && outcomes.every((outcome) => outcome.status === "fulfilled");
+    const identities = complete
+      ? new Set<string>()
+      : new Set(favoriteTrackIdentities.value);
+    for (const outcome of outcomes) {
+      if (outcome.status === "fulfilled") {
+        for (const identity of outcome.value) identities.add(identity);
+      }
+    }
+    favoriteTrackIdentities.value = identities;
+    favoriteTrackLoadSignature = signature;
+  })();
+  pendingFavoriteTrackLoad = load;
+  void load.finally(() => {
+    if (pendingFavoriteTrackLoad === load) {
+      pendingFavoriteTrackLoad = null;
+      pendingFavoriteTrackLoadSignature = null;
+    }
+  });
+  return load;
+}
+
+function cancelFavoriteTrackLoad() {
+  favoriteTrackLoadGeneration += 1;
+  for (const requestId of favoriteTrackRequestIds) void cancelSourceRequest(requestId);
+  favoriteTrackRequestIds.clear();
+  pendingFavoriteTrackLoad = null;
+  pendingFavoriteTrackLoadSignature = null;
+}
+
 function supportsLibraryActions(track: OnlineTrack) {
   return track.candidates.some((candidate) =>
     candidate.pluginId === NETEASE_PLUGIN_ID || candidate.pluginId === KUGOU_PLUGIN_ID
@@ -765,6 +883,7 @@ function trackIdentity(candidate: OnlineTrack["candidates"][number]) {
 function isTrackFavorite(track: OnlineTrack) {
   return favoriteTrackKeys.value.has(track.key) || track.candidates.some((candidate) =>
     favoriteTrackIdentities.value.has(trackIdentity(candidate))
+    || optimisticFavoriteTrackIdentities.value.has(trackIdentity(candidate))
   );
 }
 
@@ -873,8 +992,8 @@ async function addToFavorites(track: OnlineTrack) {
   );
   if (succeeded) {
     favoriteTrackKeys.value = new Set([...favoriteTrackKeys.value, track.key]);
-    favoriteTrackIdentities.value = new Set([
-      ...favoriteTrackIdentities.value,
+    optimisticFavoriteTrackIdentities.value = new Set([
+      ...optimisticFavoriteTrackIdentities.value,
       ...targets.flatMap((target, index) =>
         outcomes[index].status === "fulfilled"
           ? [trackIdentity(target.candidate)]

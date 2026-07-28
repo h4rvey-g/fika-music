@@ -756,6 +756,109 @@ describe("Online Music workspace", () => {
     wrapper.unmount();
   });
 
+  it("marks existing favorite songs in playlist details and search results", async () => {
+    const favoriteTrack = {
+      ...track(1),
+      key: "favorite-song-1",
+    };
+    const searchTrack = {
+      ...track(1),
+      key: "search-song-1",
+    };
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "get_online_music_settings") return Promise.resolve(settings);
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "start_online_music_search") return Promise.resolve("search-1");
+      if (command === "online_music_playlists") {
+        return Promise.resolve({
+          items: [libraryPlaylist],
+          failures: [],
+          supportedChannels: 1,
+          completedChannels: 1,
+        });
+      }
+      if (command === "online_music_playlist_tracks") {
+        return Promise.resolve({ items: [favoriteTrack], hasMore: false, total: 1 });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("online_music_playlist_tracks", {
+      playlist: libraryPlaylist,
+      page: 1,
+      pageSize: 200,
+      requestId: expect.stringMatching(/^online-favorites-/),
+    });
+
+    await wrapper.get('button[aria-label="Open playlist Private Mix"]').trigger("click");
+    await flushPromises();
+    let favoriteButton = wrapper.get(
+      'button[aria-label="Add Song 1 to My Favorite Music"]',
+    );
+    expect(favoriteButton.attributes("aria-pressed")).toBe("true");
+    expect(favoriteButton.get("svg").attributes("fill")).toBe("currentColor");
+    expect(favoriteButton.get("svg").classes()).toContain("text-error");
+
+    await search(wrapper, "Song", "songs", [searchTrack]);
+    favoriteButton = wrapper.get('button[aria-label="Add Song 1 to My Favorite Music"]');
+    expect(favoriteButton.attributes("aria-pressed")).toBe("true");
+    expect(favoriteButton.get("svg").attributes("fill")).toBe("currentColor");
+    expect(favoriteButton.get("svg").classes()).toContain("text-error");
+    wrapper.unmount();
+  });
+
+  it("indexes every page of a favorite playlist before matching search songs", async () => {
+    const pagedFavoritePlaylist = { ...libraryPlaylist, trackCount: 201 };
+    const favoriteTrack = {
+      ...track(1),
+      key: "favorite-page-2-song",
+    };
+    const searchTrack = {
+      ...track(1),
+      key: "search-page-2-song",
+    };
+    tauriMocks.invoke.mockImplementation((command: string, args?: {
+      page?: number;
+      requestId?: string;
+    }) => {
+      if (command === "get_online_music_settings") return Promise.resolve(settings);
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "start_online_music_search") return Promise.resolve("search-1");
+      if (command === "online_music_playlists") {
+        return Promise.resolve({
+          items: [pagedFavoritePlaylist],
+          failures: [],
+          supportedChannels: 1,
+          completedChannels: 1,
+        });
+      }
+      if (command === "online_music_playlist_tracks" && args?.requestId?.startsWith("online-favorites-")) {
+        return args.page === 1
+          ? Promise.resolve({ items: [track(2)], hasMore: true, total: 201 })
+          : Promise.resolve({ items: [favoriteTrack], hasMore: false, total: 201 });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+    await search(wrapper, "Song", "songs", [searchTrack]);
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("online_music_playlist_tracks", {
+      playlist: pagedFavoritePlaylist,
+      page: 2,
+      pageSize: 200,
+      requestId: expect.stringMatching(/^online-favorites-/),
+    });
+    const favoriteButton = wrapper.get(
+      'button[aria-label="Add Song 1 to My Favorite Music"]',
+    );
+    expect(favoriteButton.attributes("aria-pressed")).toBe("true");
+    expect(favoriteButton.get("svg").attributes("fill")).toBe("currentColor");
+    wrapper.unmount();
+  });
+
   it("adds a song to each matching provider favorite playlist", async () => {
     const matchedTrack = {
       ...track(1),
