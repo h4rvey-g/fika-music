@@ -130,7 +130,6 @@ vi.mock("./components/CollectionBrowser.vue", () => ({
       activeLocalTrackId: { type: Number, default: null },
       activeOnlineTrack: { type: Object, default: null },
       isPlaying: { type: Boolean, required: true },
-      density: { type: String, required: true },
     },
     emits: ["play", "addToCollection", "createCollection", "changed", "error"],
     setup(_, { emit, expose }) {
@@ -285,6 +284,9 @@ describe("application shell", () => {
       "Settings",
     ]);
     expect(wrapper.get("h1").text()).toBe("Local Music");
+    expect(wrapper.find("header p").exists()).toBe(false);
+    expect(wrapper.get(".drawer-side aside").text()).not.toContain("Local-first library");
+    expect(wrapper.get(".drawer-side aside").text()).not.toContain("No music folder");
     const playbackBar = wrapper.get('footer[aria-label="Playback bar"]');
     expect(playbackBar.text()).toContain("Nothing playing");
 
@@ -298,6 +300,7 @@ describe("application shell", () => {
 
     expect(wrapper.get("h1").text()).toBe("Settings");
     expect(wrapper.find("#theme-preference").exists()).toBe(true);
+    expect(wrapper.find("#layout-density").exists()).toBe(false);
     expect(wrapper.get('footer[aria-label="Playback bar"]').element).toBe(playbackBar.element);
     expect(settingsButton?.attributes("aria-current")).toBe("page");
     expect(drawerToggle.element.checked).toBe(false);

@@ -199,7 +199,7 @@ Future changes should update `CONTEXT.md` first, then this roadmap only when del
    - Deferred: automatic one-way sync, two-way sync, bulk destructive operations, and reorder unless needed after add/remove works.
 
 7. **Customization boundary — decided for v0.1**
-   - v0.1 includes themes, layout density, configurable sidebar sections, keyboard shortcuts, and Source Provider management.
+   - v0.1 includes themes, configurable sidebar sections, keyboard shortcuts, and Source Provider management.
    - Deferred: arbitrary Source Provider UI, full UI extension panels, playback DSP extensions, and provider-defined settings pages beyond standard manifest/capability controls.
 
 ## Roadmap phases
@@ -509,7 +509,6 @@ Goal: make the app highly customizable without compromising performance or safet
 Deliverables:
 
 - Theme selection using daisyUI themes.
-- Layout density settings.
 - Keyboard shortcut editor.
 - Command palette.
 - Configurable sidebar sections.

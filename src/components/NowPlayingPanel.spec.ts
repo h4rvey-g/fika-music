@@ -19,7 +19,7 @@ function dispatchPointerEvent(
 }
 
 describe("NowPlayingPanel", () => {
-  it("shows the actual network lyric provider", () => {
+  it("omits the lyrics heading and source metadata", () => {
     const wrapper = mount(NowPlayingPanel, {
       props: {
         title: "Track",
@@ -40,8 +40,8 @@ describe("NowPlayingPanel", () => {
       },
     });
 
-    const sourceBadge = wrapper.get('[title="QQ Music #003aAYrm3GE0Ac"]');
-    expect(sourceBadge.text()).toBe("QQ Music");
+    expect(wrapper.find("h2").exists()).toBe(false);
+    expect(wrapper.find('[title="QQ Music #003aAYrm3GE0Ac"]').exists()).toBe(false);
   });
 
   it("highlights the synchronized lyric line for the current playback position", async () => {
@@ -75,7 +75,7 @@ describe("NowPlayingPanel", () => {
     expect(wrapper.get('[data-active="true"]').text()).toBe("Second line");
   });
 
-  it("emits a retry command from the lyrics toolbar", async () => {
+  it("offers retry from the lyrics context menu", async () => {
     const wrapper = mount(NowPlayingPanel, {
       props: {
         title: "Track",
@@ -89,9 +89,26 @@ describe("NowPlayingPanel", () => {
       },
     });
 
-    await wrapper.get('button[aria-label="Retry lyrics"]').trigger("click");
+    expect(wrapper.find('button[aria-label="Retry lyrics"]').exists()).toBe(false);
+
+    await wrapper.get('[data-testid="lyrics-viewport"]').trigger("contextmenu", {
+      clientX: 100,
+      clientY: 80,
+    });
+    await wrapper.vm.$nextTick();
+
+    const menu = document.body.querySelector<HTMLElement>("[data-lyrics-context-menu]");
+    const retryAction = Array.from(menu?.querySelectorAll("button") ?? [])
+      .find((button) => button.textContent?.includes("Retry lyrics"));
+    expect(retryAction).toBeDefined();
+    expect(document.activeElement).toBe(retryAction);
+
+    retryAction?.click();
+    await wrapper.vm.$nextTick();
 
     expect(wrapper.emitted("retryLyrics")).toHaveLength(1);
+    expect(document.body.querySelector("[data-lyrics-context-menu]")).toBeNull();
+    wrapper.unmount();
   });
 
   it("keeps synchronized lyric scrolling inside the lyrics viewport", async () => {
@@ -305,6 +322,7 @@ describe("NowPlayingPanel", () => {
     const menu = document.body.querySelector<HTMLElement>("[data-lyrics-context-menu]");
     const action = menu?.querySelector<HTMLButtonElement>("button");
     expect(menu?.textContent).toContain("Lyrics appearance");
+    expect(menu?.textContent).not.toContain("Retry lyrics");
     expect(document.activeElement).toBe(action);
 
     action?.click();

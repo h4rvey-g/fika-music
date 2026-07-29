@@ -64,7 +64,6 @@ import type {
   MetadataLookupTaskStatus,
   ScanStatus,
 } from "../generated/bindings";
-import type { LayoutDensity } from "../lib/ui-preferences";
 import {
   writeCollectionDragPayload,
   type LocalCollectionSelection,
@@ -86,7 +85,6 @@ type LibraryQueryCause = "entry" | "user" | "background";
 const props = defineProps<{
   activeTrackId: number | null;
   isPlaying: boolean;
-  density: LayoutDensity;
   scanStatus: ScanStatus;
   scanMessage: string | null;
 }>();
@@ -200,8 +198,8 @@ let unlistenAlbumArt: (() => void) | null = null;
 let unlistenMetadata: (() => void) | null = null;
 let unlistenLibraryChanged: (() => void) | null = null;
 
-const rowHeight = computed(() => (props.density === "compact" ? 32 : 34));
-const albumCoverSize = computed(() => rowHeight.value * 2 - 8);
+const rowHeight = 34;
+const albumCoverSize = rowHeight * 2 - 8;
 const visibleColumns = computed(() =>
   columns.value
     .filter((column) => column.visible)
@@ -266,7 +264,7 @@ const rowVirtualizer = useVirtualizer(
   computed(() => ({
     count: virtualTotal.value,
     getScrollElement: () => scrollViewport.value,
-    estimateSize: () => rowHeight.value,
+    estimateSize: () => rowHeight,
     overscan: 12,
     getItemKey: (index: number) => `${snapshotId.value}:${index}`,
   })),
@@ -288,11 +286,6 @@ watch(
     scheduleVisibleCovers();
   },
 );
-
-watch(rowHeight, async () => {
-  await nextTick();
-  rowVirtualizer.value.measure();
-});
 
 watch(
   () => props.activeTrackId,

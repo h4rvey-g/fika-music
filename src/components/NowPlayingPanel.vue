@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { Disc3, FileText, RefreshCw, Settings } from "@lucide/vue";
+import { Disc3, RefreshCw, Settings } from "@lucide/vue";
 import type { ResolvedLyrics } from "../generated/bindings";
 import {
   DEFAULT_NOW_PLAYING_LYRICS_PREFERENCES,
@@ -36,7 +36,8 @@ const lyricsViewport = ref<HTMLElement | null>(null);
 const isDraggingLyrics = ref(false);
 const draggedLyricIndex = ref(-1);
 const lyricsContextMenu = ref<{ x: number; y: number } | null>(null);
-const lyricsContextMenuAction = ref<HTMLButtonElement | null>(null);
+const lyricsRetryMenuAction = ref<HTMLButtonElement | null>(null);
+const lyricsAppearanceMenuAction = ref<HTMLButtonElement | null>(null);
 
 interface LyricDragState {
   pointerId: number;
@@ -88,21 +89,6 @@ const lyricsTextStyle = computed(() => ({
   fontFamily: nowPlayingLyricsFontFamily(props.lyricsPreferences.font),
   textAlign: props.lyricsPreferences.alignment,
 }));
-
-const lyricsSourceLabel = computed(() => {
-  switch (props.lyrics?.source) {
-    case "embedded":
-      return t("Embedded");
-    case "sidecar":
-      return t("Local file");
-    case "network": {
-      const provider = props.lyrics?.provider?.trim();
-      return provider?.replace(/\s+#.*$/, "") || t("Network");
-    }
-    default:
-      return null;
-  }
-});
 
 function closestLyricIndexToViewportCenter(viewport: HTMLElement) {
   if (!props.lyrics) {
@@ -171,12 +157,22 @@ function closeLyricsContextMenu() {
 function openLyricsContextMenu(event: MouseEvent) {
   resetLyricDrag();
   const width = 224;
-  const height = 48;
+  const height = props.canRetry ? 80 : 48;
   lyricsContextMenu.value = {
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
     y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
   };
-  void nextTick(() => lyricsContextMenuAction.value?.focus());
+  void nextTick(() => {
+    const action = props.canRetry && !props.lyricsLoading
+      ? lyricsRetryMenuAction.value
+      : lyricsAppearanceMenuAction.value;
+    action?.focus();
+  });
+}
+
+function retryLyrics() {
+  closeLyricsContextMenu();
+  emit("retryLyrics");
 }
 
 function openLyricsAppearanceSettings() {
@@ -303,109 +299,79 @@ watch(activeLyricIndex, async (index) => {
       </div>
     </div>
 
-    <div class="flex min-h-0 flex-1 flex-col">
-      <div class="flex h-11 shrink-0 items-center gap-2 border-b border-base-300 px-3">
-        <FileText :size="16" aria-hidden="true" />
-        <h2 class="min-w-0 flex-1 text-sm font-semibold">{{ t("Lyrics") }}</h2>
-        <span
-          v-if="lyricsSourceLabel"
-          class="badge badge-ghost badge-sm max-w-24 truncate"
-          :title="lyrics?.provider || lyricsSourceLabel"
+    <div class="relative h-64 min-h-0 flex-1">
+      <div
+        ref="lyricsViewport"
+        class="relative h-full overflow-y-auto px-4 text-center"
+        :class="[
+          canDragLyrics ? 'cursor-grab touch-none select-none' : 'scroll-smooth',
+          isDraggingLyrics ? 'cursor-grabbing scroll-auto' : '',
+        ]"
+        data-testid="lyrics-viewport"
+        :data-seeking="isDraggingLyrics || undefined"
+        aria-live="polite"
+        @contextmenu.prevent.stop="openLyricsContextMenu"
+        @pointerdown="startLyricDrag"
+        @pointermove="moveLyricDrag"
+        @pointerup="finishLyricDrag"
+        @pointercancel="resetLyricDrag"
+      >
+        <div
+          v-if="lyricsLoading"
+          class="flex h-full min-h-48 items-center justify-center gap-2 text-sm text-muted"
+          role="status"
         >
-          {{ lyricsSourceLabel }}
-        </span>
-        <div v-if="canRetry" class="tooltip tooltip-left" :data-tip="t('Retry lyrics')">
-          <button
-            class="btn btn-square btn-ghost btn-sm"
-            type="button"
-            :disabled="lyricsLoading"
-            :aria-label="t('Retry lyrics')"
-            :title="t('Retry lyrics')"
-            @click="emit('retryLyrics')"
+          <RefreshCw class="animate-spin" :size="16" aria-hidden="true" />
+          {{ t("Loading lyrics") }}
+        </div>
+
+        <div
+          v-else-if="lyricsError"
+          class="grid h-full min-h-48 place-items-center py-8 text-sm text-error"
+          role="alert"
+        >
+          <p class="max-w-56">{{ lyricsError }}</p>
+        </div>
+
+        <div
+          v-else-if="!lyrics?.lines.length"
+          class="grid h-full min-h-48 place-items-center py-8 text-sm text-muted"
+        >
+          {{ t("No lyrics available") }}
+        </div>
+
+        <div
+          v-else
+          class="min-h-full py-20"
+          :style="lyricsTextStyle"
+          data-testid="lyric-lines"
+        >
+          <p
+            v-for="(line, index) in lyrics.lines"
+            :key="`${line.startMs ?? 'plain'}-${index}`"
+            class="break-words whitespace-pre-line transition-colors duration-200"
+            :style="lyricLineStyle(index)"
+            :data-lyric-index="index"
+            :data-active="index === displayedLyricIndex || undefined"
           >
-            <RefreshCw
-              :class="{ 'animate-spin': lyricsLoading }"
-              :size="16"
-              aria-hidden="true"
-            />
-          </button>
+            {{ line.text }}
+          </p>
         </div>
       </div>
 
-      <div class="relative h-64 min-h-0 flex-1">
-        <div
-          ref="lyricsViewport"
-          class="relative h-full overflow-y-auto px-4 text-center"
-          :class="[
-            canDragLyrics ? 'cursor-grab touch-none select-none' : 'scroll-smooth',
-            isDraggingLyrics ? 'cursor-grabbing scroll-auto' : '',
-          ]"
-          data-testid="lyrics-viewport"
-          :data-seeking="isDraggingLyrics || undefined"
-          aria-live="polite"
-          @contextmenu.prevent.stop="openLyricsContextMenu"
-          @pointerdown="startLyricDrag"
-          @pointermove="moveLyricDrag"
-          @pointerup="finishLyricDrag"
-          @pointercancel="resetLyricDrag"
+      <div
+        v-if="isDraggingLyrics"
+        class="pointer-events-none absolute inset-x-4 top-1/2 flex -translate-y-1/2 items-center gap-2"
+        data-testid="lyric-seek-guide"
+      >
+        <span class="h-px min-w-0 flex-1 bg-base-content/20" aria-hidden="true" />
+        <output
+          v-if="draggedLyricTimeLabel"
+          class="bg-base-100 px-1 text-xs tabular-nums text-muted"
+          data-testid="lyric-seek-time"
         >
-          <div
-            v-if="lyricsLoading"
-            class="flex h-full min-h-48 items-center justify-center gap-2 text-sm text-muted"
-            role="status"
-          >
-            <RefreshCw class="animate-spin" :size="16" aria-hidden="true" />
-            {{ t("Loading lyrics") }}
-          </div>
-
-          <div
-            v-else-if="lyricsError"
-            class="grid h-full min-h-48 place-items-center py-8 text-sm text-error"
-            role="alert"
-          >
-            <p class="max-w-56">{{ lyricsError }}</p>
-          </div>
-
-          <div
-            v-else-if="!lyrics?.lines.length"
-            class="grid h-full min-h-48 place-items-center py-8 text-sm text-muted"
-          >
-            {{ t("No lyrics available") }}
-          </div>
-
-          <div
-            v-else
-            class="min-h-full py-20"
-            :style="lyricsTextStyle"
-            data-testid="lyric-lines"
-          >
-            <p
-              v-for="(line, index) in lyrics.lines"
-              :key="`${line.startMs ?? 'plain'}-${index}`"
-              class="break-words whitespace-pre-line transition-colors duration-200"
-              :style="lyricLineStyle(index)"
-              :data-lyric-index="index"
-              :data-active="index === displayedLyricIndex || undefined"
-            >
-              {{ line.text }}
-            </p>
-          </div>
-        </div>
-
-        <div
-          v-if="isDraggingLyrics"
-          class="pointer-events-none absolute inset-x-4 top-1/2 flex -translate-y-1/2 items-center gap-2"
-          data-testid="lyric-seek-guide"
-        >
-          <span class="h-px min-w-0 flex-1 bg-base-content/20" aria-hidden="true" />
-          <output
-            v-if="draggedLyricTimeLabel"
-            class="bg-base-100 px-1 text-xs tabular-nums text-muted"
-            data-testid="lyric-seek-time"
-          >
-            {{ draggedLyricTimeLabel }}
-          </output>
-        </div>
+          {{ draggedLyricTimeLabel }}
+        </output>
       </div>
     </div>
 
@@ -429,13 +395,28 @@ watch(activeLyricIndex, async (index) => {
         :aria-label="t('Lyrics actions')"
         @keydown.esc.stop.prevent="closeLyricsContextMenu"
       >
+        <li v-if="canRetry">
+          <button
+            ref="lyricsRetryMenuAction"
+            type="button"
+            :disabled="lyricsLoading"
+            @click="retryLyrics"
+          >
+            <RefreshCw
+              :class="{ 'animate-spin': lyricsLoading }"
+              :size="16"
+              aria-hidden="true"
+            />
+            {{ t("Retry lyrics") }}
+          </button>
+        </li>
         <li>
           <button
-            ref="lyricsContextMenuAction"
+            ref="lyricsAppearanceMenuAction"
             type="button"
             @click="openLyricsAppearanceSettings"
           >
-              <Settings :size="16" aria-hidden="true" />
+            <Settings :size="16" aria-hidden="true" />
             {{ t("Lyrics appearance") }}
           </button>
         </li>

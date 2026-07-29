@@ -64,14 +64,12 @@ export const THEME_GROUPS: ReadonlyArray<{
   },
 ];
 
-export type LayoutDensity = "comfortable" | "compact";
 export type StreamQuality = "128k" | "320k" | "flac" | "flac24bit";
 export type PlaybackMode = "sequential" | "shuffle" | "repeat";
 
 export type UiPreferences = {
   locale: SupportedLocale;
   theme: ThemePreference;
-  density: LayoutDensity;
   streamQuality: StreamQuality;
   audioSourceId: AudioSourceId;
   volume: number;
@@ -86,7 +84,6 @@ export const UI_PREFERENCES_STORAGE_KEY = "fika.ui-preferences";
 export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   locale: "en",
   theme: "system",
-  density: "comfortable",
   streamQuality: "128k",
   audioSourceId: "",
   volume: 0.8,
@@ -133,7 +130,6 @@ export function parseUiPreferences(value: unknown): UiPreferences {
       ? candidate.locale
       : DEFAULT_UI_PREFERENCES.locale,
     theme: isThemePreference(candidate.theme) ? candidate.theme : DEFAULT_UI_PREFERENCES.theme,
-    density: isLayoutDensity(candidate.density) ? candidate.density : DEFAULT_UI_PREFERENCES.density,
     streamQuality: isStreamQuality(candidate.streamQuality)
       ? candidate.streamQuality
       : DEFAULT_UI_PREFERENCES.streamQuality,
@@ -164,10 +160,6 @@ function browserStorage(): Storage | null {
 
 function isThemePreference(value: unknown): value is ThemePreference {
   return THEME_OPTIONS.some((option) => option.value === value);
-}
-
-function isLayoutDensity(value: unknown): value is LayoutDensity {
-  return value === "comfortable" || value === "compact";
 }
 
 function isStreamQuality(value: unknown): value is StreamQuality {

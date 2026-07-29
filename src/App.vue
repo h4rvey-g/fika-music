@@ -69,7 +69,6 @@ import { ExpiringCache } from "./lib/expiring-cache";
 import {
   LOCALE_OPTIONS,
   currentLocale,
-  formatNumber,
   setLocale,
   t,
   type SupportedLocale,
@@ -192,25 +191,21 @@ const mainSections = [
   {
     id: "local",
     label: "Local Music",
-    description: "Browse and index music stored on this device",
     icon: Library,
   },
   {
     id: "online",
     label: "Online Music",
-    description: "Search enabled music channels",
     icon: Radio,
   },
   {
     id: "sources",
     label: "Audio Sources",
-    description: "Import sources and manage their permissions",
     icon: AudioLines,
   },
   {
     id: "plugins",
     label: "Plugins",
-    description: "Manage installed packages and diagnostics",
     icon: Plug,
   },
 ] as const;
@@ -218,7 +213,6 @@ const mainSections = [
 const settingsSection = {
   id: "settings",
   label: "Settings",
-  description: "Manage appearance and playback defaults",
   icon: Settings,
 } as const;
 
@@ -304,7 +298,6 @@ const languagePreference = computed<SupportedLocale>({
   get: () => currentLocale.value,
   set: (locale) => setLocale(locale),
 });
-const layoutDensity = ref(savedUiPreferences.density);
 const nowPlayingCoverUrl = ref<string | null>(null);
 const dynamicThemeStatus = ref<"idle" | "waiting" | "loading" | "active" | "unavailable">("idle");
 const activeLyrics = ref<ResolvedLyrics | null>(null);
@@ -318,7 +311,6 @@ const libraryBrowser = ref<LibraryBrowserInstance | null>(null);
 const collectionBrowser = ref<CollectionBrowserInstance | null>(null);
 const onlineMusic = ref<OnlineMusicInstance | null>(null);
 const libraryTrackCount = ref(0);
-const filteredLibraryTrackCount = ref(0);
 const localQueueId = ref<string | null>(null);
 const localQueueTotal = ref(0);
 const localQueueIndex = ref(-1);
@@ -367,30 +359,17 @@ const activePlugin = computed(
 const activeCollection = computed(
   () => musicCollections.value.find((collection) => collection.id === activeCollectionId.value) ?? null,
 );
-const currentSection = computed(() => {
+const currentSectionLabel = computed(() => {
   if (activeSection.value === "collection" && activeCollection.value) {
-    return {
-      label: activeCollection.value.name,
-      description: t("{count} tracks in this Collection", {
-        count: formatNumber(activeCollection.value.itemCount),
-      }),
-    };
+    return activeCollection.value.name;
   }
   if (activeSection.value === "plugin" && activePlugin.value) {
-    return {
-      label: activePlugin.value.name,
-      description:
-        activePlugin.value.description || t("Inspect this plugin's registered source providers"),
-    };
+    return activePlugin.value.name;
   }
 
   const section = sections.find((candidate) => candidate.id === activeSection.value)
     ?? mainSections[0];
-  return {
-    ...section,
-    label: t(section.label),
-    description: t(section.description),
-  };
+  return t(section.label);
 });
 const nowPlayingTitle = computed(() =>
   activeTrack.value?.title || activeRemoteTitle.value || t("Nothing playing"),
@@ -543,7 +522,6 @@ watch(
   [
     themePreference,
     languagePreference,
-    layoutDensity,
     remoteQuality,
     playbackAudioSourceId,
     volume,
@@ -553,7 +531,6 @@ watch(
     saveUiPreferences({
       locale: languagePreference.value,
       theme: themePreference.value,
-      density: layoutDensity.value,
       streamQuality: remoteQuality.value,
       audioSourceId: playbackAudioSourceId.value,
       volume: volume.value,
@@ -1176,7 +1153,6 @@ async function applyTheme(theme: ThemePreference, coverUrl: string | null) {
 function resetUiPreferences() {
   languagePreference.value = DEFAULT_UI_PREFERENCES.locale;
   themePreference.value = DEFAULT_UI_PREFERENCES.theme;
-  layoutDensity.value = DEFAULT_UI_PREFERENCES.density;
   remoteQuality.value = DEFAULT_UI_PREFERENCES.streamQuality;
   playbackAudioSourceId.value = DEFAULT_UI_PREFERENCES.audioSourceId;
   volume.value = DEFAULT_UI_PREFERENCES.volume;
@@ -1384,9 +1360,8 @@ function clearRemotePlaybackQueue() {
   }
 }
 
-function updateLibrarySummary(summary: { libraryTotal: number; filteredTotal: number }) {
+function updateLibrarySummary(summary: { libraryTotal: number }) {
   libraryTrackCount.value = summary.libraryTotal;
-  filteredLibraryTrackCount.value = summary.filteredTotal;
 }
 
 function showLibraryError(message: string) {
@@ -2234,10 +2209,7 @@ function trackSubtitle(track: LocalTrack) {
 </script>
 
 <template>
-  <div
-    class="drawer h-screen overflow-hidden bg-base-200 text-base-content min-[1200px]:drawer-open"
-    :data-density="layoutDensity"
-  >
+  <div class="drawer h-screen overflow-hidden bg-base-200 text-base-content min-[1200px]:drawer-open">
     <input id="app-sidebar" v-model="sidebarOpen" type="checkbox" class="drawer-toggle" />
 
     <div class="drawer-content flex h-screen min-h-0 min-w-0 flex-col">
@@ -2257,11 +2229,8 @@ function trackSubtitle(track: LocalTrack) {
           </label>
           <div class="min-w-0">
             <h1 class="truncate text-base font-semibold leading-tight sm:text-lg">
-              {{ currentSection.label }}
+              {{ currentSectionLabel }}
             </h1>
-            <p class="hidden truncate text-xs text-muted xl:block">
-              {{ currentSection.description }}
-            </p>
           </div>
         </div>
 
@@ -2312,8 +2281,7 @@ function trackSubtitle(track: LocalTrack) {
       >
         <section
           v-if="activeSection === 'local'"
-          class="mx-auto flex h-full min-h-0 w-full flex-col"
-          :class="layoutDensity === 'compact' ? 'gap-3 px-3 py-3 lg:px-4' : 'gap-4 px-4 py-4 lg:px-6'"
+          class="mx-auto flex h-full min-h-0 w-full flex-col gap-4 px-4 py-4 lg:px-6"
         >
           <div v-if="appError" role="alert" class="alert alert-error">
             <AlertCircle :size="18" aria-hidden="true" />
@@ -2334,7 +2302,6 @@ function trackSubtitle(track: LocalTrack) {
               ref="libraryBrowser"
               :active-track-id="activeTrack?.id ?? null"
               :is-playing="isPlaying"
-              :density="layoutDensity"
               :scan-status="scanStatus"
               :scan-message="scanMessage"
               @playback-queue="handleLibraryPlaybackQueue"
@@ -2367,8 +2334,7 @@ function trackSubtitle(track: LocalTrack) {
 
         <section
           v-if="activeSection === 'collection' && activeCollection"
-          class="mx-auto flex h-full min-h-0 w-full flex-col"
-          :class="layoutDensity === 'compact' ? 'gap-3 px-3 py-3 lg:px-4' : 'gap-4 px-4 py-4 lg:px-6'"
+          class="mx-auto flex h-full min-h-0 w-full flex-col gap-4 px-4 py-4 lg:px-6"
         >
           <div v-if="appError" role="alert" class="alert alert-error">
             <AlertCircle :size="18" aria-hidden="true" />
@@ -2392,7 +2358,6 @@ function trackSubtitle(track: LocalTrack) {
               :active-local-track-id="activeTrack?.id ?? null"
               :active-online-track="activeOnlineTrack"
               :is-playing="isPlaying"
-              :density="layoutDensity"
               @play="handleCollectionPlayback"
               @add-to-collection="addCollectionItemsToCollection"
               @create-collection="createCollectionFromCollectionItems"
@@ -2422,8 +2387,7 @@ function trackSubtitle(track: LocalTrack) {
 
         <section
           v-if="activeSection === 'sources'"
-          class="mx-auto w-full max-w-7xl"
-          :class="layoutDensity === 'compact' ? 'px-3 py-3 lg:px-4' : 'px-4 py-5 lg:px-6'"
+          class="mx-auto w-full max-w-7xl px-4 py-5 lg:px-6"
         >
           <div v-if="appError" role="alert" class="alert alert-error mb-4">
             <AlertCircle :size="18" aria-hidden="true" />
@@ -2442,8 +2406,7 @@ function trackSubtitle(track: LocalTrack) {
 
         <section
           v-show="activeSection === 'online'"
-          class="mx-auto flex min-h-full w-full max-w-7xl flex-col"
-          :class="layoutDensity === 'compact' ? 'gap-3 px-3 py-3 lg:px-4' : 'gap-4 px-4 py-4 lg:px-6'"
+          class="mx-auto flex min-h-full w-full max-w-7xl flex-col gap-4 px-4 py-4 lg:px-6"
         >
           <div v-if="appError" role="alert" class="alert alert-error py-2">
             <AlertCircle :size="17" aria-hidden="true" />
@@ -2458,8 +2421,7 @@ function trackSubtitle(track: LocalTrack) {
             </button>
           </div>
           <div
-            class="grid min-w-0 items-start min-[1000px]:grid-cols-[minmax(0,1fr)_20rem]"
-            :class="layoutDensity === 'compact' ? 'gap-3' : 'gap-4'"
+            class="grid min-w-0 items-start gap-4 min-[1000px]:grid-cols-[minmax(0,1fr)_20rem]"
           >
             <OnlineMusic
               ref="onlineMusic"
@@ -2499,13 +2461,10 @@ function trackSubtitle(track: LocalTrack) {
 
         <section
           v-if="activeSection === 'plugin' && activePlugin"
-          class="mx-auto grid w-full max-w-7xl gap-4"
-          :class="[
-            layoutDensity === 'compact' ? 'px-3 py-3 lg:px-4' : 'px-4 py-4 lg:px-6',
-            activePlugin.id === NETEASE_PLUGIN_ID || activePlugin.id === KUGOU_PLUGIN_ID
-              ? ''
-              : 'xl:grid-cols-[minmax(0,1fr)_20rem]',
-          ]"
+          class="mx-auto grid w-full max-w-7xl gap-4 px-4 py-4 lg:px-6"
+          :class="activePlugin.id === NETEASE_PLUGIN_ID || activePlugin.id === KUGOU_PLUGIN_ID
+            ? ''
+            : 'xl:grid-cols-[minmax(0,1fr)_20rem]'"
         >
           <NeteaseSource
             v-if="activePlugin.id === NETEASE_PLUGIN_ID"
@@ -2551,16 +2510,14 @@ function trackSubtitle(track: LocalTrack) {
 
         <section
           v-if="activeSection === 'plugins'"
-          class="mx-auto w-full max-w-7xl"
-          :class="layoutDensity === 'compact' ? 'px-3 py-3 lg:px-4' : 'px-4 py-5 lg:px-6'"
+          class="mx-auto w-full max-w-7xl px-4 py-5 lg:px-6"
         >
           <PluginManager @plugins-changed="updatePluginRecords" />
         </section>
 
         <section
           v-if="activeSection === 'settings'"
-          class="mx-auto flex w-full max-w-4xl flex-col"
-          :class="layoutDensity === 'compact' ? 'gap-3 px-3 py-3 lg:px-4' : 'gap-4 px-4 py-5 lg:px-6'"
+          class="mx-auto flex w-full max-w-4xl flex-col gap-4 px-4 py-5 lg:px-6"
         >
           <section class="overflow-hidden rounded border border-base-300 bg-base-100">
             <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
@@ -2636,23 +2593,6 @@ function trackSubtitle(track: LocalTrack) {
                 </select>
               </div>
 
-              <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-                <label for="layout-density" class="flex min-w-0 items-start gap-3">
-                  <Gauge class="mt-0.5 shrink-0 text-muted" :size="17" aria-hidden="true" />
-                  <span>
-                    <span class="block text-sm font-medium">{{ t("Layout density") }}</span>
-                    <span class="block text-xs text-muted">{{ t("Adjust page spacing and library rows") }}</span>
-                  </span>
-                </label>
-                <select
-                  id="layout-density"
-                  v-model="layoutDensity"
-                  class="select select-sm w-full sm:w-44"
-                >
-                  <option value="comfortable">{{ t("Comfortable") }}</option>
-                  <option value="compact">{{ t("Compact") }}</option>
-                </select>
-              </div>
             </div>
           </section>
 
@@ -2752,8 +2692,7 @@ function trackSubtitle(track: LocalTrack) {
         :aria-label="t('Playback bar')"
       >
         <div
-          class="mx-auto grid w-full max-w-7xl grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 md:grid-cols-[minmax(0,1fr)_minmax(13rem,1.4fr)_auto] lg:grid-cols-[minmax(0,1fr)_minmax(15rem,1.5fr)_minmax(11rem,1fr)]"
-          :class="layoutDensity === 'compact' ? 'px-3 py-2 lg:px-4' : 'px-4 py-3 lg:px-6'"
+          class="mx-auto grid w-full max-w-7xl grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 px-4 py-3 md:grid-cols-[minmax(0,1fr)_minmax(13rem,1.4fr)_auto] lg:grid-cols-[minmax(0,1fr)_minmax(15rem,1.5fr)_minmax(11rem,1fr)] lg:px-6"
         >
           <div class="flex min-w-0 items-center gap-3" data-testid="playback-track-info">
             <div class="flex size-10 shrink-0 items-center justify-center overflow-hidden rounded bg-base-200 sm:size-11">
@@ -3069,16 +3008,12 @@ function trackSubtitle(track: LocalTrack) {
       <aside class="flex min-h-full w-60 flex-col border-r border-base-300 bg-base-100">
         <div class="flex min-h-16 items-center gap-3 border-b border-base-300 px-4">
           <img class="size-9 shrink-0" :src="fikaLogoUrl" alt="" />
-          <div class="min-w-0">
-            <div class="truncate text-base font-semibold leading-tight">Fika Music</div>
-            <div class="truncate text-xs text-muted">{{ t("Local-first library") }}</div>
-          </div>
+          <div class="min-w-0 truncate text-base font-semibold leading-tight">Fika Music</div>
         </div>
 
         <nav class="flex min-h-0 flex-1 flex-col p-3" :aria-label="t('Primary navigation')">
           <ul
-            class="menu min-h-0 w-full flex-1 flex-nowrap gap-1 overflow-y-auto p-0"
-            :class="layoutDensity === 'compact' ? 'menu-sm' : 'menu-md'"
+            class="menu menu-md min-h-0 w-full flex-1 flex-nowrap gap-1 overflow-y-auto p-0"
           >
             <template v-for="section in mainSections" :key="section.id">
               <template v-if="section.id === 'local'">
@@ -3199,8 +3134,7 @@ function trackSubtitle(track: LocalTrack) {
           </ul>
 
           <ul
-            class="menu w-full shrink-0 gap-1 p-0 pt-4"
-            :class="layoutDensity === 'compact' ? 'menu-sm' : 'menu-md'"
+            class="menu menu-md w-full shrink-0 gap-1 p-0 pt-4"
           >
             <li>
               <button
@@ -3217,17 +3151,6 @@ function trackSubtitle(track: LocalTrack) {
           </ul>
         </nav>
 
-        <div class="border-t border-base-300 px-4 py-3">
-          <div class="truncate text-xs text-muted" :title="selectedFolder || undefined">
-            {{ selectedFolder || t("No music folder") }}
-          </div>
-          <div class="mt-1 text-sm font-medium tabular-nums">
-            {{ t(libraryTrackCount === 1 ? "{count} track indexed" : "{count} tracks indexed", { count: formatNumber(libraryTrackCount) }) }}
-            <span v-if="filteredLibraryTrackCount !== libraryTrackCount" class="text-muted">
-              · {{ t("{count} shown", { count: formatNumber(filteredLibraryTrackCount) }) }}
-            </span>
-          </div>
-        </div>
       </aside>
     </div>
 

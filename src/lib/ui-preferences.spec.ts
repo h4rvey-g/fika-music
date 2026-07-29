@@ -33,7 +33,6 @@ describe("UI preferences", () => {
     ).toEqual({
       locale: "en",
       theme: "system",
-      density: "compact",
       streamQuality: "128k",
       audioSourceId: "",
       volume: 1,
@@ -81,7 +80,6 @@ describe("UI preferences", () => {
       {
         locale: "zh-CN",
         theme: "dark",
-        density: "comfortable",
         streamQuality: "flac",
         audioSourceId: "imported-lx-source",
         volume: -1,
@@ -95,7 +93,6 @@ describe("UI preferences", () => {
       JSON.stringify({
         locale: "zh-CN",
         theme: "dark",
-        density: "comfortable",
         streamQuality: "flac",
         audioSourceId: "imported-lx-source",
         volume: 0,

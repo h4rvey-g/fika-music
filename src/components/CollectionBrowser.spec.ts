@@ -67,7 +67,6 @@ function mountCollection() {
       activeLocalTrackId: null,
       activeOnlineTrack: null,
       isPlaying: false,
-      density: "comfortable",
     },
   });
 }

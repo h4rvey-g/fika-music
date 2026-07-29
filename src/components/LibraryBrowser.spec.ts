@@ -127,7 +127,6 @@ function mountLibrary(activeTrackId: number | null = null, isPlaying = false) {
     props: {
       activeTrackId,
       isPlaying,
-      density: "comfortable",
       scanStatus: idleScanStatus,
       scanMessage: null,
     },

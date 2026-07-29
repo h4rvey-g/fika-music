@@ -80,8 +80,6 @@ import type {
   LocalTrack,
   MetadataLookupTaskStatus,
 } from "../generated/bindings";
-import type { LayoutDensity } from "../lib/ui-preferences";
-
 type MenuPosition = { x: number; y: number };
 type RowMenu = MenuPosition & { track: CollectionTrackView };
 type GroupMenu = MenuPosition & { group: CollectionAlbumGroup };
@@ -92,7 +90,6 @@ const props = defineProps<{
   activeLocalTrackId: number | null;
   activeOnlineTrack: OnlineTrack | null;
   isPlaying: boolean;
-  density: LayoutDensity;
 }>();
 
 const emit = defineEmits<{
@@ -155,8 +152,8 @@ let unlistenAlbumArt: (() => void) | null = null;
 let unlistenMetadata: (() => void) | null = null;
 let unlistenLibraryChanged: (() => void) | null = null;
 
-const rowHeight = computed(() => (props.density === "compact" ? 32 : 34));
-const albumCoverSize = computed(() => rowHeight.value * 2 - 8);
+const rowHeight = 34;
+const albumCoverSize = rowHeight * 2 - 8;
 const visibleColumns = computed(() =>
   columns.value
     .filter((column) => column.visible)
