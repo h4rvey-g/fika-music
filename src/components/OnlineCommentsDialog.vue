@@ -16,6 +16,7 @@ import {
   type OnlineTrackCommentSource,
 } from "../lib/online-comment-api";
 import { cancelSourceRequest } from "../lib/plugin-api";
+import { currentLocale, formatNumber, t } from "../i18n";
 
 type CommentState = {
   result: SourceCommentsResponse | null;
@@ -127,18 +128,20 @@ function loadMore() {
 function commentTime(comment: SourceComment) {
   if (comment.timeLabel) return comment.timeLabel;
   if (comment.timestampMs === null) return "";
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(currentLocale.value, {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(comment.timestampMs));
 }
 
 function compactCount(value: number) {
-  return new Intl.NumberFormat(undefined, { notation: "compact" }).format(value);
+  return new Intl.NumberFormat(currentLocale.value, { notation: "compact" }).format(value);
 }
 
 function commentCountLabel(value: number) {
-  return `${value.toLocaleString()} ${value === 1 ? "comment" : "comments"}`;
+  return t(value === 1 ? "{count} comment" : "{count} comments", {
+    count: formatNumber(value),
+  });
 }
 </script>
 
@@ -166,8 +169,8 @@ function commentCountLabel(value: number) {
             <MessageCircle v-else :size="20" aria-hidden="true" />
           </div>
           <div class="min-w-0 flex-1">
-            <h2 id="online-comments-title" class="truncate text-base font-semibold">Comments</h2>
-            <p class="truncate text-sm text-muted">{{ track.title }} by {{ track.artist }}</p>
+            <h2 id="online-comments-title" class="truncate text-base font-semibold">{{ t("Comments") }}</h2>
+            <p class="truncate text-sm text-muted">{{ t("{title} by {artist}", { title: track.title, artist: track.artist }) }}</p>
           </div>
           <span
             v-if="activeState?.result?.total !== null && activeState?.result?.total !== undefined"
@@ -176,14 +179,14 @@ function commentCountLabel(value: number) {
           >
             <span class="hidden sm:inline">{{ commentCountLabel(activeState.result.total) }}</span>
             <span class="sm:hidden" aria-hidden="true">
-              {{ activeState.result.total.toLocaleString() }}
+              {{ formatNumber(activeState.result.total) }}
             </span>
           </span>
           <button
             class="btn btn-square btn-ghost btn-sm"
             type="button"
-            aria-label="Close comments"
-            title="Close"
+            :aria-label="t('Close comments')"
+            :title="t('Close')"
             @click="emit('close')"
           >
             <X :size="17" aria-hidden="true" />
@@ -194,7 +197,7 @@ function commentCountLabel(value: number) {
           v-if="sources.length > 1"
           role="tablist"
           class="tabs tabs-border shrink-0 px-5 pt-2"
-          aria-label="Comment sources"
+          :aria-label="t('Comment sources')"
         >
           <button
             v-for="source in sources"
@@ -219,7 +222,7 @@ function commentCountLabel(value: number) {
 
         <div class="min-h-0 flex-1 overflow-y-auto px-5 pb-5">
           <div v-if="activeState?.loading" class="grid min-h-64 place-items-center">
-            <span class="loading loading-spinner loading-md" aria-label="Loading comments"></span>
+            <span class="loading loading-spinner loading-md" :aria-label="t('Loading comments')"></span>
           </div>
 
           <div
@@ -231,7 +234,7 @@ function commentCountLabel(value: number) {
             <span class="min-w-0 flex-1 text-sm">{{ activeState.error }}</span>
             <button class="btn btn-sm" type="button" @click="retryActiveSource">
               <RefreshCw :size="15" aria-hidden="true" />
-              Retry
+              {{ t("Retry") }}
             </button>
           </div>
 
@@ -239,13 +242,13 @@ function commentCountLabel(value: number) {
             v-else-if="activeState?.result && !activeState.result.hotComments.length && !activeState.result.comments.length"
             class="grid min-h-64 place-items-center text-sm text-muted"
           >
-            No comments yet
+            {{ t("No comments yet") }}
           </div>
 
           <template v-else-if="activeState?.result">
             <section v-if="activeState.result.hotComments.length" class="pt-4">
-              <h3 class="pb-1 text-xs font-semibold text-muted">Top comments</h3>
-              <ul class="list divide-y divide-base-300" aria-label="Top comments">
+              <h3 class="pb-1 text-xs font-semibold text-muted">{{ t("Top comments") }}</h3>
+              <ul class="list divide-y divide-base-300" :aria-label="t('Top comments')">
                 <li
                   v-for="comment in activeState.result.hotComments"
                   :key="`hot:${comment.id}`"
@@ -280,8 +283,8 @@ function commentCountLabel(value: number) {
             </section>
 
             <section v-if="activeState.result.comments.length" class="pt-4">
-              <h3 class="pb-1 text-xs font-semibold text-muted">Recent comments</h3>
-              <ul class="list divide-y divide-base-300" aria-label="Recent comments">
+              <h3 class="pb-1 text-xs font-semibold text-muted">{{ t("Recent comments") }}</h3>
+              <ul class="list divide-y divide-base-300" :aria-label="t('Recent comments')">
                 <li
                   v-for="comment in activeState.result.comments"
                   :key="comment.id"
@@ -320,7 +323,7 @@ function commentCountLabel(value: number) {
               <span class="min-w-0 flex-1 text-sm">{{ activeState.error }}</span>
               <button class="btn btn-sm" type="button" @click="loadMore">
                 <RefreshCw :size="15" aria-hidden="true" />
-                Retry
+                {{ t("Retry") }}
               </button>
             </div>
 
@@ -340,14 +343,14 @@ function commentCountLabel(value: number) {
                   aria-hidden="true"
                 ></span>
                 <RefreshCw v-else :size="15" aria-hidden="true" />
-                Load more
+                {{ t("Load more") }}
               </button>
             </div>
           </template>
         </div>
       </div>
       <form method="dialog" class="modal-backdrop" @submit.prevent="emit('close')">
-        <button type="submit">Close</button>
+        <button type="submit">{{ t("Close") }}</button>
       </form>
     </dialog>
   </Teleport>

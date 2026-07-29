@@ -17,6 +17,7 @@ import {
   type OnlineTrack,
 } from "../lib/online-music-api";
 import { writeCollectionDragPayload } from "../lib/collection-api";
+import { formatNumber, t } from "../i18n";
 
 const props = defineProps<{
   tracks: OnlineTrack[];
@@ -199,11 +200,11 @@ function artistActionId(track: OnlineTrack, artist: string) {
       <table class="table table-xs table-pin-rows">
         <thead>
           <tr>
-            <th>Title</th>
-            <th class="hidden md:table-cell">Artist</th>
-            <th class="hidden lg:table-cell">Album</th>
-            <th class="w-28">Sources</th>
-            <th class="w-16 text-right">Time</th>
+            <th>{{ t("Title") }}</th>
+            <th class="hidden md:table-cell">{{ t("Artist") }}</th>
+            <th class="hidden lg:table-cell">{{ t("Album") }}</th>
+            <th class="w-28">{{ t("Sources") }}</th>
+            <th class="w-16 text-right">{{ t("Time") }}</th>
             <th class="w-28"></th>
           </tr>
         </thead>
@@ -243,13 +244,13 @@ function artistActionId(track: OnlineTrack, artist: string) {
                   v-if="isActiveTrack(track) && isPlaying"
                   :class="selectedKeys.has(track.key) ? 'text-neutral-content' : 'text-primary'"
                   :size="13"
-                  aria-label="Playing"
+                  :aria-label="t('Playing')"
                 />
                 <Pause
                   v-else-if="isActiveTrack(track)"
                   :class="selectedKeys.has(track.key) ? 'text-neutral-content' : 'text-primary'"
                   :size="13"
-                  aria-label="Paused"
+                  :aria-label="t('Paused')"
                 />
               </span>
               <div
@@ -274,7 +275,7 @@ function artistActionId(track: OnlineTrack, artist: string) {
                   type="button"
                   :disabled="entityActionId === artistActionId(track, artist)"
                   :aria-busy="entityActionId === artistActionId(track, artist) ? 'true' : undefined"
-                  :aria-label="`Open artist ${artist}`"
+                  :aria-label="t('Open artist {artist}', { artist })"
                   :data-online-track-artist="track.key"
                   :data-online-artist-name="artist"
                   @click.stop="$emit('openArtist', track, artist)"
@@ -299,7 +300,7 @@ function artistActionId(track: OnlineTrack, artist: string) {
               type="button"
               :disabled="entityActionId === `album:${track.key}`"
               :aria-busy="entityActionId === `album:${track.key}` ? 'true' : undefined"
-              :aria-label="`Open album ${track.album}`"
+              :aria-label="t('Open album {album}', { album: track.album })"
               :data-online-track-album="track.key"
               @click.stop="$emit('openAlbum', track)"
               @dblclick.stop
@@ -334,9 +335,9 @@ function artistActionId(track: OnlineTrack, artist: string) {
                 class="btn btn-square btn-ghost btn-sm"
                 type="button"
                 :disabled="!supportsLibraryActions(track) || trackActionId === `favorite:${track.key}`"
-                :aria-label="`Add ${track.title} to My Favorite Music`"
+                :aria-label="t('Add {title} to My Favorite Music', { title: track.title })"
                 :aria-pressed="isFavorite(track)"
-                :title="supportsLibraryActions(track) ? 'Add to My Favorite Music' : 'This track is not available on NetEase or KuGou'"
+                :title="supportsLibraryActions(track) ? t('Add to My Favorite Music') : t('This track is not available on NetEase or KuGou')"
                 @click.stop="$emit('favorite', track)"
                 @dblclick.stop
               >
@@ -353,8 +354,8 @@ function artistActionId(track: OnlineTrack, artist: string) {
                 class="btn btn-square btn-ghost btn-sm"
                 type="button"
                 :disabled="!supportsLibraryActions(track) || trackActionId === `playlist:${track.key}`"
-                :aria-label="`Add ${track.title} to a Playlist`"
-                :title="supportsLibraryActions(track) ? 'Add to Playlist' : 'This track is not available on NetEase or KuGou'"
+                :aria-label="t('Add {title} to a Playlist', { title: track.title })"
+                :title="supportsLibraryActions(track) ? t('Add to Playlist') : t('This track is not available on NetEase or KuGou')"
                 @click.stop="$emit('addToPlaylist', track)"
                 @dblclick.stop
               >
@@ -364,8 +365,8 @@ function artistActionId(track: OnlineTrack, artist: string) {
               <button
                 class="btn btn-square btn-ghost btn-sm"
                 type="button"
-                :aria-label="`Download ${track.title}`"
-                title="Download"
+                :aria-label="t('Download {title}', { title: track.title })"
+                :title="t('Download')"
                 @click.stop="$emit('download', track)"
                 @dblclick.stop
               >
@@ -383,15 +384,15 @@ function artistActionId(track: OnlineTrack, artist: string) {
       class="menu fixed z-50 w-60 border border-base-300 bg-base-100 p-2 text-base-content shadow-xl"
       :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
       data-online-track-menu
-      aria-label="Selected online track actions"
+      :aria-label="t('Selected online track actions')"
     >
       <li class="menu-title px-3 py-1 text-xs">
-        {{ selectedTracks.length }} {{ selectedTracks.length === 1 ? "track" : "tracks" }} selected
+        {{ t(selectedTracks.length === 1 ? "{count} track selected" : "{count} tracks selected", { count: formatNumber(selectedTracks.length) }) }}
       </li>
       <li>
         <button type="button" @click="downloadSelection">
         <Download :size="16" aria-hidden="true" />
-          Download
+          {{ t("Download") }}
         </button>
       </li>
       <li>
@@ -401,19 +402,19 @@ function artistActionId(track: OnlineTrack, artist: string) {
           @click="addSelectionToPlaylist"
         >
         <ListPlus :size="16" aria-hidden="true" />
-          Add to Playlist
+          {{ t("Add to Playlist") }}
         </button>
       </li>
       <li>
         <button type="button" @click="requestCollectionAction(false)">
           <ListPlus :size="16" aria-hidden="true" />
-          Add to Collection
+          {{ t("Add to Collection") }}
         </button>
       </li>
       <li>
         <button type="button" @click="requestCollectionAction(true)">
           <FolderPlus :size="16" aria-hidden="true" />
-          New Collection from selection
+          {{ t("New Collection from selection") }}
         </button>
       </li>
       <li>
@@ -421,12 +422,12 @@ function artistActionId(track: OnlineTrack, artist: string) {
           type="button"
           :disabled="!selectionSupportsComments"
           :title="selectedTracks.length === 1 && !selectionSupportsComments
-            ? 'This track has no NetEase or KuGou comment source'
+            ? t('This track has no NetEase or KuGou comment source')
             : undefined"
           @click="viewComments"
         >
           <MessageCircle :size="16" aria-hidden="true" />
-          View Comments
+          {{ t("View Comments") }}
         </button>
       </li>
     </ul>

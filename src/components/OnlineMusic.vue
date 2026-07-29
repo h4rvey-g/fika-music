@@ -81,6 +81,7 @@ import {
 import { addNeteasePlaylistTrack, NETEASE_PLUGIN_ID } from "../lib/netease-api";
 import { addKugouPlaylistTrack, KUGOU_PLUGIN_ID } from "../lib/kugou-api";
 import { onlineTrackSupportsComments } from "../lib/online-comment-api";
+import { formatNumber, t } from "../i18n";
 
 type SectionState = {
   loading: boolean;
@@ -318,20 +319,21 @@ const visibleDetailTitle = computed(() => {
 const visibleDetailSubtitle = computed(() => {
   if (!detail.value) return "";
   if (detail.value.kind === "artist") {
-    return {
+    const label = {
       topTracks: "Top tracks",
       albums: "All albums",
       biography: "Artist bio",
     }[artistDetailTab.value];
+    return t(label);
   }
   if (detail.value.kind === "album") return detail.value.entity.artist;
   return detail.value.entity.ownerName || detail.value.entity.channelName;
 });
 const detailBackLabel = computed(() => {
   if (detail.value?.kind === "album" && artistDetailHistory.value) {
-    return `Back to ${artistDetailHistory.value.detail.entity.name}`;
+    return t("Back to {name}", { name: artistDetailHistory.value.detail.entity.name });
   }
-  return "Back to search results";
+  return t("Back to search results");
 });
 const isArtistTopTracksTab = computed(() =>
   detail.value?.kind !== "artist" || artistDetailTab.value === "topTracks"
@@ -423,7 +425,10 @@ onMounted(async () => {
     listenOnlineDownloadTasks(upsertDownloadTask),
     listenOnlineDownloadProgress(applyDownloadProgress),
     listenOnlineDownloadCompletions((task) => {
-      completionMessage.value = `${task.title}: ${task.completedItems} downloaded`;
+      completionMessage.value = t("{title}: {count} downloaded", {
+        title: task.title,
+        count: task.completedItems,
+      });
       window.setTimeout(() => {
         completionMessage.value = null;
       }, 5_000);
@@ -665,10 +670,10 @@ function recommendationCoverUrl(kind: MusicRecommendationKind) {
 
 function recommendationResultError(result: OnlineRecommendationsResult) {
   if (result.supportedChannels === 0) {
-    return "No enabled channel supports this recommendation.";
+    return t("No enabled channel supports this recommendation.");
   }
   if (!result.items.length) {
-    return result.failures[0]?.message ?? "No recommendations available.";
+    return result.failures[0]?.message ?? t("No recommendations available.");
   }
   return null;
 }
@@ -800,13 +805,15 @@ async function loadFavoritePlaylistIdentities(
         }
       }
       if (!result.hasMore) return identities;
-      if (!result.items.length) throw new Error("Favorite playlist pagination did not advance.");
+      if (!result.items.length) {
+        throw new Error(t("Favorite playlist pagination did not advance."));
+      }
     } finally {
       favoriteTrackRequestIds.delete(requestId);
     }
   }
 
-  throw new Error("Favorite playlist exceeded the supported page limit.");
+  throw new Error(t("Favorite playlist exceeded the supported page limit."));
 }
 
 function loadFavoriteTrackIdentities(result: OnlinePlaylistsResult, force = false) {
@@ -966,7 +973,7 @@ async function addTrackToPlaylist(target: PlaylistTarget) {
   if (target.playlist.pluginId === KUGOU_PLUGIN_ID) {
     return addKugouPlaylistTrack(target.playlist.accountRef, target.playlist.id, track);
   }
-  throw new Error("The selected playlist does not support adding tracks.");
+  throw new Error(t("The selected playlist does not support adding tracks."));
 }
 
 function showTrackActionMessage(message: string) {
@@ -980,18 +987,18 @@ function showTrackActionMessage(message: string) {
 
 async function addToFavorites(track: OnlineTrack) {
   if (!supportsLibraryActions(track)) {
-    globalError.value = "This track is not available on NetEase or KuGou.";
+    globalError.value = t("This track is not available on NetEase or KuGou.");
     return;
   }
   globalError.value = null;
   const library = await loadPlaylistLibrary();
   if (!library) {
-    globalError.value ??= "Could not load your playlists.";
+    globalError.value ??= t("Could not load your playlists.");
     return;
   }
   const targets = playlistTargetsForTrack(track, true);
   if (!targets.length) {
-    globalError.value = "No matching My Favorite Music playlist is available.";
+    globalError.value = t("No matching My Favorite Music playlist is available.");
     return;
   }
 
@@ -1014,8 +1021,8 @@ async function addToFavorites(track: OnlineTrack) {
     ]);
     showTrackActionMessage(
       succeeded === 1
-        ? "Added to My Favorite Music."
-        : `Added to ${succeeded} favorite playlists.`,
+        ? t("Added to My Favorite Music.")
+        : t("Added to {count} favorite playlists.", { count: succeeded }),
     );
   }
   if (errors.length) {
@@ -1027,20 +1034,20 @@ async function openPlaylistPicker(trackOrTracks: OnlineTrack | OnlineTrack[]) {
   const tracks = Array.isArray(trackOrTracks) ? trackOrTracks : [trackOrTracks];
   if (!tracks.length) return;
   if (tracks.some((track) => !supportsLibraryActions(track))) {
-    globalError.value = "One or more selected tracks are not available on NetEase or KuGou.";
+    globalError.value = t("One or more selected tracks are not available on NetEase or KuGou.");
     return;
   }
   globalError.value = null;
   const library = await loadPlaylistLibrary();
   if (!library) {
-    globalError.value ??= "Could not load your playlists.";
+    globalError.value ??= t("Could not load your playlists.");
     return;
   }
   const targets = playlistTargetsForTracks(tracks);
   if (!targets.length) {
     globalError.value = tracks.length === 1
-      ? "No matching writable playlist is available."
-      : "No writable playlist supports every selected track.";
+      ? t("No matching writable playlist is available.")
+      : t("No writable playlist supports every selected track.");
     return;
   }
   pendingPlaylistTracks.value = [...tracks];
@@ -1072,8 +1079,12 @@ async function confirmPlaylistAdd() {
   if (succeeded) {
     showTrackActionMessage(
       tracks.length === 1
-        ? `Added to ${target.playlist.name}.`
-        : `Added ${succeeded} of ${tracks.length} tracks to ${target.playlist.name}.`,
+        ? t("Added to {name}.", { name: target.playlist.name })
+        : t("Added {added} of {total} tracks to {name}.", {
+            added: succeeded,
+            total: tracks.length,
+            name: target.playlist.name,
+          }),
     );
     pendingPlaylistTracks.value = [];
     selectedPlaylistTargetKey.value = "";
@@ -1290,9 +1301,9 @@ function applySearchSection(event: OnlineSearchSectionEvent) {
   state.loading = false;
   state.result = event.result;
   state.error = event.result.supportedChannels === 0
-    ? "No enabled channel supports this search type."
+    ? t("No enabled channel supports this search type.")
     : event.result.completedChannels === event.result.failures.length
-      ? "This section could not be loaded."
+      ? t("This section could not be loaded.")
       : null;
   if (event.result.section === "songs" && pendingListEntryGeneration !== null) {
     void finishVisibleSongListEntry(pendingListEntryGeneration);
@@ -1482,7 +1493,7 @@ async function openTrackArtist(track: OnlineTrack, artistName: string) {
   if (!result) return;
   const artist = resolveTrackArtist(result, artistName);
   if (!artist) {
-    globalError.value = `Could not find the artist page for "${artistName}".`;
+    globalError.value = t('Could not find the artist page for "{name}".', { name: artistName });
     return;
   }
   await openDetail({ kind: "artist", entity: artist });
@@ -1500,7 +1511,7 @@ async function openTrackAlbum(track: OnlineTrack) {
   if (!result) return;
   const album = resolveTrackAlbum(result, track);
   if (!album) {
-    globalError.value = `Could not find the album page for "${track.album}".`;
+    globalError.value = t('Could not find the album page for "{name}".', { name: track.album });
     return;
   }
   if (detail.value?.kind === "artist"
@@ -1565,7 +1576,9 @@ async function openDetail(
       (playlistError.code === "credential-expired" || playlistError.code === "account-not-found")
     ) {
       loginRequiredPluginId.value = playlistError.pluginId;
-      globalError.value = `${playlistError.channelName} requires login to read this playlist.`;
+      globalError.value = t("{name} requires login to read this playlist.", {
+        name: playlistError.channelName,
+      });
     } else {
       globalError.value = playlistError?.message ?? normalizeError(error);
     }
@@ -1724,11 +1737,11 @@ async function playTrack(track: OnlineTrack, queue: OnlineTrack[], appendable = 
       ),
     };
   } catch {
-    globalError.value = "Playback is unavailable from the configured Audio Sources.";
+    globalError.value = t("Playback is unavailable from the configured Audio Sources.");
     return;
   }
   if (!currentTrack.candidates.length) {
-    globalError.value = "Playback is unavailable from the configured Audio Sources.";
+    globalError.value = t("Playback is unavailable from the configured Audio Sources.");
     return;
   }
   const queueIndex = queue.findIndex((item) => item.key === track.key);
@@ -1818,7 +1831,7 @@ async function downloadAllRecommendation() {
   if (!recommendationTracks.value.length || !activeRecommendationEntry.value) return;
   await createDownload(
     "recommendation",
-    activeRecommendationEntry.value.label,
+    t(activeRecommendationEntry.value.label),
     [...recommendationTracks.value],
   );
 }
@@ -1831,7 +1844,9 @@ async function downloadTracks(tracks: OnlineTrack[]) {
   if (!tracks.length) return;
   await createDownload(
     tracks.length === 1 ? "track" : "selection",
-    tracks.length === 1 ? tracks[0].title : `${tracks.length} selected tracks`,
+    tracks.length === 1
+      ? tracks[0].title
+      : t("{count} selected tracks", { count: formatNumber(tracks.length) }),
     [...tracks],
   );
 }
@@ -1994,8 +2009,8 @@ function taskProgressText(task: OnlineDownloadTask) {
   const hasUnknownActiveSize = task.items.some((item) =>
     item.state === "downloading" && !item.totalBytes
   );
-  if (progress === 0 && isResolving) return "Resolving";
-  if (progress === 0 && hasUnknownActiveSize) return "Downloading";
+  if (progress === 0 && isResolving) return t("Resolving");
+  if (progress === 0 && hasUnknownActiveSize) return t("Downloading");
   return `${progress}%${isResolving || hasUnknownActiveSize ? "+" : ""}`;
 }
 
@@ -2005,10 +2020,15 @@ function activeDownloadBytes(task: OnlineDownloadTask) {
   const downloaded = active.reduce((total, item) => total + item.bytesDownloaded, 0);
   const allSizesKnown = active.every((item) => item.totalBytes !== null && item.totalBytes > 0);
   if (!allSizesKnown) {
-    return downloaded > 0 ? `${formatBytes(downloaded)} downloaded` : "Downloading";
+    return downloaded > 0
+      ? t("{size} downloaded", { size: formatBytes(downloaded) })
+      : t("Downloading");
   }
   const total = active.reduce((sum, item) => sum + (item.totalBytes ?? 0), 0);
-  return `${formatBytes(downloaded)} of ${formatBytes(total)} active`;
+  return t("{downloaded} of {total} active", {
+    downloaded: formatBytes(downloaded),
+    total: formatBytes(total),
+  });
 }
 
 function itemProgressText(item: OnlineDownloadTask["items"][number]) {
@@ -2030,18 +2050,18 @@ function formatBytes(bytes: number) {
 }
 
 function downloadTaskStateLabel(state: OnlineDownloadTask["state"]) {
-  return {
+  return t({
     queued: "Queued",
     running: "Downloading",
     paused: "Paused",
     completed: "Complete",
     completedWithErrors: "Finished with errors",
     cancelled: "Cancelled",
-  }[state];
+  }[state]);
 }
 
 function downloadItemStateLabel(state: OnlineDownloadTask["items"][number]["state"]) {
-  return {
+  return t({
     queued: "Waiting",
     resolving: "Resolving",
     downloading: "Downloading",
@@ -2050,7 +2070,7 @@ function downloadItemStateLabel(state: OnlineDownloadTask["items"][number]["stat
     skipped: "Skipped",
     failed: "Failed",
     cancelled: "Cancelled",
-  }[state];
+  }[state]);
 }
 
 async function backToResults() {
@@ -2248,8 +2268,8 @@ defineExpose({
               class="min-w-0 grow"
               type="search"
               autocomplete="off"
-              placeholder="Search songs, artists, albums, and playlists"
-              aria-label="Search Online Music"
+              :placeholder="t('Search songs, artists, albums, and playlists')"
+              :aria-label="t('Search Online Music')"
               @input="onQueryInput"
               @focus="openSuggestions"
               @click="openSuggestions"
@@ -2257,7 +2277,7 @@ defineExpose({
           </label>
           <button class="btn btn-primary btn-sm join-item" type="submit" :disabled="!query.trim()">
             <Search :size="16" aria-hidden="true" />
-            Search
+            {{ t("Search") }}
           </button>
         </form>
 
@@ -2267,12 +2287,12 @@ defineExpose({
         >
           <div v-if="suggestionLoading" class="flex h-10 items-center gap-2 px-3 text-xs text-muted">
             <span class="loading loading-spinner loading-xs"></span>
-            {{ query.trim() ? "Loading suggestions" : "Loading search history" }}
+            {{ query.trim() ? t("Loading suggestions") : t("Loading search history") }}
           </div>
           <ul
             v-else
             class="menu menu-sm w-full p-1"
-            :aria-label="query.trim() ? 'Search suggestions' : 'Search history'"
+            :aria-label="query.trim() ? t('Search suggestions') : t('Search history')"
           >
             <li v-for="suggestion in suggestions" :key="suggestion">
               <button type="button" @mousedown.prevent="submitSearch(suggestion)">
@@ -2293,7 +2313,7 @@ defineExpose({
           :aria-selected="activeTab === 'search'"
           @click="selectTab('search')"
         >
-          Search
+          {{ t("Search") }}
         </button>
         <button
           role="tab"
@@ -2302,7 +2322,7 @@ defineExpose({
           :aria-selected="activeTab === 'downloads'"
           @click="selectTab('downloads')"
         >
-          Downloads
+          {{ t("Downloads") }}
           <span v-if="downloadTasks.length" class="badge badge-sm ml-1">{{ downloadTasks.length }}</span>
         </button>
       </div>
@@ -2318,14 +2338,14 @@ defineExpose({
           type="button"
           @click="emit('openPlugin', loginRequiredPluginId)"
         >
-          Open channel
+          {{ t("Open channel") }}
         </button>
         <button v-if="detailRetryAvailable" class="btn btn-sm" type="button" @click="retryDetail">
           <RefreshCw :size="16" aria-hidden="true" />
-          Retry
+          {{ t("Retry") }}
         </button>
       </div>
-      <button class="btn btn-square btn-ghost btn-sm" type="button" aria-label="Dismiss error" @click="dismissGlobalError">
+      <button class="btn btn-square btn-ghost btn-sm" type="button" :aria-label="t('Dismiss error')" @click="dismissGlobalError">
         <X :size="16" aria-hidden="true" />
       </button>
     </div>
@@ -2340,12 +2360,12 @@ defineExpose({
 
     <div v-if="activeTab === 'downloads'" class="min-h-64">
       <div class="flex items-center justify-between border-b border-base-300 pb-2">
-        <h2 class="text-sm font-semibold">Download tasks</h2>
-        <span class="text-xs text-muted">{{ downloadTasks.length }} task{{ downloadTasks.length === 1 ? '' : 's' }}</span>
+        <h2 class="text-sm font-semibold">{{ t("Download tasks") }}</h2>
+        <span class="text-xs text-muted">{{ t(downloadTasks.length === 1 ? "{count} task" : "{count} tasks", { count: downloadTasks.length }) }}</span>
       </div>
       <div v-if="!downloadTasks.length" class="flex min-h-48 flex-col items-center justify-center gap-2 text-muted">
         <Download :size="24" aria-hidden="true" />
-        <span class="text-sm">No download tasks</span>
+        <span class="text-sm">{{ t("No download tasks") }}</span>
       </div>
       <div v-else class="divide-y divide-base-300">
         <section v-for="task in downloadTasks" :key="task.taskId" class="py-3">
@@ -2359,9 +2379,9 @@ defineExpose({
                 </span>
               </div>
               <div class="mt-1 flex min-w-0 items-center gap-2 text-xs text-muted">
-                <span>{{ task.completedItems }} complete</span>
-                <span>{{ task.skippedItems }} skipped</span>
-                <span v-if="task.failedItems">{{ task.failedItems }} failed</span>
+                <span>{{ t("{count} complete", { count: task.completedItems }) }}</span>
+                <span>{{ t("{count} skipped", { count: task.skippedItems }) }}</span>
+                <span v-if="task.failedItems">{{ t("{count} failed", { count: task.failedItems }) }}</span>
                 <span v-if="activeDownloadBytes(task)" class="hidden min-w-0 truncate sm:inline">
                   {{ activeDownloadBytes(task) }}
                 </span>
@@ -2371,7 +2391,7 @@ defineExpose({
                 class="progress progress-primary mt-1 h-1.5 w-full"
                 :value="taskProgressValue(task)"
                 max="100"
-                :aria-label="`${task.title} progress`"
+                :aria-label="t('{title} progress', { title: task.title })"
               ></progress>
             </div>
             <div class="flex shrink-0 gap-1">
@@ -2380,8 +2400,8 @@ defineExpose({
                 class="btn btn-square btn-ghost btn-sm"
                 type="button"
                 :disabled="downloadActionId === task.taskId"
-                aria-label="Resume download task"
-                title="Resume"
+                :aria-label="t('Resume download task')"
+                :title="t('Resume')"
                 @click="runDownloadAction(task, 'start')"
               >
                 <RefreshCw v-if="downloadActionId === task.taskId" class="animate-spin" :size="16" aria-hidden="true" />
@@ -2392,8 +2412,8 @@ defineExpose({
                 class="btn btn-square btn-ghost btn-sm"
                 type="button"
                 :disabled="downloadActionId === task.taskId"
-                aria-label="Pause download task"
-                title="Pause"
+                :aria-label="t('Pause download task')"
+                :title="t('Pause')"
                 @click="runDownloadAction(task, 'pause')"
               >
                 <Pause :size="16" aria-hidden="true" />
@@ -2403,8 +2423,8 @@ defineExpose({
                 class="btn btn-square btn-ghost btn-sm"
                 type="button"
                 :disabled="downloadActionId === task.taskId"
-                aria-label="Cancel download task"
-                title="Cancel"
+                :aria-label="t('Cancel download task')"
+                :title="t('Cancel')"
                 @click="runDownloadAction(task, 'cancel')"
               >
                 <Ban :size="16" aria-hidden="true" />
@@ -2429,8 +2449,8 @@ defineExpose({
                   class="btn btn-square btn-ghost btn-sm"
                   type="button"
                   :disabled="downloadActionId === item.itemId"
-                  :aria-label="`Refresh candidates for ${item.track.title}`"
-                  title="Refresh candidates"
+                  :aria-label="t('Refresh candidates for {title}', { title: item.track.title })"
+                  :title="t('Refresh candidates')"
                   @click="refreshAndRetryDownloadItem(task, item.itemId)"
                 >
                   <Search :class="{ 'animate-pulse': downloadActionId === item.itemId }" :size="16" aria-hidden="true" />
@@ -2440,8 +2460,8 @@ defineExpose({
                   class="btn btn-square btn-ghost btn-sm"
                   type="button"
                   :disabled="downloadActionId === item.itemId"
-                  :aria-label="`Retry ${item.track.title}`"
-                  title="Retry"
+                  :aria-label="t('Retry {title}', { title: item.track.title })"
+                  :title="t('Retry')"
                   @click="retryDownloadItem(task, item.itemId)"
                 >
                   <RefreshCw :class="{ 'animate-spin': downloadActionId === item.itemId }" :size="16" aria-hidden="true" />
@@ -2455,7 +2475,7 @@ defineExpose({
 
     <div v-else-if="detail" class="min-w-0">
       <div class="mb-3 flex min-w-0 items-center gap-3 border-b border-base-300 pb-3">
-        <button class="btn btn-square btn-ghost btn-sm" type="button" :aria-label="detailBackLabel" title="Back" @click="backFromDetail">
+        <button class="btn btn-square btn-ghost btn-sm" type="button" :aria-label="detailBackLabel" :title="t('Back')" @click="backFromDetail">
           <ArrowLeft :size="17" aria-hidden="true" />
         </button>
         <div class="flex size-12 shrink-0 items-center justify-center overflow-hidden rounded bg-base-200">
@@ -2471,15 +2491,15 @@ defineExpose({
         <div v-if="detailTracks.length && isArtistTopTracksTab" class="flex shrink-0 gap-1">
           <button class="btn btn-sm" type="button" @click="playAllDetail">
             <Play :size="16" aria-hidden="true" />
-            Play all
+            {{ t("Play all") }}
           </button>
-          <button class="btn btn-square btn-sm" type="button" aria-label="Download all loaded tracks" title="Download all" @click="downloadAll">
+          <button class="btn btn-square btn-sm" type="button" :aria-label="t('Download all loaded tracks')" :title="t('Download all')" @click="downloadAll">
             <Download :size="16" aria-hidden="true" />
           </button>
         </div>
       </div>
 
-      <div v-if="detail.kind === 'artist'" role="tablist" class="tabs tabs-border mb-3" aria-label="Artist details">
+      <div v-if="detail.kind === 'artist'" role="tablist" class="tabs tabs-border mb-3" :aria-label="t('Artist details')">
         <button
           role="tab"
           class="tab"
@@ -2489,7 +2509,7 @@ defineExpose({
           type="button"
           @click="selectArtistDetailTab('topTracks')"
         >
-          Top tracks
+          {{ t("Top tracks") }}
         </button>
         <button
           role="tab"
@@ -2500,7 +2520,7 @@ defineExpose({
           type="button"
           @click="selectArtistDetailTab('albums')"
         >
-          All albums
+          {{ t("All albums") }}
         </button>
         <button
           role="tab"
@@ -2511,7 +2531,7 @@ defineExpose({
           type="button"
           @click="selectArtistDetailTab('biography')"
         >
-          Artist bio
+          {{ t("Artist bio") }}
         </button>
       </div>
 
@@ -2545,7 +2565,7 @@ defineExpose({
         <div v-if="detailHasMore" class="flex justify-center py-4">
           <button class="btn btn-sm" type="button" :disabled="detailLoadingMore" @click="loadMoreDetail">
             <span v-if="detailLoadingMore" class="loading loading-spinner loading-xs"></span>
-            Load more
+            {{ t("Load more") }}
           </button>
         </div>
       </template>
@@ -2561,19 +2581,19 @@ defineExpose({
           <span>{{ artistAlbumsError }}</span>
           <button class="btn btn-sm" type="button" @click="loadArtistAlbums()">
             <RefreshCw :size="16" aria-hidden="true" />
-            Retry
+            {{ t("Retry") }}
           </button>
         </div>
         <div v-else>
           <div v-if="!artistAlbums.length" class="flex min-h-20 items-center text-sm text-muted">
-            No albums found
+            {{ t("No albums found") }}
           </div>
           <ul v-else class="list divide-y divide-base-300">
             <li v-for="album in artistAlbums" :key="album.key">
               <button
                 class="list-row w-full px-0 py-2 text-left hover:bg-base-200/60"
                 type="button"
-                :aria-label="`Open album ${album.title}`"
+                :aria-label="t('Open album {album}', { album: album.title })"
                 :data-online-artist-album="album.key"
                 @click="openArtistAlbum(album)"
               >
@@ -2599,13 +2619,13 @@ defineExpose({
             <span class="min-w-0 flex-1 text-sm">{{ artistAlbumsError }}</span>
             <button class="btn btn-sm" type="button" @click="loadArtistAlbums(true)">
               <RefreshCw :size="16" aria-hidden="true" />
-              Retry
+              {{ t("Retry") }}
             </button>
           </div>
           <div v-if="artistAlbumsHasMore" class="flex justify-center py-4">
             <button class="btn btn-sm" type="button" :disabled="artistAlbumsLoadingMore" @click="loadArtistAlbums(true)">
               <span v-if="artistAlbumsLoadingMore" class="loading loading-spinner loading-xs"></span>
-              Load more
+              {{ t("Load more") }}
             </button>
           </div>
         </div>
@@ -2623,14 +2643,14 @@ defineExpose({
           <span>{{ artistBiographyError }}</span>
           <button class="btn btn-sm" type="button" @click="loadArtistBiography()">
             <RefreshCw :size="16" aria-hidden="true" />
-            Retry
+            {{ t("Retry") }}
           </button>
         </div>
         <div
           v-else-if="!artistBiography?.summary && !artistBiography?.sections.length"
           class="flex min-h-20 items-center text-sm text-muted"
         >
-          No artist biography found
+          {{ t("No artist biography found") }}
         </div>
         <div v-else class="space-y-5">
           <p v-if="artistBiography?.summary" class="whitespace-pre-line text-sm leading-6 text-muted">
@@ -2650,8 +2670,8 @@ defineExpose({
         <button
           class="btn btn-square btn-ghost btn-sm"
           type="button"
-          aria-label="Back to Online Music home"
-          title="Back"
+          :aria-label="t('Back to Online Music home')"
+          :title="t('Back')"
           @click="closeRecommendation"
         >
           <ArrowLeft :size="17" aria-hidden="true" />
@@ -2660,7 +2680,7 @@ defineExpose({
           <component :is="activeRecommendationEntry.icon" :size="22" aria-hidden="true" />
         </div>
         <div class="min-w-0 flex-1">
-          <h2 class="truncate text-base font-semibold">{{ activeRecommendationEntry.label }}</h2>
+          <h2 class="truncate text-base font-semibold">{{ t(activeRecommendationEntry.label) }}</h2>
           <div class="mt-1 flex flex-wrap gap-1">
             <span
               v-for="provider in activeRecommendationEntry.providers"
@@ -2670,7 +2690,7 @@ defineExpose({
               {{ provider.label }}
             </span>
             <span v-if="recommendationFailures.length && recommendationTracks.length" class="badge badge-warning badge-sm">
-              Partial
+              {{ t("Partial") }}
             </span>
           </div>
         </div>
@@ -2680,8 +2700,8 @@ defineExpose({
             class="btn btn-square btn-ghost btn-sm"
             type="button"
             :disabled="recommendationLoading"
-            aria-label="Refresh recommendations"
-            title="Refresh recommendations"
+            :aria-label="t('Refresh recommendations')"
+            :title="t('Refresh recommendations')"
             @click="openRecommendation(activeRecommendationEntry.id, true)"
           >
             <RefreshCw
@@ -2697,14 +2717,14 @@ defineExpose({
             @click="playAllRecommendation"
           >
             <Play :size="16" aria-hidden="true" />
-            Play all
+            {{ t("Play all") }}
           </button>
           <button
             v-if="recommendationTracks.length"
             class="btn btn-square btn-ghost btn-sm"
             type="button"
-            aria-label="Download all recommendations"
-            title="Download all"
+            :aria-label="t('Download all recommendations')"
+            :title="t('Download all')"
             @click="downloadAllRecommendation"
           >
             <Download :size="16" aria-hidden="true" />
@@ -2723,7 +2743,7 @@ defineExpose({
             type="button"
             @click="emit('openPlugin', provider.pluginId)"
           >
-            Open {{ provider.label }}
+            {{ t("Open {name}", { name: provider.label }) }}
           </button>
         </div>
       </div>
@@ -2733,7 +2753,7 @@ defineExpose({
         class="alert alert-warning mb-3 py-2 text-sm"
       >
         <AlertCircle :size="17" aria-hidden="true" />
-        {{ recommendationFailures.map((failure) => failure.channelName).join(', ') }} unavailable
+        {{ t("{names} unavailable", { names: recommendationFailures.map((failure) => failure.channelName).join(', ') }) }}
       </div>
 
       <div v-if="recommendationLoading" class="space-y-2">
@@ -2771,7 +2791,7 @@ defineExpose({
           class="btn btn-sm"
           type="button"
           :disabled="privateRoamingBatchLoading"
-          aria-label="Load next private roaming batch"
+          :aria-label="t('Load next private roaming batch')"
           @click="loadNextPrivateRoamingBatch()"
         >
           <span
@@ -2780,18 +2800,18 @@ defineExpose({
             aria-hidden="true"
           ></span>
           <ListPlus v-else :size="16" aria-hidden="true" />
-          Load next songs
+          {{ t("Load next songs") }}
         </button>
       </div>
       <div v-else-if="!recommendationError" class="flex min-h-48 items-center justify-center text-sm text-muted">
-        No recommendations available
+        {{ t("No recommendations available") }}
       </div>
     </div>
 
     <div v-else-if="!hasSubmittedSearch" data-online-home class="min-h-64 py-2">
       <div class="mb-3 flex items-center gap-2">
         <House :size="17" aria-hidden="true" />
-        <h2 class="text-sm font-semibold">For you</h2>
+        <h2 class="text-sm font-semibold">{{ t("For you") }}</h2>
       </div>
       <div class="grid grid-cols-1 gap-3 md:grid-cols-3">
         <button
@@ -2800,7 +2820,7 @@ defineExpose({
           data-online-recommendation-entry
           class="card card-border card-sm group relative isolate h-36 w-full overflow-hidden bg-base-100 text-left transition-colors hover:bg-base-200/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
           type="button"
-          :aria-label="entry.label"
+          :aria-label="t(entry.label)"
           @click="openRecommendation(entry.id)"
         >
           <img
@@ -2839,7 +2859,7 @@ defineExpose({
                 class="card-title text-base"
                 :class="{ 'text-neutral-content': recommendationCoverUrl(entry.id) }"
               >
-                {{ entry.label }}
+                {{ t(entry.label) }}
               </h3>
               <div class="mt-2 flex flex-wrap gap-1">
                 <span
@@ -2859,23 +2879,23 @@ defineExpose({
       <section data-online-playlists class="mt-6 min-w-0 border-t border-base-300 pt-4">
         <div class="mb-3 flex min-w-0 flex-wrap items-center gap-2">
           <ListMusic :size="17" aria-hidden="true" />
-          <h2 class="text-sm font-semibold">Playlists</h2>
+          <h2 class="text-sm font-semibold">{{ t("Playlists") }}</h2>
           <span v-if="playlistLibraryItems.length" class="text-xs tabular-nums text-muted">
-            {{ playlistLibraryItems.length }} loaded
+            {{ t("{count} loaded", { count: playlistLibraryItems.length }) }}
           </span>
           <span
             v-if="playlistLibraryFailures.length && playlistLibraryItems.length"
             class="badge badge-warning badge-sm ml-auto"
           >
-            Partial
+            {{ t("Partial") }}
           </span>
           <button
             class="btn btn-square btn-ghost btn-sm"
             :class="{ 'ml-auto': !playlistLibraryFailures.length || !playlistLibraryItems.length }"
             type="button"
             :disabled="playlistLibraryLoading"
-            aria-label="Refresh playlists"
-            title="Refresh playlists"
+            :aria-label="t('Refresh playlists')"
+            :title="t('Refresh playlists')"
             @click="loadPlaylistLibrary(true)"
           >
             <RefreshCw
@@ -2907,7 +2927,7 @@ defineExpose({
           <span class="min-w-0 flex-1 text-sm">{{ playlistLibraryError }}</span>
           <button class="btn btn-sm" type="button" @click="loadPlaylistLibrary(true)">
               <RefreshCw :size="16" aria-hidden="true" />
-            Retry
+            {{ t("Retry") }}
           </button>
         </div>
 
@@ -2918,7 +2938,7 @@ defineExpose({
         >
           <AlertCircle :size="17" aria-hidden="true" />
           <span class="min-w-0 flex-1 text-sm">
-            Connect NetEase or KuGou to load your playlists.
+            {{ t("Connect NetEase or KuGou to load your playlists.") }}
           </span>
           <div class="flex shrink-0 flex-wrap gap-1">
             <button
@@ -2928,7 +2948,7 @@ defineExpose({
               type="button"
               @click="emit('openPlugin', provider.pluginId)"
             >
-              Open {{ provider.label }}
+              {{ t("Open {name}", { name: provider.label }) }}
             </button>
           </div>
         </div>
@@ -2940,7 +2960,7 @@ defineExpose({
         >
           <AlertCircle :size="17" aria-hidden="true" />
           <span class="min-w-0 flex-1 text-sm">
-            Enable NetEase or KuGou to load your playlists.
+            {{ t("Enable NetEase or KuGou to load your playlists.") }}
           </span>
           <div class="flex shrink-0 flex-wrap gap-1">
             <button
@@ -2950,7 +2970,7 @@ defineExpose({
               type="button"
               @click="emit('openPlugin', provider.pluginId)"
             >
-              Open {{ provider.label }}
+              {{ t("Open {name}", { name: provider.label }) }}
             </button>
           </div>
         </div>
@@ -2959,7 +2979,7 @@ defineExpose({
           v-else-if="!playlistLibraryItems.length"
           class="flex min-h-24 items-center text-sm text-muted"
         >
-          No playlists found
+          {{ t("No playlists found") }}
         </div>
 
         <div v-else class="space-y-5">
@@ -2973,7 +2993,7 @@ defineExpose({
               <h3 class="text-sm font-medium">{{ provider.label }}</h3>
               <span class="text-xs tabular-nums text-muted">
                 {{ provider.items.length }}
-                {{ provider.items.length === 1 ? "playlist" : "playlists" }}
+                {{ provider.items.length === 1 ? t("playlist") : t("playlists") }}
               </span>
             </div>
             <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -2982,7 +3002,7 @@ defineExpose({
                 :key="playlist.key"
                 class="card card-border card-sm min-h-24 w-full bg-base-100 text-left transition-colors hover:bg-base-200/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
                 type="button"
-                :aria-label="`Open playlist ${playlist.name}`"
+                :aria-label="t('Open playlist {name}', { name: playlist.name })"
                 @click="openDetail({ kind: 'playlist', entity: playlist })"
               >
                 <div class="card-body flex-row items-center gap-3">
@@ -3005,7 +3025,7 @@ defineExpose({
                       v-if="playlist.trackCount !== null"
                       class="mt-2 truncate text-xs tabular-nums text-muted"
                     >
-                      {{ playlist.trackCount }} tracks
+                      {{ t("{count} tracks", { count: playlist.trackCount }) }}
                     </p>
                   </div>
                   <ChevronRight :size="17" class="shrink-0 text-muted" aria-hidden="true" />
@@ -3024,7 +3044,7 @@ defineExpose({
           <span class="min-w-0 flex-1">{{ playlistLibraryError }}</span>
           <button class="btn btn-sm" type="button" @click="loadPlaylistLibrary(true)">
             <RefreshCw :size="16" aria-hidden="true" />
-            Retry
+            {{ t("Retry") }}
           </button>
         </div>
 
@@ -3035,7 +3055,7 @@ defineExpose({
         >
           <AlertCircle :size="17" aria-hidden="true" />
           <span class="min-w-0 flex-1">
-            {{ playlistLibraryFailures.map((failure) => failure.channelName).join(', ') }} unavailable
+            {{ t("{names} unavailable", { names: playlistLibraryFailures.map((failure) => failure.channelName).join(', ') }) }}
           </span>
           <button
             v-for="provider in failedPlaylistProviders"
@@ -3044,7 +3064,7 @@ defineExpose({
             type="button"
             @click="emit('openPlugin', provider.pluginId)"
           >
-            Open {{ provider.label }}
+            {{ t("Open {name}", { name: provider.label }) }}
           </button>
         </div>
       </section>
@@ -3053,28 +3073,28 @@ defineExpose({
     <div v-else data-online-results class="flex flex-col gap-5">
 
       <div v-if="expandedSection" class="flex items-center gap-2 border-b border-base-300 pb-3">
-        <button class="btn btn-square btn-ghost btn-sm" type="button" aria-label="Back to search summary" title="Back" @click="closeSection">
+        <button class="btn btn-square btn-ghost btn-sm" type="button" :aria-label="t('Back to search summary')" :title="t('Back')" @click="closeSection">
           <ArrowLeft :size="17" aria-hidden="true" />
         </button>
-        <span class="text-sm font-medium">All {{ sections.find((section) => section.id === expandedSection)?.label }}</span>
+        <span class="text-sm font-medium">{{ t("All {section}", { section: t(sections.find((section) => section.id === expandedSection)?.label || '') }) }}</span>
       </div>
 
       <section v-for="section in visibleSections" :key="section.id" class="min-w-0">
         <div class="mb-2 flex items-center gap-2 border-b border-base-300 pb-2">
           <component :is="section.icon" :size="17" aria-hidden="true" />
-          <h2 class="text-sm font-semibold">{{ section.label }}</h2>
+          <h2 class="text-sm font-semibold">{{ t(section.label) }}</h2>
           <span v-if="sectionStates[section.id].result" class="text-xs tabular-nums text-muted">
-            {{ sectionStates[section.id].result?.data.items.length }} loaded
+            {{ t("{count} loaded", { count: sectionStates[section.id].result?.data.items.length ?? 0 }) }}
           </span>
           <span v-if="sectionStates[section.id].result?.failures.length" class="badge badge-warning badge-sm ml-auto">
-            Partial
+            {{ t("Partial") }}
           </span>
           <button
             v-if="sectionStates[section.id].result?.failures.length"
             class="btn btn-square btn-ghost btn-sm"
             type="button"
-            :aria-label="`Retry unavailable ${section.label} channels`"
-            title="Retry unavailable channels"
+            :aria-label="t('Retry unavailable {section} channels', { section: t(section.label) })"
+            :title="t('Retry unavailable channels')"
             @click="retrySection(section.id)"
           >
             <RefreshCw :size="16" aria-hidden="true" />
@@ -3088,11 +3108,11 @@ defineExpose({
           <span>{{ sectionStates[section.id].error }}</span>
           <button class="btn btn-sm" type="button" @click="retrySection(section.id)">
           <RefreshCw :size="16" aria-hidden="true" />
-            Retry
+            {{ t("Retry") }}
           </button>
         </div>
         <div v-else-if="!sectionStates[section.id].result?.data.items.length" class="flex min-h-20 items-center text-sm text-muted">
-          No {{ section.label.toLowerCase() }} found
+          {{ t("No {section} found", { section: t(section.label).toLocaleLowerCase() }) }}
         </div>
 
         <OnlineTrackTable
@@ -3143,7 +3163,7 @@ defineExpose({
         <div v-if="sectionStates[section.id].result?.hasMore" class="flex justify-center pt-3">
           <button class="btn btn-sm" type="button" :disabled="sectionStates[section.id].loadingMore" @click="expandedSection === section.id ? loadMore(section.id) : openSection(section.id)">
             <span v-if="sectionStates[section.id].loadingMore" class="loading loading-spinner loading-xs"></span>
-            {{ expandedSection === section.id ? 'Load more' : `More ${section.label}` }}
+            {{ expandedSection === section.id ? t('Load more') : t('More {section}', { section: t(section.label) }) }}
           </button>
         </div>
       </section>
@@ -3168,18 +3188,18 @@ defineExpose({
         <form class="modal-box max-w-lg" data-online-playlist-picker @submit.prevent="confirmPlaylistAdd">
           <div class="flex items-start gap-3">
             <div class="min-w-0 flex-1">
-              <h2 id="online-playlist-picker-title" class="text-base font-semibold">Add to Playlist</h2>
+              <h2 id="online-playlist-picker-title" class="text-base font-semibold">{{ t("Add to Playlist") }}</h2>
               <p class="mt-1 truncate text-sm text-muted">
                 {{ pendingPlaylistTracks.length === 1
                   ? `${pendingPlaylistTracks[0].title} · ${pendingPlaylistTracks[0].artist}`
-                  : `${pendingPlaylistTracks.length} selected tracks` }}
+                  : t("{count} selected tracks", { count: pendingPlaylistTracks.length }) }}
               </p>
             </div>
             <button
               class="btn btn-square btn-ghost btn-sm"
               type="button"
               :disabled="trackActionId === playlistPickerActionId"
-              aria-label="Close playlist picker"
+              :aria-label="t('Close playlist picker')"
               @click="closePlaylistPicker"
             >
               <X :size="17" aria-hidden="true" />
@@ -3212,7 +3232,7 @@ defineExpose({
               :disabled="trackActionId === playlistPickerActionId"
               @click="closePlaylistPicker"
             >
-              Cancel
+              {{ t("Cancel") }}
             </button>
             <button
               class="btn btn-primary btn-sm"
@@ -3221,12 +3241,12 @@ defineExpose({
             >
           <RefreshCw v-if="trackActionId === playlistPickerActionId" class="animate-spin" :size="16" aria-hidden="true" />
           <ListPlus v-else :size="16" aria-hidden="true" />
-              Add
+              {{ t("Add") }}
             </button>
           </div>
         </form>
         <form method="dialog" class="modal-backdrop" @submit.prevent="closePlaylistPicker">
-          <button type="submit" :disabled="trackActionId === playlistPickerActionId">Close</button>
+          <button type="submit" :disabled="trackActionId === playlistPickerActionId">{{ t("Close") }}</button>
         </form>
       </dialog>
     </Teleport>

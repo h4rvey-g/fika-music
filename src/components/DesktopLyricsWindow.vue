@@ -24,12 +24,13 @@ import {
   type DesktopLyricsPreferences,
   type DesktopLyricsState,
 } from "../lib/desktop-lyrics";
+import { t } from "../i18n";
 
 const state = ref<DesktopLyricsState>({
   title: "Fika Music",
   subtitle: "",
-  currentLine: "Nothing playing",
-  currentLineKey: "message:Nothing playing",
+  currentLine: t("Nothing playing"),
+  currentLineKey: `message:${t("Nothing playing")}`,
   currentLineStartMs: null,
   currentLineEndMs: null,
   currentWords: [],
@@ -210,62 +211,62 @@ function fontFamily(font: DesktopLyricsPreferences["font"]) {
       </div>
       <GripHorizontal class="mx-1 shrink-0 text-white/70" :size="17" aria-hidden="true" />
       <div class="flex shrink-0 items-center gap-0.5">
-        <div class="tooltip tooltip-bottom" data-tip="Smaller text">
+        <div class="tooltip tooltip-bottom" :data-tip="t('Smaller text')">
           <button
             class="btn btn-square btn-ghost btn-sm text-white hover:bg-white/15"
             type="button"
-            aria-label="Decrease desktop lyric size"
-            title="Smaller text"
+            :aria-label="t('Decrease desktop lyric size')"
+            :title="t('Smaller text')"
             @mousedown.stop
             @click.stop="adjustFontSize(-2)"
           >
             <Minus :size="16" aria-hidden="true" />
           </button>
         </div>
-        <div class="tooltip tooltip-bottom" data-tip="Larger text">
+        <div class="tooltip tooltip-bottom" :data-tip="t('Larger text')">
           <button
             class="btn btn-square btn-ghost btn-sm text-white hover:bg-white/15"
             type="button"
-            aria-label="Increase desktop lyric size"
-            title="Larger text"
+            :aria-label="t('Increase desktop lyric size')"
+            :title="t('Larger text')"
             @mousedown.stop
             @click.stop="adjustFontSize(2)"
           >
             <Plus :size="16" aria-hidden="true" />
           </button>
         </div>
-        <div class="tooltip tooltip-bottom" data-tip="Always on top">
+        <div class="tooltip tooltip-bottom" :data-tip="t('Always on top')">
           <button
             class="btn btn-square btn-ghost btn-sm text-white hover:bg-white/15"
             :class="{ 'bg-white/15': state.preferences.alwaysOnTop }"
             type="button"
-            aria-label="Toggle desktop lyrics always on top"
+            :aria-label="t('Toggle desktop lyrics always on top')"
             :aria-pressed="state.preferences.alwaysOnTop"
-            title="Always on top"
+            :title="t('Always on top')"
             @mousedown.stop
             @click.stop="updatePreferences({ alwaysOnTop: !state.preferences.alwaysOnTop })"
           >
             <MonitorUp :size="16" aria-hidden="true" />
           </button>
         </div>
-        <div class="tooltip tooltip-bottom" data-tip="Lock window">
+        <div class="tooltip tooltip-bottom" :data-tip="t('Lock window')">
           <button
             class="btn btn-square btn-ghost btn-sm text-white hover:bg-white/15"
             type="button"
-            aria-label="Lock desktop lyrics"
-            title="Lock window"
+            :aria-label="t('Lock desktop lyrics')"
+            :title="t('Lock window')"
             @mousedown.stop
             @click.stop="updatePreferences({ locked: true })"
           >
             <Lock :size="16" aria-hidden="true" />
           </button>
         </div>
-        <div class="tooltip tooltip-bottom" data-tip="Hide">
+        <div class="tooltip tooltip-bottom" :data-tip="t('Hide')">
           <button
             class="btn btn-square btn-ghost btn-sm text-white hover:bg-white/15"
             type="button"
-            aria-label="Hide desktop lyrics"
-            title="Hide"
+            :aria-label="t('Hide desktop lyrics')"
+            :title="t('Hide')"
             @mousedown.stop
             @click.stop="requestHide"
           >

@@ -320,6 +320,34 @@ describe("application shell", () => {
     wrapper.unmount();
   });
 
+  it("switches the application to Simplified Chinese and persists the locale", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.get('[data-section-id="settings"]').trigger("click");
+    const languageSelect = wrapper.get<HTMLSelectElement>("#language-preference");
+    expect(languageSelect.findAll("option").map((option) => option.text())).toEqual([
+      "English",
+      "简体中文",
+    ]);
+
+    await languageSelect.setValue("zh-CN");
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.get("h1").text()).toBe("设置");
+    expect(
+      wrapper
+        .get('nav[aria-label="主导航"]')
+        .findAll("[data-section-id]")
+        .map((button) => button.text()),
+    ).toEqual(["本地音乐", "在线音乐", "音频源", "插件", "设置"]);
+    expect(document.documentElement.lang).toBe("zh-CN");
+    expect(JSON.parse(localStorage.getItem(UI_PREFERENCES_STORAGE_KEY) ?? "{}").locale)
+      .toBe("zh-CN");
+
+    wrapper.unmount();
+  });
+
   it("expands Collections below Local Music and creates a named Collection", async () => {
     listedCollections = [{
       id: "collection-1",

@@ -16,6 +16,7 @@ import {
   Headphones,
   Heart,
   Library,
+  Languages,
   ListMusic,
   ListPlus,
   ListOrdered,
@@ -65,6 +66,14 @@ import { listPlugins, type PluginRecord } from "./lib/plugin-api";
 import { PlayCountTracker } from "./lib/play-count-tracker";
 import { normalizeError } from "./lib/errors";
 import { ExpiringCache } from "./lib/expiring-cache";
+import {
+  LOCALE_OPTIONS,
+  currentLocale,
+  formatNumber,
+  setLocale,
+  t,
+  type SupportedLocale,
+} from "./i18n";
 import {
   clearPreloadedMedia,
   clearOnlinePlaybackFailures,
@@ -237,6 +246,7 @@ const MOUSE_BACK_BUTTON = 3;
 const MOUSE_FORWARD_BUTTON = 4;
 
 const savedUiPreferences = loadUiPreferences();
+setLocale(savedUiPreferences.locale);
 const savedDesktopLyricsPreferences = loadDesktopLyricsPreferences();
 const savedNowPlayingLyricsPreferences = loadNowPlayingLyricsPreferences();
 const appError = ref<string | null>(null);
@@ -290,6 +300,10 @@ const playbackMode = ref<PlaybackMode>(savedUiPreferences.playbackMode);
 const desktopLyricsPreferences = ref(savedDesktopLyricsPreferences);
 const nowPlayingLyricsPreferences = ref(savedNowPlayingLyricsPreferences);
 const themePreference = ref(savedUiPreferences.theme);
+const languagePreference = computed<SupportedLocale>({
+  get: () => currentLocale.value,
+  set: (locale) => setLocale(locale),
+});
 const layoutDensity = ref(savedUiPreferences.density);
 const nowPlayingCoverUrl = ref<string | null>(null);
 const dynamicThemeStatus = ref<"idle" | "waiting" | "loading" | "active" | "unavailable">("idle");
@@ -357,29 +371,39 @@ const currentSection = computed(() => {
   if (activeSection.value === "collection" && activeCollection.value) {
     return {
       label: activeCollection.value.name,
-      description: `${activeCollection.value.itemCount.toLocaleString()} tracks in this Collection`,
+      description: t("{count} tracks in this Collection", {
+        count: formatNumber(activeCollection.value.itemCount),
+      }),
     };
   }
   if (activeSection.value === "plugin" && activePlugin.value) {
     return {
       label: activePlugin.value.name,
       description:
-        activePlugin.value.description || "Inspect this plugin's registered source providers",
+        activePlugin.value.description || t("Inspect this plugin's registered source providers"),
     };
   }
 
-  return sections.find((section) => section.id === activeSection.value) ?? mainSections[0];
+  const section = sections.find((candidate) => candidate.id === activeSection.value)
+    ?? mainSections[0];
+  return {
+    ...section,
+    label: t(section.label),
+    description: t(section.description),
+  };
 });
-const nowPlayingTitle = computed(() => activeTrack.value?.title || activeRemoteTitle.value || "Nothing playing");
+const nowPlayingTitle = computed(() =>
+  activeTrack.value?.title || activeRemoteTitle.value || t("Nothing playing"),
+);
 const nowPlayingSubtitle = computed(() => {
   if (activeTrack.value) {
     return trackSubtitle(activeTrack.value);
   }
 
-  if (!activeRemoteTitle.value) return "Select a local or remote track";
+  if (!activeRemoteTitle.value) return t("Select a local or remote track");
   return activeOnlineTrack.value
     ? [activeOnlineTrack.value.artist, activeOnlineTrack.value.album].filter(Boolean).join(" - ")
-    : "Remote track";
+    : t("Remote track");
 });
 const activeOnlineTrackSupportsLibraryActions = computed(() => {
   const track = activeOnlineTrack.value;
@@ -456,32 +480,32 @@ const canGoNext = computed(() => {
 const playbackModeLabel = computed(() => {
   switch (playbackMode.value) {
     case "shuffle":
-      return "Shuffle";
+      return t("Shuffle");
     case "repeat":
-      return "Repeat all";
+      return t("Repeat all");
     default:
-      return "Sequential";
+      return t("Sequential");
   }
 });
 const nextPlaybackModeLabel = computed(() => {
   switch (playbackMode.value) {
     case "sequential":
-      return "Shuffle";
+      return t("Shuffle");
     case "shuffle":
-      return "Repeat all";
+      return t("Repeat all");
     default:
-      return "Sequential";
+      return t("Sequential");
   }
 });
 const desktopLyricLines = computed(() => {
   if (!activeTrack.value && !activeRemoteTitle.value) {
-    return desktopLyricsMessage("Nothing playing");
+    return desktopLyricsMessage(t("Nothing playing"));
   }
   if (isLoadingLyrics.value) {
-    return desktopLyricsMessage("Loading lyrics");
+    return desktopLyricsMessage(t("Loading lyrics"));
   }
   if (lyricsError.value) {
-    return desktopLyricsMessage("Lyrics unavailable");
+    return desktopLyricsMessage(t("Lyrics unavailable"));
   }
   return resolveDesktopLyricLines(
     activeLyrics.value,
@@ -518,6 +542,7 @@ watch([remoteQuality, playbackAudioSourceId], cancelOnlinePreload);
 watch(
   [
     themePreference,
+    languagePreference,
     layoutDensity,
     remoteQuality,
     playbackAudioSourceId,
@@ -526,6 +551,7 @@ watch(
   ],
   () => {
     saveUiPreferences({
+      locale: languagePreference.value,
       theme: themePreference.value,
       density: layoutDensity.value,
       streamQuality: remoteQuality.value,
@@ -662,7 +688,7 @@ async function playCollectionFromSidebar(collection: MusicCollectionSummary) {
   selectCollection(collection.id);
   const generation = ++sidebarCollectionPlaybackGeneration;
   if (!collection.itemCount) {
-    showCollectionNotice(`${collection.name} has no tracks to play.`);
+    showCollectionNotice(t("{name} has no tracks to play.", { name: collection.name }));
     return;
   }
   await nextTick();
@@ -878,7 +904,7 @@ async function submitCollectionName() {
       const renamed = await renameMusicCollection(dialog.collectionId, collectionName.value);
       updateCollectionSummary(renamed);
       collectionNameDialog.value = null;
-      showCollectionNotice(`Renamed Collection to ${renamed.name}.`);
+      showCollectionNotice(t("Renamed Collection to {name}.", { name: renamed.name }));
       return;
     }
 
@@ -891,7 +917,7 @@ async function submitCollectionName() {
     showCollectionNotice(
       mutation
         ? collectionMutationMessage(mutation, created.name)
-        : `Created ${created.name}.`,
+        : t("Created {name}.", { name: created.name }),
     );
   } catch (error) {
     if (created) {
@@ -951,12 +977,26 @@ function collectionMutationMessage(
   collectionNameValue: string,
 ) {
   if (!mutation.added) {
-    return `The selected tracks are already in ${collectionNameValue}.`;
+    return t("The selected tracks are already in {name}.", { name: collectionNameValue });
   }
   const duplicateSuffix = mutation.skipped
-    ? ` ${mutation.skipped} duplicate${mutation.skipped === 1 ? " was" : "s were"} skipped.`
+    ? t(
+        mutation.skipped === 1
+          ? " {count} duplicate was skipped."
+          : " {count} duplicates were skipped.",
+        { count: mutation.skipped },
+      )
     : "";
-  return `Added ${mutation.added} track${mutation.added === 1 ? "" : "s"} to ${collectionNameValue}.${duplicateSuffix}`;
+  return t(
+    mutation.added === 1
+      ? "Added {count} track to {name}.{duplicates}"
+      : "Added {count} tracks to {name}.{duplicates}",
+    {
+      count: mutation.added,
+      name: collectionNameValue,
+      duplicates: duplicateSuffix,
+    },
+  );
 }
 
 function showCollectionNotice(message: string) {
@@ -1031,7 +1071,7 @@ async function confirmCollectionDelete() {
       replaceCurrentLocation({ section: "local", pluginId: null, collectionId: null });
     }
     collectionDeleteTarget.value = null;
-    showCollectionNotice(`Deleted ${collection.name}.`);
+    showCollectionNotice(t("Deleted {name}.", { name: collection.name }));
   } catch (error) {
     collectionActionError.value = normalizeError(error);
   } finally {
@@ -1134,6 +1174,7 @@ async function applyTheme(theme: ThemePreference, coverUrl: string | null) {
 }
 
 function resetUiPreferences() {
+  languagePreference.value = DEFAULT_UI_PREFERENCES.locale;
   themePreference.value = DEFAULT_UI_PREFERENCES.theme;
   layoutDensity.value = DEFAULT_UI_PREFERENCES.density;
   remoteQuality.value = DEFAULT_UI_PREFERENCES.streamQuality;
@@ -1391,7 +1432,7 @@ function changePlaybackAudioSource(audioSourceId: string) {
   if (track && shouldReload) {
     clearFailedOnlinePlayback(track.key);
     clearOnlinePlaybackFailures(track.key);
-    void reloadActiveOnlinePlayback("Changing audio source");
+    void reloadActiveOnlinePlayback(t("Changing audio source"));
   }
 }
 
@@ -1406,7 +1447,7 @@ function changePlaybackQuality(quality: StreamQuality) {
   if (track && shouldReload) {
     clearFailedOnlinePlayback(track.key);
     clearOnlinePlaybackFailures(track.key);
-    void reloadActiveOnlinePlayback("Changing audio quality");
+    void reloadActiveOnlinePlayback(t("Changing audio quality"));
   }
 }
 
@@ -1552,7 +1593,7 @@ async function resolveConfiguredOnlinePlayback(
     ? track.candidates.filter((candidate) => enabledChannels.has(candidate.channelId))
     : track.candidates;
   if (!candidates.length) {
-    throw new Error("Playback is unavailable from the configured Audio Sources.");
+    throw new Error(t("Playback is unavailable from the configured Audio Sources."));
   }
   const resolvedTrack = candidates === track.candidates ? track : { ...track, candidates };
   return resolveOnlineTrack({
@@ -2101,7 +2142,7 @@ function onAudioError() {
     void recoverOnlinePlayback();
     return;
   }
-  appError.value = "Playback failed for the selected track.";
+  appError.value = t("Playback failed for the selected track.");
 }
 
 async function recoverOnlinePlayback() {
@@ -2123,7 +2164,7 @@ async function recoverOnlinePlayback() {
   if (activeOnlineUrl.value) {
     failedOnlineUrls.set(`${track.key}::${activeOnlineUrl.value}`, true);
   }
-  await reloadActiveOnlinePlayback("Changing playback source");
+  await reloadActiveOnlinePlayback(t("Changing playback source"));
 }
 
 async function reloadActiveOnlinePlayback(message: string) {
@@ -2207,8 +2248,8 @@ function trackSubtitle(track: LocalTrack) {
             class="btn btn-square btn-ghost btn-sm drawer-button min-[1200px]:hidden"
             role="button"
             tabindex="0"
-            aria-label="Open navigation"
-            title="Open navigation"
+            :aria-label="t('Open navigation')"
+            :title="t('Open navigation')"
             @keydown.enter.prevent="sidebarOpen = true"
             @keydown.space.prevent="sidebarOpen = true"
           >
@@ -2232,7 +2273,7 @@ function trackSubtitle(track: LocalTrack) {
             @click="chooseFolder"
           >
             <FolderOpen :size="16" aria-hidden="true" />
-            Folder
+            {{ t("Folder") }}
           </button>
         </div>
 
@@ -2240,8 +2281,8 @@ function trackSubtitle(track: LocalTrack) {
           <button
             class="btn btn-square btn-ghost btn-sm"
             type="button"
-            aria-label="Rename Collection"
-            title="Rename Collection"
+            :aria-label="t('Rename Collection')"
+            :title="t('Rename Collection')"
             @click="openRenameCollection(activeCollection)"
           >
             <Pencil :size="16" aria-hidden="true" />
@@ -2249,8 +2290,8 @@ function trackSubtitle(track: LocalTrack) {
           <button
             class="btn btn-square btn-ghost btn-sm text-error"
             type="button"
-            aria-label="Delete Collection"
-            title="Delete Collection"
+            :aria-label="t('Delete Collection')"
+            :title="t('Delete Collection')"
             @click="requestCollectionDelete(activeCollection)"
           >
             <Trash2 :size="16" aria-hidden="true" />
@@ -2260,7 +2301,7 @@ function trackSubtitle(track: LocalTrack) {
         <div v-else-if="activeSection === 'settings'" class="navbar-end w-auto">
           <button class="btn btn-ghost btn-sm" type="button" @click="resetUiPreferences">
             <RotateCcw :size="16" aria-hidden="true" />
-            Reset
+            {{ t("Reset") }}
           </button>
         </div>
       </header>
@@ -2280,8 +2321,8 @@ function trackSubtitle(track: LocalTrack) {
             <button
               class="btn btn-square btn-ghost btn-sm"
               type="button"
-              aria-label="Dismiss error"
-              title="Dismiss error"
+              :aria-label="t('Dismiss error')"
+              :title="t('Dismiss error')"
               @click="appError = null"
             >
               <X :size="16" aria-hidden="true" />
@@ -2335,8 +2376,8 @@ function trackSubtitle(track: LocalTrack) {
             <button
               class="btn btn-square btn-ghost btn-sm"
               type="button"
-              aria-label="Dismiss error"
-              title="Dismiss error"
+              :aria-label="t('Dismiss error')"
+              :title="t('Dismiss error')"
               @click="appError = null"
             >
               <X :size="16" aria-hidden="true" />
@@ -2390,7 +2431,7 @@ function trackSubtitle(track: LocalTrack) {
             <button
               class="btn btn-square btn-ghost btn-sm"
               type="button"
-              aria-label="Dismiss error"
+              :aria-label="t('Dismiss error')"
               @click="appError = null"
             >
               <X :size="16" aria-hidden="true" />
@@ -2410,7 +2451,7 @@ function trackSubtitle(track: LocalTrack) {
             <button
               class="btn btn-square btn-ghost btn-sm"
               type="button"
-              aria-label="Dismiss playback error"
+              :aria-label="t('Dismiss playback error')"
               @click="appError = null"
             >
               <X :size="16" aria-hidden="true" />
@@ -2524,13 +2565,13 @@ function trackSubtitle(track: LocalTrack) {
           <section class="overflow-hidden rounded border border-base-300 bg-base-100">
             <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
               <Palette :size="18" aria-hidden="true" />
-              <h2 class="text-base font-semibold">Appearance</h2>
+              <h2 class="text-base font-semibold">{{ t("Appearance") }}</h2>
             </div>
             <div class="divide-y divide-base-300">
               <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <label for="theme-preference" class="min-w-0">
-                  <span class="block text-sm font-medium">Theme</span>
-                  <span class="block text-xs text-muted">Follow the device, current cover, or a fixed theme</span>
+                  <span class="block text-sm font-medium">{{ t("Theme") }}</span>
+                  <span class="block text-xs text-muted">{{ t("Follow the device, current cover, or a fixed theme") }}</span>
                   <span
                     v-if="themePreference === 'dynamic'"
                     class="mt-1 flex items-center gap-1.5 text-xs text-muted"
@@ -2546,10 +2587,10 @@ function trackSubtitle(track: LocalTrack) {
                       }"
                       aria-hidden="true"
                     ></span>
-                    <span v-if="dynamicThemeStatus === 'active'">Cover colors active</span>
-                    <span v-else-if="dynamicThemeStatus === 'loading'">Reading cover colors</span>
-                    <span v-else-if="dynamicThemeStatus === 'unavailable'">Cover colors unavailable</span>
-                    <span v-else>Waiting for cover art</span>
+                    <span v-if="dynamicThemeStatus === 'active'">{{ t("Cover colors active") }}</span>
+                    <span v-else-if="dynamicThemeStatus === 'loading'">{{ t("Reading cover colors") }}</span>
+                    <span v-else-if="dynamicThemeStatus === 'unavailable'">{{ t("Cover colors unavailable") }}</span>
+                    <span v-else>{{ t("Waiting for cover art") }}</span>
                   </span>
                 </label>
                 <select
@@ -2562,17 +2603,36 @@ function trackSubtitle(track: LocalTrack) {
                     :key="theme.value"
                     :value="theme.value"
                   >
-                    {{ theme.label }}
+                    {{ t(theme.label) }}
                   </option>
                   <optgroup
                     v-for="group in THEME_GROUPS"
                     :key="group.value"
-                    :label="group.label"
+                    :label="t(group.label)"
                   >
                     <option v-for="theme in group.options" :key="theme.value" :value="theme.value">
-                      {{ theme.label }}
+                      {{ t(theme.label) }}
                     </option>
                   </optgroup>
+                </select>
+              </div>
+
+              <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <label for="language-preference" class="flex min-w-0 items-start gap-3">
+                  <Languages class="mt-0.5 shrink-0 text-muted" :size="17" aria-hidden="true" />
+                  <span>
+                    <span class="block text-sm font-medium">{{ t("Language") }}</span>
+                    <span class="block text-xs text-muted">{{ t("Choose the language used throughout Fika Music") }}</span>
+                  </span>
+                </label>
+                <select
+                  id="language-preference"
+                  v-model="languagePreference"
+                  class="select select-sm w-full sm:w-44"
+                >
+                  <option v-for="option in LOCALE_OPTIONS" :key="option.value" :value="option.value">
+                    {{ option.label }}
+                  </option>
                 </select>
               </div>
 
@@ -2580,8 +2640,8 @@ function trackSubtitle(track: LocalTrack) {
                 <label for="layout-density" class="flex min-w-0 items-start gap-3">
                   <Gauge class="mt-0.5 shrink-0 text-muted" :size="17" aria-hidden="true" />
                   <span>
-                    <span class="block text-sm font-medium">Layout density</span>
-                    <span class="block text-xs text-muted">Adjust page spacing and library rows</span>
+                    <span class="block text-sm font-medium">{{ t("Layout density") }}</span>
+                    <span class="block text-xs text-muted">{{ t("Adjust page spacing and library rows") }}</span>
                   </span>
                 </label>
                 <select
@@ -2589,8 +2649,8 @@ function trackSubtitle(track: LocalTrack) {
                   v-model="layoutDensity"
                   class="select select-sm w-full sm:w-44"
                 >
-                  <option value="comfortable">Comfortable</option>
-                  <option value="compact">Compact</option>
+                  <option value="comfortable">{{ t("Comfortable") }}</option>
+                  <option value="compact">{{ t("Compact") }}</option>
                 </select>
               </div>
             </div>
@@ -2616,13 +2676,13 @@ function trackSubtitle(track: LocalTrack) {
           <section class="overflow-hidden rounded border border-base-300 bg-base-100">
             <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
               <Headphones :size="18" aria-hidden="true" />
-              <h2 class="text-base font-semibold">Playback</h2>
+              <h2 class="text-base font-semibold">{{ t("Playback") }}</h2>
             </div>
             <div class="divide-y divide-base-300">
               <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <label for="stream-quality" class="min-w-0">
-                  <span class="block text-sm font-medium">Default stream quality</span>
-                  <span class="block text-xs text-muted">Used when resolving tracks from Audio Sources</span>
+                  <span class="block text-sm font-medium">{{ t("Default stream quality") }}</span>
+                  <span class="block text-xs text-muted">{{ t("Used when resolving tracks from Audio Sources") }}</span>
                 </label>
                 <select
                   id="stream-quality"
@@ -2638,8 +2698,8 @@ function trackSubtitle(track: LocalTrack) {
 
               <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <label for="default-volume" class="min-w-0">
-                  <span class="block text-sm font-medium">Volume</span>
-                  <span class="block text-xs text-muted">Applied to the current and next track</span>
+                  <span class="block text-sm font-medium">{{ t("Volume") }}</span>
+                  <span class="block text-xs text-muted">{{ t("Applied to the current and next track") }}</span>
                 </label>
                 <div class="flex w-full items-center gap-3 sm:w-64">
                   <Volume2 :size="17" aria-hidden="true" />
@@ -2664,13 +2724,13 @@ function trackSubtitle(track: LocalTrack) {
           <section class="overflow-hidden rounded border border-base-300 bg-base-100">
             <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
               <FolderOpen :size="18" aria-hidden="true" />
-              <h2 class="text-base font-semibold">Library</h2>
+              <h2 class="text-base font-semibold">{{ t("Library") }}</h2>
             </div>
             <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
               <div class="min-w-0">
-                <div class="text-sm font-medium">Music folder</div>
+                <div class="text-sm font-medium">{{ t("Music folder") }}</div>
                 <div class="truncate text-xs text-muted" :title="selectedFolder || undefined">
-                  {{ selectedFolder || "No folder selected" }}
+                  {{ selectedFolder || t("No folder selected") }}
                 </div>
               </div>
               <button
@@ -2680,7 +2740,7 @@ function trackSubtitle(track: LocalTrack) {
                 @click="chooseFolder"
               >
                 <FolderOpen :size="16" aria-hidden="true" />
-                Change folder
+                {{ t("Change folder") }}
               </button>
             </div>
           </section>
@@ -2689,7 +2749,7 @@ function trackSubtitle(track: LocalTrack) {
 
       <footer
         class="z-30 shrink-0 border-t border-base-300 bg-base-100/95 backdrop-blur"
-        aria-label="Playback bar"
+        :aria-label="t('Playback bar')"
       >
         <div
           class="mx-auto grid w-full max-w-7xl grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 md:grid-cols-[minmax(0,1fr)_minmax(13rem,1.4fr)_auto] lg:grid-cols-[minmax(0,1fr)_minmax(15rem,1.5fr)_minmax(11rem,1fr)]"
@@ -2718,13 +2778,13 @@ function trackSubtitle(track: LocalTrack) {
             <div class="flex h-9 items-center justify-center gap-1">
               <div
                 class="tooltip tooltip-top"
-                :data-tip="`${playbackModeLabel}; next: ${nextPlaybackModeLabel}`"
+                :data-tip="t('{mode}; next: {next}', { mode: playbackModeLabel, next: nextPlaybackModeLabel })"
               >
                 <button
                   class="btn btn-square btn-ghost btn-sm"
                   type="button"
-                  :aria-label="`Playback mode: ${playbackModeLabel}. Change to ${nextPlaybackModeLabel}`"
-                  :title="`Playback mode: ${playbackModeLabel}`"
+                  :aria-label="t('Playback mode: {mode}. Change to {next}', { mode: playbackModeLabel, next: nextPlaybackModeLabel })"
+                  :title="t('Playback mode: {mode}', { mode: playbackModeLabel })"
                   data-testid="playback-mode"
                   @click="cyclePlaybackMode"
                 >
@@ -2734,13 +2794,13 @@ function trackSubtitle(track: LocalTrack) {
                 </button>
               </div>
 
-              <div class="tooltip tooltip-top" data-tip="Previous">
+              <div class="tooltip tooltip-top" :data-tip="t('Previous')">
                 <button
                   class="btn btn-square btn-ghost btn-sm"
                   type="button"
                   :disabled="isPreparingPlayback || !canGoPrevious"
-                  aria-label="Previous track"
-                  title="Previous"
+                  :aria-label="t('Previous track')"
+                  :title="t('Previous')"
                   @click="playPreviousTrack"
                 >
                   <SkipBack :size="17" aria-hidden="true" />
@@ -2751,8 +2811,8 @@ function trackSubtitle(track: LocalTrack) {
                 class="btn btn-circle btn-neutral btn-sm mx-0.5 shrink-0"
                 type="button"
                 :disabled="isPreparingPlayback || (!activeTrack && !activeRemoteTitle && !queuedLocalTrack && !collectionQueue.length && !libraryTrackCount)"
-                :aria-label="isPlaying ? 'Pause playback' : 'Play playback'"
-                :title="isPlaying ? 'Pause' : 'Play'"
+                :aria-label="isPlaying ? t('Pause playback') : t('Play playback')"
+                :title="isPlaying ? t('Pause') : t('Play')"
                 @click="togglePlayback"
               >
                 <RefreshCw v-if="isPreparingPlayback" class="animate-spin" :size="17" aria-hidden="true" />
@@ -2760,13 +2820,13 @@ function trackSubtitle(track: LocalTrack) {
                 <Play v-else :size="17" aria-hidden="true" />
               </button>
 
-              <div class="tooltip tooltip-top" data-tip="Next">
+              <div class="tooltip tooltip-top" :data-tip="t('Next')">
                 <button
                   class="btn btn-square btn-ghost btn-sm"
                   type="button"
                   :disabled="isPreparingPlayback || !canGoNext"
-                  aria-label="Next track"
-                  title="Next"
+                  :aria-label="t('Next track')"
+                  :title="t('Next')"
                   @click="playNextTrack"
                 >
                   <SkipForward :size="17" aria-hidden="true" />
@@ -2786,8 +2846,8 @@ function trackSubtitle(track: LocalTrack) {
                 step="0.1"
                 :value="playbackPosition"
                 :disabled="!audioUrl || playbackDuration <= 0"
-                aria-label="Seek playback"
-                :aria-valuetext="`${formatPlaybackTime(playbackPosition)} of ${formatPlaybackTime(playbackDuration)}`"
+                :aria-label="t('Seek playback')"
+                :aria-valuetext="t('{position} of {duration}', { position: formatPlaybackTime(playbackPosition), duration: formatPlaybackTime(playbackDuration) })"
                 @input="seekPlayback"
               />
               <span class="hidden w-9 text-xs tabular-nums text-muted sm:block">
@@ -2802,15 +2862,15 @@ function trackSubtitle(track: LocalTrack) {
           >
             <div
               class="tooltip tooltip-top"
-              :data-tip="desktopLyricsPreferences.enabled ? 'Hide desktop lyrics' : 'Show desktop lyrics'"
+              :data-tip="desktopLyricsPreferences.enabled ? t('Hide desktop lyrics') : t('Show desktop lyrics')"
             >
               <button
                 class="btn btn-square btn-ghost btn-sm"
                 :class="{ 'btn-active': desktopLyricsPreferences.enabled }"
                 type="button"
-                :aria-label="desktopLyricsPreferences.enabled ? 'Hide desktop lyrics' : 'Show desktop lyrics'"
+                :aria-label="desktopLyricsPreferences.enabled ? t('Hide desktop lyrics') : t('Show desktop lyrics')"
                 :aria-pressed="desktopLyricsPreferences.enabled"
-                :title="desktopLyricsPreferences.enabled ? 'Hide desktop lyrics' : 'Show desktop lyrics'"
+                :title="desktopLyricsPreferences.enabled ? t('Hide desktop lyrics') : t('Show desktop lyrics')"
                 data-testid="desktop-lyrics-toggle"
                 @click="toggleDesktopLyrics"
               >
@@ -2818,14 +2878,14 @@ function trackSubtitle(track: LocalTrack) {
               </button>
             </div>
 
-            <div class="tooltip tooltip-top" data-tip="Add to My Favorite Music">
+            <div class="tooltip tooltip-top" :data-tip="t('Add to My Favorite Music')">
               <button
                 class="btn btn-square btn-ghost btn-sm"
                 type="button"
                 :disabled="!activeOnlineTrackSupportsLibraryActions || activeOnlineFavoritePending"
-                :aria-label="activeOnlineTrack ? `Add ${activeOnlineTrack.title} to My Favorite Music` : 'Favorite current online track'"
+                :aria-label="activeOnlineTrack ? t('Add {title} to My Favorite Music', { title: activeOnlineTrack.title }) : t('Favorite current online track')"
                 :aria-pressed="activeOnlineTrackIsFavorite"
-                title="Add to My Favorite Music"
+                :title="t('Add to My Favorite Music')"
                 @click="favoriteActiveOnlineTrack"
               >
                 <RefreshCw v-if="activeOnlineFavoritePending" class="animate-spin" :size="16" aria-hidden="true" />
@@ -2843,9 +2903,9 @@ function trackSubtitle(track: LocalTrack) {
               <button
                 class="btn btn-square btn-ghost btn-sm"
                 type="button"
-                aria-label="Volume"
+                :aria-label="t('Volume')"
                 :aria-valuetext="`${volumePercent}%`"
-                title="Volume"
+                :title="t('Volume')"
               >
                 <Volume2 :size="17" aria-hidden="true" />
               </button>
@@ -2862,7 +2922,7 @@ function trackSubtitle(track: LocalTrack) {
                     min="0"
                     max="1"
                     step="0.01"
-                    aria-label="Volume"
+                    :aria-label="t('Volume')"
                     :aria-valuetext="`${volumePercent}%`"
                     @input="updateVolume"
                   />
@@ -2877,45 +2937,45 @@ function trackSubtitle(track: LocalTrack) {
             >
               <summary
                 class="btn btn-square btn-ghost btn-sm"
-                aria-label="More options"
-                title="More options"
+                :aria-label="t('More options')"
+                :title="t('More options')"
               >
                 <Ellipsis :size="18" aria-hidden="true" />
               </summary>
               <ul
                 class="dropdown-content menu menu-sm z-50 mb-2 w-60 rounded border border-base-300 bg-base-100 p-2 shadow-lg"
                 role="menu"
-                aria-label="More playback options"
+                :aria-label="t('More playback options')"
               >
                 <li>
                   <button
                     type="button"
                     :disabled="!activeOnlineTrack || activeOnlineDownloadPending"
-                    :aria-label="activeOnlineTrack ? `Download ${activeOnlineTrack.title}` : 'Download current online track'"
+                    :aria-label="activeOnlineTrack ? t('Download {title}', { title: activeOnlineTrack.title }) : t('Download current online track')"
                     @click="downloadActiveOnlineTrack"
                   >
                     <RefreshCw v-if="activeOnlineDownloadPending" class="animate-spin" :size="16" aria-hidden="true" />
                     <Download v-else :size="16" aria-hidden="true" />
-                    <span>Download</span>
+                    <span>{{ t("Download") }}</span>
                   </button>
                 </li>
                 <li>
                   <button
                     type="button"
                     :disabled="!activeOnlineTrackSupportsLibraryActions || activeOnlinePlaylistPending"
-                    :aria-label="activeOnlineTrack ? `Add ${activeOnlineTrack.title} to a Playlist` : 'Add current online track to a Playlist'"
+                    :aria-label="activeOnlineTrack ? t('Add {title} to a Playlist', { title: activeOnlineTrack.title }) : t('Add current online track to a Playlist')"
                     @click="addActiveOnlineTrackToPlaylist"
                   >
                     <RefreshCw v-if="activeOnlinePlaylistPending" class="animate-spin" :size="16" aria-hidden="true" />
                     <ListPlus v-else :size="16" aria-hidden="true" />
-                    <span>Add to Playlist</span>
+                    <span>{{ t("Add to Playlist") }}</span>
                   </button>
                 </li>
                 <li>
                   <details>
                     <summary>
                       <AudioLines :size="16" aria-hidden="true" />
-                      <span>Change Audio Source</span>
+                      <span>{{ t("Change Audio Source") }}</span>
                     </summary>
                     <ul>
                       <li
@@ -2923,11 +2983,11 @@ function trackSubtitle(track: LocalTrack) {
                         class="menu-disabled"
                       >
                         <span>
-                          Automatic · {{ availableAudioSources.find((source) => source.value === activeOnlineAudioSourceId)?.label || "Selecting" }}
+                          {{ t("Automatic") }} · {{ availableAudioSources.find((source) => source.value === activeOnlineAudioSourceId)?.label || t("Selecting") }}
                         </span>
                       </li>
                       <li v-if="!availableAudioSources.length" class="menu-disabled">
-                        <span>No Audio Sources available</span>
+                        <span>{{ t("No Audio Sources available") }}</span>
                       </li>
                       <li
                         v-for="source in automaticAudioSourceSelection ? [] : availableAudioSources"
@@ -2957,7 +3017,7 @@ function trackSubtitle(track: LocalTrack) {
                   <details>
                     <summary>
                       <Gauge :size="16" aria-hidden="true" />
-                      <span>Change Quality</span>
+                      <span>{{ t("Change Quality") }}</span>
                     </summary>
                     <ul>
                       <li v-for="quality in STREAM_QUALITY_OPTIONS" :key="quality.value">
@@ -3005,17 +3065,17 @@ function trackSubtitle(track: LocalTrack) {
     </div>
 
     <div class="drawer-side z-40">
-      <label for="app-sidebar" aria-label="Close navigation" class="drawer-overlay"></label>
+      <label for="app-sidebar" :aria-label="t('Close navigation')" class="drawer-overlay"></label>
       <aside class="flex min-h-full w-60 flex-col border-r border-base-300 bg-base-100">
         <div class="flex min-h-16 items-center gap-3 border-b border-base-300 px-4">
           <img class="size-9 shrink-0" :src="fikaLogoUrl" alt="" />
           <div class="min-w-0">
             <div class="truncate text-base font-semibold leading-tight">Fika Music</div>
-            <div class="truncate text-xs text-muted">Local-first library</div>
+            <div class="truncate text-xs text-muted">{{ t("Local-first library") }}</div>
           </div>
         </div>
 
-        <nav class="flex min-h-0 flex-1 flex-col p-3" aria-label="Primary navigation">
+        <nav class="flex min-h-0 flex-1 flex-col p-3" :aria-label="t('Primary navigation')">
           <ul
             class="menu min-h-0 w-full flex-1 flex-nowrap gap-1 overflow-y-auto p-0"
             :class="layoutDensity === 'compact' ? 'menu-sm' : 'menu-md'"
@@ -3042,15 +3102,15 @@ function trackSubtitle(track: LocalTrack) {
                       @click="selectSection('local')"
                     >
                       <Library :size="18" aria-hidden="true" />
-                      <span class="min-w-0 flex-1 truncate">Local Music</span>
+                      <span class="min-w-0 flex-1 truncate">{{ t("Local Music") }}</span>
                     </button>
                     <button
                       class="btn btn-square btn-ghost btn-xs size-7 shrink-0"
                       :class="activeSection === 'local' ? 'text-neutral-content' : undefined"
                       type="button"
-                      :aria-label="collectionsExpanded ? 'Collapse Collections' : 'Expand Collections'"
+                      :aria-label="collectionsExpanded ? t('Collapse Collections') : t('Expand Collections')"
                       :aria-expanded="collectionsExpanded"
-                      :title="collectionsExpanded ? 'Collapse Collections' : 'Expand Collections'"
+                      :title="collectionsExpanded ? t('Collapse Collections') : t('Expand Collections')"
                       @click.stop="collectionsExpanded = !collectionsExpanded"
                     >
                       <ChevronRight
@@ -3064,8 +3124,8 @@ function trackSubtitle(track: LocalTrack) {
                       class="btn btn-square btn-ghost btn-xs size-7 shrink-0"
                       :class="activeSection === 'local' ? 'text-neutral-content' : undefined"
                       type="button"
-                      aria-label="New Collection"
-                      title="New Collection"
+                      :aria-label="t('New Collection')"
+                      :title="t('New Collection')"
                       @click.stop="openCreateCollection()"
                     >
                       <Plus :size="15" aria-hidden="true" />
@@ -3084,7 +3144,7 @@ function trackSubtitle(track: LocalTrack) {
                       ]"
                       :aria-current="activeSection === 'collection' && activeCollectionId === collection.id ? 'page' : undefined"
                       :data-collection-id="collection.id"
-                      :title="`${collection.name} (${collection.itemCount} tracks)`"
+                      :title="t('{name} ({count} tracks)', { name: collection.name, count: collection.itemCount })"
                       @click="selectCollection(collection.id)"
                       @dblclick="playCollectionFromSidebar(collection)"
                       @contextmenu="openCollectionContextMenu($event, collection.id)"
@@ -3111,13 +3171,13 @@ function trackSubtitle(track: LocalTrack) {
                   @click="selectSection(section.id)"
                 >
                   <component :is="section.icon" :size="18" aria-hidden="true" />
-                  <span>{{ section.label }}</span>
+                  <span>{{ t(section.label) }}</span>
                 </button>
               </li>
             </template>
 
             <li v-if="enabledPlugins.length" class="menu-title mt-3">
-              <span>Enabled plugins</span>
+              <span>{{ t("Enabled plugins") }}</span>
             </li>
             <li v-for="plugin in enabledPlugins" :key="plugin.id">
               <button
@@ -3151,7 +3211,7 @@ function trackSubtitle(track: LocalTrack) {
                 @click="selectSection(settingsSection.id)"
               >
                 <Settings :size="18" aria-hidden="true" />
-                <span>{{ settingsSection.label }}</span>
+                <span>{{ t(settingsSection.label) }}</span>
               </button>
             </li>
           </ul>
@@ -3159,12 +3219,12 @@ function trackSubtitle(track: LocalTrack) {
 
         <div class="border-t border-base-300 px-4 py-3">
           <div class="truncate text-xs text-muted" :title="selectedFolder || undefined">
-            {{ selectedFolder || "No music folder" }}
+            {{ selectedFolder || t("No music folder") }}
           </div>
           <div class="mt-1 text-sm font-medium tabular-nums">
-            {{ libraryTrackCount.toLocaleString() }} track{{ libraryTrackCount === 1 ? "" : "s" }} indexed
+            {{ t(libraryTrackCount === 1 ? "{count} track indexed" : "{count} tracks indexed", { count: formatNumber(libraryTrackCount) }) }}
             <span v-if="filteredLibraryTrackCount !== libraryTrackCount" class="text-muted">
-              · {{ filteredLibraryTrackCount.toLocaleString() }} shown
+              · {{ t("{count} shown", { count: formatNumber(filteredLibraryTrackCount) }) }}
             </span>
           </div>
         </div>
@@ -3184,12 +3244,12 @@ function trackSubtitle(track: LocalTrack) {
         class="menu menu-sm fixed z-[60] w-56 rounded border border-base-300 bg-base-100 p-2 shadow-xl"
         :style="{ left: `${localMusicContextMenu.x}px`, top: `${localMusicContextMenu.y}px` }"
         data-sidebar-context-menu
-        aria-label="Local Music actions"
+        :aria-label="t('Local Music actions')"
       >
         <li>
           <button type="button" @click="openCreateCollection()">
             <FolderPlus :size="16" aria-hidden="true" />
-            New Collection
+            {{ t("New Collection") }}
           </button>
         </li>
         <li>
@@ -3199,7 +3259,7 @@ function trackSubtitle(track: LocalTrack) {
               :size="16"
               aria-hidden="true"
             />
-            {{ collectionsExpanded ? "Collapse Collections" : "Expand Collections" }}
+            {{ collectionsExpanded ? t("Collapse Collections") : t("Expand Collections") }}
           </button>
         </li>
       </ul>
@@ -3209,18 +3269,18 @@ function trackSubtitle(track: LocalTrack) {
         class="menu menu-sm fixed z-[60] w-56 rounded border border-base-300 bg-base-100 p-2 shadow-xl"
         :style="{ left: `${collectionContextMenu.x}px`, top: `${collectionContextMenu.y}px` }"
         data-sidebar-context-menu
-        aria-label="Collection actions"
+        :aria-label="t('Collection actions')"
       >
         <li>
           <button type="button" @click="renameContextCollection">
             <Pencil :size="16" aria-hidden="true" />
-            Rename Collection
+            {{ t("Rename Collection") }}
           </button>
         </li>
         <li>
           <button class="text-error" type="button" @click="deleteContextCollection">
             <Trash2 :size="16" aria-hidden="true" />
-            Delete Collection
+            {{ t("Delete Collection") }}
           </button>
         </li>
       </ul>
@@ -3237,22 +3297,27 @@ function trackSubtitle(track: LocalTrack) {
           <div class="flex items-start gap-3">
             <div class="min-w-0 flex-1">
               <h2 id="collection-name-dialog-title" class="text-base font-semibold">
-                {{ collectionNameDialog.intent === "rename" ? "Rename Collection" : "New Collection" }}
+                {{ collectionNameDialog.intent === "rename" ? t("Rename Collection") : t("New Collection") }}
               </h2>
               <p
                 v-if="collectionNameDialog.intent === 'create' && collectionNameDialog.seed.kind !== 'empty'"
                 class="mt-1 text-sm text-muted"
               >
                 {{ collectionSeedCount(collectionNameDialog.seed) === null
-                  ? "Add the selected tracks"
-                  : `${collectionSeedCount(collectionNameDialog.seed)} selected track${collectionSeedCount(collectionNameDialog.seed) === 1 ? '' : 's'}` }}
+                  ? t("Add the selected tracks")
+                  : t(
+                      collectionSeedCount(collectionNameDialog.seed) === 1
+                        ? "{count} selected track"
+                        : "{count} selected tracks",
+                      { count: collectionSeedCount(collectionNameDialog.seed) ?? 0 },
+                    ) }}
               </p>
             </div>
             <button
               class="btn btn-square btn-ghost btn-sm"
               type="button"
               :disabled="collectionActionBusy"
-              aria-label="Close Collection dialog"
+              :aria-label="t('Close Collection dialog')"
               @click="closeCollectionDialogs"
             >
               <X :size="17" aria-hidden="true" />
@@ -3265,7 +3330,7 @@ function trackSubtitle(track: LocalTrack) {
           </div>
 
           <label class="mt-5 block">
-            <span class="mb-1.5 block text-sm font-medium">Name</span>
+            <span class="mb-1.5 block text-sm font-medium">{{ t("Name") }}</span>
             <input
               ref="collectionNameInput"
               v-model="collectionName"
@@ -3273,8 +3338,8 @@ function trackSubtitle(track: LocalTrack) {
               type="text"
               maxlength="80"
               autocomplete="off"
-              placeholder="Collection name"
-              aria-label="Collection name"
+              :placeholder="t('Collection name')"
+              :aria-label="t('Collection name')"
             />
           </label>
 
@@ -3285,7 +3350,7 @@ function trackSubtitle(track: LocalTrack) {
               :disabled="collectionActionBusy"
               @click="closeCollectionDialogs"
             >
-              Cancel
+              {{ t("Cancel") }}
             </button>
             <button
               class="btn btn-neutral btn-sm"
@@ -3299,12 +3364,12 @@ function trackSubtitle(track: LocalTrack) {
                 aria-hidden="true"
               />
               <FolderPlus v-else :size="16" aria-hidden="true" />
-              {{ collectionNameDialog.intent === "rename" ? "Save" : "Create" }}
+              {{ collectionNameDialog.intent === "rename" ? t("Save") : t("Create") }}
             </button>
           </div>
         </form>
         <form method="dialog" class="modal-backdrop" @submit.prevent="closeCollectionDialogs">
-          <button type="submit" :disabled="collectionActionBusy">Close</button>
+          <button type="submit" :disabled="collectionActionBusy">{{ t("Close") }}</button>
         </form>
       </dialog>
 
@@ -3319,18 +3384,23 @@ function trackSubtitle(track: LocalTrack) {
         <form class="modal-box max-w-lg rounded" @submit.prevent="confirmCollectionAdd">
           <div class="flex items-start gap-3">
             <div class="min-w-0 flex-1">
-              <h2 id="collection-picker-title" class="text-base font-semibold">Add to Collection</h2>
+              <h2 id="collection-picker-title" class="text-base font-semibold">{{ t("Add to Collection") }}</h2>
               <p class="mt-1 text-sm text-muted">
                 {{ collectionSeedCount(collectionPickerSeed) === null
-                  ? "Selected Local Music tracks"
-                  : `${collectionSeedCount(collectionPickerSeed)} selected track${collectionSeedCount(collectionPickerSeed) === 1 ? '' : 's'}` }}
+                  ? t("Selected Local Music tracks")
+                  : t(
+                      collectionSeedCount(collectionPickerSeed) === 1
+                        ? "{count} selected track"
+                        : "{count} selected tracks",
+                      { count: collectionSeedCount(collectionPickerSeed) ?? 0 },
+                    ) }}
               </p>
             </div>
             <button
               class="btn btn-square btn-ghost btn-sm"
               type="button"
               :disabled="collectionActionBusy"
-              aria-label="Close Collection picker"
+              :aria-label="t('Close Collection picker')"
               @click="closeCollectionDialogs"
             >
               <X :size="17" aria-hidden="true" />
@@ -3365,7 +3435,7 @@ function trackSubtitle(track: LocalTrack) {
               @click="createCollectionFromPicker"
             >
               <Plus :size="16" aria-hidden="true" />
-              New Collection
+              {{ t("New Collection") }}
             </button>
             <div class="flex gap-2">
               <button
@@ -3374,7 +3444,7 @@ function trackSubtitle(track: LocalTrack) {
                 :disabled="collectionActionBusy"
                 @click="closeCollectionDialogs"
               >
-                Cancel
+                {{ t("Cancel") }}
               </button>
               <button
                 class="btn btn-neutral btn-sm"
@@ -3388,13 +3458,13 @@ function trackSubtitle(track: LocalTrack) {
                   aria-hidden="true"
                 />
                 <ListPlus v-else :size="16" aria-hidden="true" />
-                Add
+                {{ t("Add") }}
               </button>
             </div>
           </div>
         </form>
         <form method="dialog" class="modal-backdrop" @submit.prevent="closeCollectionDialogs">
-          <button type="submit" :disabled="collectionActionBusy">Close</button>
+          <button type="submit" :disabled="collectionActionBusy">{{ t("Close") }}</button>
         </form>
       </dialog>
 
@@ -3407,9 +3477,14 @@ function trackSubtitle(track: LocalTrack) {
         @cancel.prevent="closeCollectionDialogs"
       >
         <form class="modal-box max-w-md rounded" @submit.prevent="confirmCollectionDelete">
-          <h2 id="delete-collection-title" class="text-base font-semibold">Delete Collection?</h2>
+          <h2 id="delete-collection-title" class="text-base font-semibold">{{ t("Delete Collection?") }}</h2>
           <p class="mt-3 text-sm leading-6 text-muted">
-            {{ collectionDeleteTarget.name }} and its {{ collectionDeleteTarget.itemCount }} saved track{{ collectionDeleteTarget.itemCount === 1 ? "" : "s" }} will be removed. Music files are not deleted.
+            {{ t(
+              collectionDeleteTarget.itemCount === 1
+                ? "{name} and its {count} saved track will be removed. Music files are not deleted."
+                : "{name} and its {count} saved tracks will be removed. Music files are not deleted.",
+              { name: collectionDeleteTarget.name, count: collectionDeleteTarget.itemCount },
+            ) }}
           </p>
           <div v-if="collectionActionError" class="alert alert-error mt-4 py-2 text-sm" role="alert">
             <AlertCircle :size="16" aria-hidden="true" />
@@ -3422,7 +3497,7 @@ function trackSubtitle(track: LocalTrack) {
               :disabled="collectionActionBusy"
               @click="closeCollectionDialogs"
             >
-              Cancel
+              {{ t("Cancel") }}
             </button>
             <button class="btn btn-error btn-sm" type="submit" :disabled="collectionActionBusy">
               <RefreshCw
@@ -3432,12 +3507,12 @@ function trackSubtitle(track: LocalTrack) {
                 aria-hidden="true"
               />
               <Trash2 v-else :size="16" aria-hidden="true" />
-              Delete
+              {{ t("Delete") }}
             </button>
           </div>
         </form>
         <form method="dialog" class="modal-backdrop" @submit.prevent="closeCollectionDialogs">
-          <button type="submit" :disabled="collectionActionBusy">Close</button>
+          <button type="submit" :disabled="collectionActionBusy">{{ t("Close") }}</button>
         </form>
       </dialog>
 

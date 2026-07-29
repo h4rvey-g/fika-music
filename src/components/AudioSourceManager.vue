@@ -27,6 +27,7 @@ import {
 } from "../lib/audio-source-api";
 import type { SourceCapability } from "../generated/bindings";
 import { normalizeError } from "../lib/errors";
+import { currentLocale, t } from "../i18n";
 
 const emit = defineEmits<{
   sourcesChanged: [sources: AudioSourceRecord[]];
@@ -68,7 +69,7 @@ async function refreshSources() {
   sourceNotice.value = null;
   try {
     replaceAudioSources(await refreshAudioSources());
-    sourceNotice.value = "Audio sources refreshed.";
+    sourceNotice.value = t("Audio sources refreshed.");
   } catch (error) {
     sourceError.value = normalizeError(error);
   } finally {
@@ -111,7 +112,7 @@ function closeUrlDialog() {
 async function importFromUrl() {
   const url = sourceUrl.value.trim();
   if (!url) {
-    sourceUrlError.value = "Source URL is required.";
+    sourceUrlError.value = t("Source URL is required.");
     return;
   }
   importMode.value = "url";
@@ -133,7 +134,10 @@ async function importFromUrl() {
 function finishImport(imported: AudioSourceRecord) {
   replaceAudioSource(imported);
   expandedSourceId.value = imported.id;
-  sourceNotice.value = `${imported.name} imported. Review its permissions before enabling it.`;
+  sourceNotice.value = t(
+    "{name} imported. Review its permissions before enabling it.",
+    { name: imported.name },
+  );
 }
 
 async function toggleEnabled(audioSource: AudioSourceRecord) {
@@ -181,8 +185,8 @@ async function saveCapabilities(
       await setAudioSourceCapabilities(audioSource.id, capabilities, reviewed),
     );
     sourceNotice.value = reviewed
-      ? "Audio source permissions saved."
-      : "Permission review is still required.";
+      ? t("Audio source permissions saved.")
+      : t("Permission review is still required.");
   } catch (error) {
     sourceError.value = normalizeError(error);
     await loadAudioSources();
@@ -192,7 +196,7 @@ async function saveCapabilities(
 }
 
 async function removeSource(audioSource: AudioSourceRecord) {
-  if (!window.confirm(`Remove ${audioSource.name}?`)) {
+  if (!window.confirm(t("Remove {name}?", { name: audioSource.name }))) {
     return;
   }
   busySourceId.value = audioSource.id;
@@ -203,7 +207,7 @@ async function removeSource(audioSource: AudioSourceRecord) {
     if (expandedSourceId.value === audioSource.id) {
       expandedSourceId.value = null;
     }
-    sourceNotice.value = `${audioSource.name} removed.`;
+    sourceNotice.value = t("{name} removed.", { name: audioSource.name });
   } catch (error) {
     sourceError.value = normalizeError(error);
     await loadAudioSources();
@@ -254,7 +258,7 @@ function capabilityLabel(capability: string) {
     "metadata:read": "Read metadata",
     "cache:read-write": "Read and write cache",
   };
-  return labels[capability] || capability;
+  return labels[capability] ? t(labels[capability]) : capability;
 }
 
 function stateLabel(state: AudioSourceRecord["state"]) {
@@ -266,7 +270,7 @@ function stateLabel(state: AudioSourceRecord["state"]) {
     error: "Load error",
     invalid: "Invalid manifest",
   };
-  return labels[state];
+  return t(labels[state]);
 }
 
 function stateClass(state: AudioSourceRecord["state"]) {
@@ -293,7 +297,7 @@ function diagnosticClass(level: AudioSourceDiagnostic["level"]) {
 }
 
 function formatTimestamp(timestamp: number) {
-  return timestamp ? new Date(timestamp * 1000).toLocaleString() : "-";
+  return timestamp ? new Date(timestamp * 1000).toLocaleString(currentLocale.value) : "-";
 }
 
 </script>
@@ -306,9 +310,9 @@ function formatTimestamp(timestamp: number) {
           <AudioLines :size="19" aria-hidden="true" />
         </div>
         <div class="min-w-0">
-          <h2 class="text-base font-semibold">Audio Sources</h2>
+          <h2 class="text-base font-semibold">{{ t("Audio Sources") }}</h2>
           <p class="mt-0.5 text-xs text-muted">
-            {{ audioSources.length }} imported source{{ audioSources.length === 1 ? "" : "s" }}
+            {{ t(audioSources.length === 1 ? "{count} imported source" : "{count} imported sources", { count: audioSources.length }) }}
           </p>
         </div>
       </div>
@@ -317,8 +321,8 @@ function formatTimestamp(timestamp: number) {
           class="btn btn-square btn-ghost btn-sm"
           type="button"
           :disabled="isLoading || importMode !== null"
-          aria-label="Refresh audio sources"
-          title="Refresh"
+          :aria-label="t('Refresh audio sources')"
+          :title="t('Refresh')"
           @click="refreshSources"
         >
           <RefreshCw :class="{ 'animate-spin': isLoading }" :size="16" aria-hidden="true" />
@@ -330,7 +334,7 @@ function formatTimestamp(timestamp: number) {
           @click="openUrlDialog"
         >
           <Link :size="16" aria-hidden="true" />
-          Import URL
+          {{ t("Import URL") }}
         </button>
         <button
           class="btn btn-primary btn-sm"
@@ -345,7 +349,7 @@ function formatTimestamp(timestamp: number) {
             aria-hidden="true"
           />
           <Upload v-else :size="16" aria-hidden="true" />
-          Import file
+          {{ t("Import file") }}
         </button>
       </div>
     </header>
@@ -360,20 +364,20 @@ function formatTimestamp(timestamp: number) {
       <form class="modal-box max-w-xl" @submit.prevent="importFromUrl">
         <div class="flex items-center justify-between gap-3">
           <h3 id="audio-source-url-title" class="text-base font-semibold">
-            Import audio source
+            {{ t("Import audio source") }}
           </h3>
           <button
             class="btn btn-square btn-ghost btn-sm"
             type="button"
             :disabled="importMode === 'url'"
-            aria-label="Close URL import"
+            :aria-label="t('Close URL import')"
             @click="closeUrlDialog"
           >
             <X :size="17" aria-hidden="true" />
           </button>
         </div>
         <fieldset class="fieldset mt-4">
-          <legend class="fieldset-legend">Source URL</legend>
+          <legend class="fieldset-legend">{{ t("Source URL") }}</legend>
           <input
             ref="sourceUrlInput"
             v-model="sourceUrl"
@@ -398,7 +402,7 @@ function formatTimestamp(timestamp: number) {
             :disabled="importMode === 'url'"
             @click="closeUrlDialog"
           >
-            Cancel
+            {{ t("Cancel") }}
           </button>
           <button class="btn btn-primary" type="submit" :disabled="importMode === 'url'">
             <RefreshCw
@@ -408,12 +412,12 @@ function formatTimestamp(timestamp: number) {
               aria-hidden="true"
             />
             <Link v-else :size="16" aria-hidden="true" />
-            Import
+            {{ t("Import") }}
           </button>
         </div>
       </form>
       <form method="dialog" class="modal-backdrop" @submit.prevent="closeUrlDialog">
-        <button type="submit" :disabled="importMode === 'url'">Close</button>
+        <button type="submit" :disabled="importMode === 'url'">{{ t("Close") }}</button>
       </form>
     </dialog>
 
@@ -423,7 +427,7 @@ function formatTimestamp(timestamp: number) {
       <button
         class="btn btn-square btn-ghost btn-sm"
         type="button"
-        aria-label="Dismiss error"
+        :aria-label="t('Dismiss error')"
         @click="sourceError = null"
       >
         <X :size="16" aria-hidden="true" />
@@ -436,7 +440,7 @@ function formatTimestamp(timestamp: number) {
       <button
         class="btn btn-square btn-ghost btn-sm"
         type="button"
-        aria-label="Dismiss notice"
+        :aria-label="t('Dismiss notice')"
         @click="sourceNotice = null"
       >
         <X :size="16" aria-hidden="true" />
@@ -445,12 +449,12 @@ function formatTimestamp(timestamp: number) {
 
     <div v-if="isLoading && !hasAudioSources" class="flex items-center gap-2 p-6 text-sm text-muted">
       <RefreshCw class="animate-spin" :size="16" aria-hidden="true" />
-      Loading audio sources
+      {{ t("Loading audio sources") }}
     </div>
 
     <div v-else-if="!hasAudioSources" class="p-8 text-center">
       <AudioLines class="mx-auto text-base-content/35" :size="30" aria-hidden="true" />
-      <p class="mt-3 text-sm font-medium">No audio sources imported</p>
+      <p class="mt-3 text-sm font-medium">{{ t("No audio sources imported") }}</p>
     </div>
 
     <ul v-else class="list divide-y divide-base-300">
@@ -492,21 +496,21 @@ function formatTimestamp(timestamp: number) {
             class="mt-4 space-y-4 border-t border-base-300 pt-4"
           >
             <div class="grid gap-2 text-xs text-muted sm:grid-cols-2">
-              <span>{{ audioSource.sources.length }} catalog source{{ audioSource.sources.length === 1 ? "" : "s" }}</span>
+              <span>{{ t(audioSource.sources.length === 1 ? "{count} catalog source" : "{count} catalog sources", { count: audioSource.sources.length }) }}</span>
               <span class="truncate" :title="audioSource.path">{{ audioSource.path }}</span>
             </div>
 
             <div v-if="audioSource.declaredCapabilities.length" class="space-y-2">
               <div class="flex items-center justify-between gap-3">
-                <h4 class="text-sm font-semibold">Permissions</h4>
+                <h4 class="text-sm font-semibold">{{ t("Permissions") }}</h4>
                 <span
                   v-if="audioSource.permissionsReviewed"
                   class="flex items-center gap-1 text-xs text-success"
                 >
                   <ShieldCheck :size="14" aria-hidden="true" />
-                  Reviewed
+                  {{ t("Reviewed") }}
                 </span>
-                <span v-else class="text-xs text-warning">Review required</span>
+                <span v-else class="text-xs text-warning">{{ t("Review required") }}</span>
               </div>
               <div class="grid gap-2 sm:grid-cols-2">
                 <label
@@ -520,7 +524,7 @@ function formatTimestamp(timestamp: number) {
                     type="checkbox"
                     :checked="audioSource.grantedCapabilities.includes(capability)"
                     :disabled="busySourceId === audioSource.id"
-                    :aria-label="`Grant ${capabilityLabel(capability)}`"
+                    :aria-label="t('Grant {capability}', { capability: capabilityLabel(capability) })"
                     @change="updateCapability(audioSource, capability, ($event.target as HTMLInputElement).checked)"
                   />
                 </label>
@@ -531,7 +535,7 @@ function formatTimestamp(timestamp: number) {
               >
                 <AlertCircle :size="17" aria-hidden="true" />
                 <span class="text-sm">
-                  Confirm before enabling. This imported JavaScript can contact any network host through Fika.
+                  {{ t("Confirm before enabling. This imported JavaScript can contact any network host through Fika.") }}
                 </span>
                 <button
                   class="btn btn-sm"
@@ -540,13 +544,13 @@ function formatTimestamp(timestamp: number) {
                   @click="reviewCapabilities(audioSource)"
                 >
               <ShieldCheck :size="16" aria-hidden="true" />
-                  Confirm review
+                  {{ t("Confirm review") }}
                 </button>
               </div>
             </div>
 
             <div class="space-y-2">
-              <h4 class="text-sm font-semibold">Catalog</h4>
+              <h4 class="text-sm font-semibold">{{ t("Catalog") }}</h4>
               <div class="flex flex-wrap gap-2">
                 <span
                   v-for="source in audioSource.sources"
@@ -560,7 +564,7 @@ function formatTimestamp(timestamp: number) {
 
             <div class="space-y-2">
               <div class="flex items-center justify-between gap-3">
-                <h4 class="text-sm font-semibold">Diagnostics</h4>
+                <h4 class="text-sm font-semibold">{{ t("Diagnostics") }}</h4>
                 <button
                   v-if="audioSource.diagnostics.length"
                   class="btn btn-ghost btn-sm"
@@ -568,11 +572,11 @@ function formatTimestamp(timestamp: number) {
                   :disabled="busySourceId === audioSource.id"
                   @click="clearDiagnostics(audioSource)"
                 >
-                  Clear
+                  {{ t("Clear") }}
                 </button>
               </div>
               <p v-if="!audioSource.diagnostics.length" class="text-xs text-muted">
-                No diagnostics.
+                {{ t("No diagnostics.") }}
               </p>
               <ul v-else class="max-h-52 space-y-2 overflow-y-auto border border-base-300 p-3">
                 <li
@@ -596,21 +600,21 @@ function formatTimestamp(timestamp: number) {
 
         <div class="col-start-3 row-start-1 flex shrink-0 items-start gap-2">
           <label class="flex items-center gap-2 text-xs">
-            <span class="sr-only">Enable {{ audioSource.name }}</span>
+            <span class="sr-only">{{ t("Enable {name}", { name: audioSource.name }) }}</span>
             <input
             class="toggle toggle-md"
               type="checkbox"
               :checked="audioSource.enabled"
               :disabled="busySourceId === audioSource.id || (!audioSource.enabled && !audioSource.canEnable)"
-              :aria-label="`Enable ${audioSource.name}`"
+              :aria-label="t('Enable {name}', { name: audioSource.name })"
               @change="toggleEnabled(audioSource)"
             />
           </label>
           <button
             class="btn btn-square btn-ghost btn-sm"
             type="button"
-            :aria-label="expandedSourceId === audioSource.id ? `Collapse ${audioSource.name}` : `Inspect ${audioSource.name}`"
-            :title="expandedSourceId === audioSource.id ? 'Collapse details' : 'Inspect details'"
+            :aria-label="expandedSourceId === audioSource.id ? t('Collapse {name}', { name: audioSource.name }) : t('Inspect {name}', { name: audioSource.name })"
+            :title="expandedSourceId === audioSource.id ? t('Collapse details') : t('Inspect details')"
             @click="toggleDetails(audioSource.id)"
           >
             <ChevronDown
@@ -624,8 +628,8 @@ function formatTimestamp(timestamp: number) {
             class="btn btn-square btn-ghost btn-sm text-error"
             type="button"
             :disabled="busySourceId === audioSource.id"
-            :aria-label="`Remove ${audioSource.name}`"
-            title="Remove audio source"
+            :aria-label="t('Remove {name}', { name: audioSource.name })"
+            :title="t('Remove audio source')"
             @click="removeSource(audioSource)"
           >
             <Trash2 :size="16" aria-hidden="true" />

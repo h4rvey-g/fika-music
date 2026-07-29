@@ -22,6 +22,7 @@ import {
 } from "../lib/plugin-api";
 import type { PluginDiagnostic, PluginRecord } from "../lib/plugin-api";
 import { normalizeError } from "../lib/errors";
+import { currentLocale, t } from "../i18n";
 
 const emit = defineEmits<{
   pluginsChanged: [plugins: PluginRecord[]];
@@ -61,7 +62,7 @@ async function refreshPlugins() {
 
   try {
     replacePlugins(await refreshPluginRegistry());
-    pluginNotice.value = "Plugin registry refreshed.";
+    pluginNotice.value = t("Plugin registry refreshed.");
   } catch (error) {
     pluginError.value = normalizeError(error);
   } finally {
@@ -82,7 +83,7 @@ async function installPlugin() {
     const installed = await installPluginPackage(packagePath);
     replacePlugin(installed);
     expandedPluginId.value = installed.id;
-    pluginNotice.value = `${installed.name} installed.`;
+    pluginNotice.value = t("{name} installed.", { name: installed.name });
   } catch (error) {
     pluginError.value = normalizeError(error);
   } finally {
@@ -107,7 +108,7 @@ async function toggleEnabled(plugin: PluginRecord) {
 }
 
 async function removePlugin(plugin: PluginRecord) {
-  if (!window.confirm(`Remove ${plugin.name}?`)) {
+  if (!window.confirm(t("Remove {name}?", { name: plugin.name }))) {
     return;
   }
 
@@ -120,7 +121,7 @@ async function removePlugin(plugin: PluginRecord) {
     if (expandedPluginId.value === plugin.id) {
       expandedPluginId.value = null;
     }
-    pluginNotice.value = `${plugin.name} removed.`;
+    pluginNotice.value = t("{name} removed.", { name: plugin.name });
   } catch (error) {
     pluginError.value = normalizeError(error);
     await loadPlugins();
@@ -176,7 +177,7 @@ function capabilityLabel(capability: string) {
     "bridge:netease-api-enhanced": "NetEase service bridge",
     "bridge:kugou-music-api": "KuGou service bridge",
   };
-  return labels[capability] || capability;
+  return labels[capability] ? t(labels[capability]) : capability;
 }
 
 function stateLabel(state: PluginRecord["state"]) {
@@ -187,7 +188,7 @@ function stateLabel(state: PluginRecord["state"]) {
     error: "Load error",
     invalid: "Invalid manifest",
   };
-  return labels[state] || state;
+  return labels[state] ? t(labels[state]) : state;
 }
 
 function stateClass(state: PluginRecord["state"]) {
@@ -217,7 +218,7 @@ function formatTimestamp(timestamp: number) {
   if (!timestamp) {
     return "-";
   }
-  return new Date(timestamp * 1000).toLocaleString();
+  return new Date(timestamp * 1000).toLocaleString(currentLocale.value);
 }
 
 function sourceCount(plugin: PluginRecord) {
@@ -232,10 +233,10 @@ function sourceCount(plugin: PluginRecord) {
       <div>
         <h2 class="flex items-center gap-2 text-base font-semibold">
           <Plug :size="18" aria-hidden="true" />
-          Plugin System
+          {{ t("Plugin System") }}
         </h2>
         <p class="mt-1 text-sm text-muted">
-          {{ plugins.length }} installed package{{ plugins.length === 1 ? "" : "s" }}
+          {{ t(plugins.length === 1 ? "{count} installed package" : "{count} installed packages", { count: plugins.length }) }}
         </p>
       </div>
       <div class="flex flex-wrap gap-2">
@@ -243,11 +244,11 @@ function sourceCount(plugin: PluginRecord) {
           class="btn btn-sm"
           type="button"
           :disabled="isLoading || isInstalling"
-          title="Refresh Plugin registry"
+          :title="t('Refresh Plugin registry')"
           @click="refreshPlugins"
         >
           <RefreshCw :class="{ 'animate-spin': isLoading }" :size="16" aria-hidden="true" />
-          Refresh
+          {{ t("Refresh") }}
         </button>
         <button
           class="btn btn-sm"
@@ -256,7 +257,7 @@ function sourceCount(plugin: PluginRecord) {
           @click="installPlugin"
         >
           <PackagePlus :size="16" aria-hidden="true" />
-          Install package
+          {{ t("Install package") }}
         </button>
       </div>
     </div>
@@ -264,7 +265,7 @@ function sourceCount(plugin: PluginRecord) {
     <div v-if="pluginError" role="alert" class="alert alert-error m-4">
       <AlertCircle :size="18" aria-hidden="true" />
       <span>{{ pluginError }}</span>
-      <button class="btn btn-square btn-ghost btn-sm" type="button" aria-label="Dismiss error" @click="pluginError = null">
+      <button class="btn btn-square btn-ghost btn-sm" type="button" :aria-label="t('Dismiss error')" @click="pluginError = null">
         <X :size="16" aria-hidden="true" />
       </button>
     </div>
@@ -272,18 +273,18 @@ function sourceCount(plugin: PluginRecord) {
     <div v-if="pluginNotice" role="status" class="alert alert-success alert-soft m-4">
       <CircleCheck :size="18" aria-hidden="true" />
       <span>{{ pluginNotice }}</span>
-      <button class="btn btn-square btn-ghost btn-sm" type="button" aria-label="Dismiss notice" @click="pluginNotice = null">
+      <button class="btn btn-square btn-ghost btn-sm" type="button" :aria-label="t('Dismiss notice')" @click="pluginNotice = null">
         <X :size="16" aria-hidden="true" />
       </button>
     </div>
 
     <div v-if="isLoading && !hasPlugins" class="flex items-center gap-2 p-6 text-sm text-muted">
       <RefreshCw class="animate-spin" :size="16" aria-hidden="true" />
-      Loading Plugins
+      {{ t("Loading Plugins") }}
     </div>
 
     <div v-else-if="!hasPlugins" class="p-8 text-center text-sm text-muted">
-      No Plugin packages discovered.
+      {{ t("No Plugin packages discovered.") }}
     </div>
 
     <ul v-else class="list divide-y divide-base-300">
@@ -305,13 +306,13 @@ function sourceCount(plugin: PluginRecord) {
 
           <div v-if="expandedPluginId === plugin.id" class="mt-4 space-y-4 border-t border-base-300 pt-4">
             <div class="grid gap-2 text-xs text-muted sm:grid-cols-3">
-              <span>{{ plugin.providers.length }} provider{{ plugin.providers.length === 1 ? "" : "s" }}</span>
-              <span>{{ sourceCount(plugin) }} source{{ sourceCount(plugin) === 1 ? "" : "s" }}</span>
+              <span>{{ t(plugin.providers.length === 1 ? "{count} provider" : "{count} providers", { count: plugin.providers.length }) }}</span>
+              <span>{{ t(sourceCount(plugin) === 1 ? "{count} source" : "{count} sources", { count: sourceCount(plugin) }) }}</span>
               <span class="truncate" :title="plugin.path">{{ plugin.path }}</span>
             </div>
 
             <div v-if="plugin.declaredCapabilities.length" class="space-y-2">
-              <h4 class="text-sm font-semibold">Capabilities</h4>
+              <h4 class="text-sm font-semibold">{{ t("Capabilities") }}</h4>
               <div class="flex flex-wrap gap-2">
                 <span
                   v-for="capability in plugin.declaredCapabilities"
@@ -324,7 +325,7 @@ function sourceCount(plugin: PluginRecord) {
             </div>
 
             <div v-if="plugin.requiredHostBridges.length" class="space-y-2">
-              <h4 class="text-sm font-semibold">Required host bridges</h4>
+              <h4 class="text-sm font-semibold">{{ t("Required host bridges") }}</h4>
               <div class="flex flex-wrap gap-2">
                 <span v-for="bridge in plugin.requiredHostBridges" :key="bridge" class="badge badge-outline">
                   {{ bridge }}
@@ -333,12 +334,12 @@ function sourceCount(plugin: PluginRecord) {
             </div>
 
             <div class="space-y-2">
-              <h4 class="text-sm font-semibold">Source Providers</h4>
+              <h4 class="text-sm font-semibold">{{ t("Source Providers") }}</h4>
               <div v-for="provider in plugin.providers" :key="provider.id" class="rounded border border-base-300 p-3">
                 <div class="flex flex-wrap items-center justify-between gap-2">
                   <span class="text-sm font-medium">{{ provider.id }}</span>
                   <span class="text-xs" :class="provider.initialized ? 'text-success' : 'text-muted'">
-                    {{ provider.initialized ? "Initialized" : "Not initialized" }}
+                    {{ provider.initialized ? t("Initialized") : t("Not initialized") }}
                   </span>
                 </div>
                 <div class="mt-1 text-xs text-muted">{{ provider.entrypoint }}</div>
@@ -352,7 +353,7 @@ function sourceCount(plugin: PluginRecord) {
 
             <div class="space-y-2">
               <div class="flex items-center justify-between gap-3">
-                <h4 class="text-sm font-semibold">Diagnostics</h4>
+                <h4 class="text-sm font-semibold">{{ t("Diagnostics") }}</h4>
                 <button
                   v-if="plugin.diagnostics.length"
                   class="btn btn-ghost btn-sm"
@@ -360,10 +361,10 @@ function sourceCount(plugin: PluginRecord) {
                   :disabled="busyPluginId === plugin.id"
                   @click="clearDiagnostics(plugin)"
                 >
-                  Clear
+                  {{ t("Clear") }}
                 </button>
               </div>
-              <div v-if="!plugin.diagnostics.length" class="text-xs text-muted">No diagnostics.</div>
+              <div v-if="!plugin.diagnostics.length" class="text-xs text-muted">{{ t("No diagnostics.") }}</div>
               <ul v-else class="max-h-52 space-y-2 overflow-y-auto rounded border border-base-300 p-3">
                 <li v-for="(diagnostic, index) in plugin.diagnostics" :key="`${diagnostic.timestamp}-${index}`" class="text-xs">
                   <div class="flex flex-wrap items-center gap-2">
@@ -382,8 +383,8 @@ function sourceCount(plugin: PluginRecord) {
           <button
             class="btn btn-square btn-ghost btn-sm"
             type="button"
-            :aria-label="expandedPluginId === plugin.id ? `Collapse ${plugin.name}` : `Inspect ${plugin.name}`"
-            :title="expandedPluginId === plugin.id ? 'Collapse details' : 'Inspect details'"
+            :aria-label="expandedPluginId === plugin.id ? t('Collapse {name}', { name: plugin.name }) : t('Inspect {name}', { name: plugin.name })"
+            :title="expandedPluginId === plugin.id ? t('Collapse details') : t('Inspect details')"
             @click="toggleDetails(plugin.id)"
           >
             <ChevronDown :class="{ 'rotate-180': expandedPluginId === plugin.id }" :size="17" aria-hidden="true" />
@@ -397,15 +398,15 @@ function sourceCount(plugin: PluginRecord) {
             @click="toggleEnabled(plugin)"
           >
                 <Power :size="16" aria-hidden="true" />
-            {{ plugin.enabled ? "Disable" : "Enable" }}
+            {{ plugin.enabled ? t("Disable") : t("Enable") }}
           </button>
           <button
             v-if="plugin.canRemove"
             class="btn btn-square btn-ghost btn-sm text-error"
             type="button"
             :disabled="busyPluginId === plugin.id"
-            :aria-label="`Remove ${plugin.name}`"
-            title="Remove Plugin"
+            :aria-label="t('Remove {name}', { name: plugin.name })"
+            :title="t('Remove Plugin')"
             @click="removePlugin(plugin)"
           >
             <Trash2 :size="16" aria-hidden="true" />

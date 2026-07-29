@@ -2,7 +2,11 @@ import { createApp } from "vue";
 import { QueryClient, VueQueryPlugin } from "@tanstack/vue-query";
 import App from "./App.vue";
 import DesktopLyricsWindow from "./components/DesktopLyricsWindow.vue";
+import { setLocale } from "./i18n";
+import { loadUiPreferences } from "./lib/ui-preferences";
 import "./style.css";
+
+setLocale(loadUiPreferences().locale);
 
 const queryClient = new QueryClient({
   defaultOptions: {

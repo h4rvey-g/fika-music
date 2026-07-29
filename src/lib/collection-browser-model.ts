@@ -5,6 +5,7 @@ import type {
   MusicCollectionItem,
 } from "../generated/bindings";
 import type { LibraryColumnId } from "./library-preferences";
+import { currentLocale, formatNumber, t } from "../i18n";
 
 export type CollectionColumnDefinition = {
   id: LibraryColumnId;
@@ -170,13 +171,13 @@ export function collectionTrackView(item: MusicCollectionItem): CollectionTrackV
   const track = item.onlineTrack;
   return {
     item,
-    title: track?.title ?? "Unavailable track",
+    title: track?.title ?? t("Unavailable track"),
     artist: track?.artist || null,
     album: track?.album ?? null,
     albumArtist: track?.artist || null,
     genre: null,
     year: null,
-    codec: track ? "Online" : null,
+    codec: track ? t("Online") : null,
     bitrateKbps: null,
     sampleRateHz: null,
     durationSeconds: track?.durationSeconds ?? null,
@@ -198,8 +199,8 @@ export function displayCollectionTrackValue(
 ) {
   switch (columnId) {
     case "title": return track.title;
-    case "artist": return track.artist || "Unknown artist";
-    case "album": return track.album || "Unknown album";
+    case "artist": return track.artist || t("Unknown artist");
+    case "album": return track.album || t("Unknown album");
     case "albumArtist": return track.albumArtist || "";
     case "genre": return track.genre || "";
     case "year": return track.year?.toString() ?? "";
@@ -214,7 +215,7 @@ export function displayCollectionTrackValue(
     case "fileSizeBytes": return track.fileSizeBytes === null ? "" : formatFileSize(track.fileSizeBytes);
     case "modifiedAt": return formatTimestamp(track.modifiedAt);
     case "indexedAt": return formatTimestamp(track.indexedAt);
-    case "playCount": return track.playCount?.toLocaleString() ?? "";
+    case "playCount": return track.playCount === null ? "" : formatNumber(track.playCount);
     default: return "";
   }
 }
@@ -227,10 +228,12 @@ export function formatCollectionDuration(seconds: number | null) {
 }
 
 export function formatCollectionLongDuration(seconds: number) {
-  if (seconds <= 0) return "0 min";
+  if (seconds <= 0) return t("{count} min", { count: 0 });
   const hours = Math.floor(seconds / 3_600);
   const minutes = Math.round((seconds % 3_600) / 60);
-  return hours ? `${hours} hr ${minutes} min` : `${minutes} min`;
+  return hours
+    ? t("{hours} hr {minutes} min", { hours, minutes })
+    : t("{count} min", { count: minutes });
 }
 
 function collectionAlbumIdentity(track: CollectionTrackView) {
@@ -348,7 +351,7 @@ function formatSampleRate(hz: number) {
 
 function formatTimestamp(timestamp: number | null) {
   if (!timestamp) return "";
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(currentLocale.value, {
     year: "numeric",
     month: "short",
     day: "numeric",

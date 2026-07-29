@@ -8,6 +8,7 @@ import {
   nowPlayingLyricsFontFamily,
   type NowPlayingLyricsPreferences,
 } from "../lib/now-playing-lyrics";
+import { t } from "../i18n";
 
 const props = withDefaults(defineProps<{
   title: string;
@@ -91,12 +92,12 @@ const lyricsTextStyle = computed(() => ({
 const lyricsSourceLabel = computed(() => {
   switch (props.lyrics?.source) {
     case "embedded":
-      return "Embedded";
+      return t("Embedded");
     case "sidecar":
-      return "Local file";
+      return t("Local file");
     case "network": {
       const provider = props.lyrics?.provider?.trim();
-      return provider?.replace(/\s+#.*$/, "") || "Network";
+      return provider?.replace(/\s+#.*$/, "") || t("Network");
     }
     default:
       return null;
@@ -277,14 +278,14 @@ watch(activeLyricIndex, async (index) => {
   <section
     class="flex min-h-0 flex-col overflow-hidden rounded border border-base-300 bg-base-100"
     :class="fillHeight ? 'h-full' : 'h-[36rem]'"
-    aria-label="Now playing details"
+    :aria-label="t('Now playing details')"
   >
     <div class="grid shrink-0 place-items-center border-b border-base-300 bg-base-200 p-4">
       <img
         v-if="coverUrl"
         class="aspect-square w-44 max-w-full rounded object-cover shadow-sm"
         :src="coverUrl"
-        :alt="`${title} cover`"
+        :alt="t('{title} cover', { title })"
       />
       <div
         v-else
@@ -305,7 +306,7 @@ watch(activeLyricIndex, async (index) => {
     <div class="flex min-h-0 flex-1 flex-col">
       <div class="flex h-11 shrink-0 items-center gap-2 border-b border-base-300 px-3">
         <FileText :size="16" aria-hidden="true" />
-        <h2 class="min-w-0 flex-1 text-sm font-semibold">Lyrics</h2>
+        <h2 class="min-w-0 flex-1 text-sm font-semibold">{{ t("Lyrics") }}</h2>
         <span
           v-if="lyricsSourceLabel"
           class="badge badge-ghost badge-sm max-w-24 truncate"
@@ -313,13 +314,13 @@ watch(activeLyricIndex, async (index) => {
         >
           {{ lyricsSourceLabel }}
         </span>
-        <div v-if="canRetry" class="tooltip tooltip-left" data-tip="Retry lyrics">
+        <div v-if="canRetry" class="tooltip tooltip-left" :data-tip="t('Retry lyrics')">
           <button
             class="btn btn-square btn-ghost btn-sm"
             type="button"
             :disabled="lyricsLoading"
-            aria-label="Retry lyrics"
-            title="Retry lyrics"
+            :aria-label="t('Retry lyrics')"
+            :title="t('Retry lyrics')"
             @click="emit('retryLyrics')"
           >
             <RefreshCw
@@ -354,7 +355,7 @@ watch(activeLyricIndex, async (index) => {
             role="status"
           >
             <RefreshCw class="animate-spin" :size="16" aria-hidden="true" />
-            Loading lyrics
+            {{ t("Loading lyrics") }}
           </div>
 
           <div
@@ -369,7 +370,7 @@ watch(activeLyricIndex, async (index) => {
             v-else-if="!lyrics?.lines.length"
             class="grid h-full min-h-48 place-items-center py-8 text-sm text-muted"
           >
-            No lyrics available
+            {{ t("No lyrics available") }}
           </div>
 
           <div
@@ -425,7 +426,7 @@ watch(activeLyricIndex, async (index) => {
           top: `${lyricsContextMenu.y}px`,
         }"
         data-lyrics-context-menu
-        aria-label="Lyrics actions"
+        :aria-label="t('Lyrics actions')"
         @keydown.esc.stop.prevent="closeLyricsContextMenu"
       >
         <li>
@@ -435,7 +436,7 @@ watch(activeLyricIndex, async (index) => {
             @click="openLyricsAppearanceSettings"
           >
               <Settings :size="16" aria-hidden="true" />
-            Lyrics appearance
+            {{ t("Lyrics appearance") }}
           </button>
         </li>
       </ul>

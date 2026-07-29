@@ -16,6 +16,7 @@ import {
 import { listPlugins } from "../lib/plugin-api";
 import { useQrLoginSession } from "../composables/source-workspace";
 import { normalizeError, queryError } from "../lib/errors";
+import { t } from "../i18n";
 import type {
   AudioSourceId,
   AudioSourceOption,
@@ -75,8 +76,8 @@ const activeAccount = computed(
 
 const queryErrorMessage = computed(() => {
   const errors = [
-    queryError("Plugin", pluginsQuery.isError.value, pluginsQuery.error.value),
-    queryError("Accounts", accountsQuery.isError.value, accountsQuery.error.value),
+    queryError(t("Plugin"), pluginsQuery.isError.value, pluginsQuery.error.value),
+    queryError(t("Accounts"), accountsQuery.isError.value, accountsQuery.error.value),
   ].filter((message): message is string => Boolean(message));
   return errors.join(" ");
 });
@@ -154,19 +155,19 @@ async function startQrLogin() {
 async function connectAccount(account: { accountRef: string; displayName: string }) {
   await accountsQuery.refetch();
   activeAccountRef.value = account.accountRef;
-  sourceNotice.value = `${account.displayName} connected.`;
+  sourceNotice.value = t("{name} connected.", { name: account.displayName });
 }
 
 async function disconnectAccount() {
   const account = activeAccount.value;
-  if (!account || !window.confirm(`Disconnect ${account.displayName}?`)) {
+  if (!account || !window.confirm(t("Disconnect {name}?", { name: account.displayName }))) {
     return;
   }
   manualError.value = null;
   try {
     await disconnectMutation.mutateAsync(account.accountRef);
     await accountsQuery.refetch();
-    sourceNotice.value = `${account.displayName} disconnected.`;
+    sourceNotice.value = t("{name} disconnected.", { name: account.displayName });
   } catch (error) {
     manualError.value = normalizeError(error);
     await refreshAccountStatuses();
@@ -200,29 +201,29 @@ async function refreshAccountStatuses() {
           <div class="flex flex-wrap items-center gap-2">
             <h2 class="text-base font-semibold">KuGou Music</h2>
             <span v-if="plugin" class="badge badge-sm" :class="isPluginReady ? 'badge-success' : 'badge-warning'">
-              {{ isPluginReady ? "Ready" : "Plugin disabled" }}
+              {{ isPluginReady ? t("Ready") : t("Plugin disabled") }}
             </span>
           </div>
           <p v-if="activeAccount" class="mt-0.5 truncate text-xs text-muted">
-            {{ activeAccount.displayName }} · {{ activeAccount.status }}
+            {{ activeAccount.displayName }} · {{ t(activeAccount.status) }}
           </p>
         </div>
       </div>
 
       <div class="flex flex-wrap items-center gap-2">
-        <span v-if="automaticSourceSelection" class="badge badge-sm" aria-label="Automatic Audio Source selection">
-          Auto
+        <span v-if="automaticSourceSelection" class="badge badge-sm" :aria-label="t('Automatic Audio Source selection')">
+          {{ t("Auto") }}
         </span>
         <select
           v-else
           :value="playbackSource"
           class="select select-sm w-32 max-w-full"
           :disabled="!audioSources.length"
-          aria-label="KuGou playback source"
-          title="Playback source"
+          :aria-label="t('KuGou playback source')"
+          :title="t('Playback source')"
           @change="selectPlaybackSource"
         >
-          <option v-if="!audioSources.length" value="">No audio source</option>
+          <option v-if="!audioSources.length" value="">{{ t("No audio source") }}</option>
           <option v-for="source in audioSources" :key="source.value" :value="source.value">
             {{ source.label }}
           </option>
@@ -231,23 +232,23 @@ async function refreshAccountStatuses() {
           v-if="accounts.length"
           v-model="activeAccountRef"
           class="select select-sm w-32 max-w-full sm:w-44"
-          aria-label="KuGou account"
+          :aria-label="t('KuGou account')"
         >
           <option v-for="account in accounts" :key="account.accountRef" :value="account.accountRef">
-            {{ account.displayName }}{{ account.status === "expired" ? " (expired)" : "" }}
+            {{ account.displayName }}{{ account.status === "expired" ? t(" (expired)") : "" }}
           </option>
         </select>
         <button class="btn btn-sm" type="button" :disabled="!isPluginReady || isConnecting" @click="startQrLogin">
           <RefreshCw v-if="isConnecting" class="animate-spin" :size="16" aria-hidden="true" />
           <QrCode v-else :size="16" aria-hidden="true" />
-          Connect
+          {{ t("Connect") }}
         </button>
         <button
           v-if="activeAccount"
           class="btn btn-square btn-ghost btn-sm"
           type="button"
-          aria-label="Disconnect KuGou account"
-          title="Disconnect account"
+          :aria-label="t('Disconnect KuGou account')"
+          :title="t('Disconnect account')"
           @click="disconnectAccount"
         >
           <LogOut :size="16" aria-hidden="true" />
@@ -258,7 +259,7 @@ async function refreshAccountStatuses() {
     <div v-if="sourceError" role="alert" class="alert alert-error m-4">
       <AlertCircle :size="18" aria-hidden="true" />
       <span class="min-w-0 flex-1">{{ sourceError }}</span>
-      <button class="btn btn-square btn-ghost btn-sm" type="button" aria-label="Dismiss KuGou error" @click="sourceError = null">
+      <button class="btn btn-square btn-ghost btn-sm" type="button" :aria-label="t('Dismiss KuGou error')" @click="sourceError = null">
         <X :size="16" aria-hidden="true" />
       </button>
     </div>
@@ -266,33 +267,33 @@ async function refreshAccountStatuses() {
     <div v-if="sourceNotice" role="status" class="alert alert-success alert-soft m-4">
       <CircleCheck :size="18" aria-hidden="true" />
       <span class="min-w-0 flex-1">{{ sourceNotice }}</span>
-      <button class="btn btn-square btn-ghost btn-sm" type="button" aria-label="Dismiss KuGou notice" @click="sourceNotice = null">
+      <button class="btn btn-square btn-ghost btn-sm" type="button" :aria-label="t('Dismiss KuGou notice')" @click="sourceNotice = null">
         <X :size="16" aria-hidden="true" />
       </button>
     </div>
 
     <div v-if="isPluginReady && !audioSources.length" role="status" class="alert alert-warning alert-soft m-4">
       <AlertCircle :size="18" aria-hidden="true" />
-      <span class="min-w-0 flex-1">No enabled audio source is available.</span>
-      <button class="btn btn-sm" type="button" @click="emit('openAudioSources')">Open Audio Sources</button>
+      <span class="min-w-0 flex-1">{{ t("No enabled audio source is available.") }}</span>
+      <button class="btn btn-sm" type="button" @click="emit('openAudioSources')">{{ t("Open Audio Sources") }}</button>
     </div>
 
     <div v-if="!isPluginReady" class="flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between">
       <div class="flex items-start gap-3">
         <Power class="mt-0.5 shrink-0 text-warning" :size="18" aria-hidden="true" />
         <div>
-          <div class="text-sm font-medium">Plugin is disabled</div>
-          <div class="mt-1 text-xs text-muted">Enable the bundled Plugin to use KuGou.</div>
+          <div class="text-sm font-medium">{{ t("Plugin is disabled") }}</div>
+          <div class="mt-1 text-xs text-muted">{{ t("Enable the bundled Plugin to use KuGou.") }}</div>
         </div>
       </div>
-      <button class="btn btn-sm" type="button" @click="emit('openPlugins')">Open Plugins</button>
+      <button class="btn btn-sm" type="button" @click="emit('openPlugins')">{{ t("Open Plugins") }}</button>
     </div>
 
     <div v-else-if="qrLogin" class="grid gap-5 p-5 sm:grid-cols-[16rem_minmax(0,1fr)] sm:items-center">
       <img
         class="aspect-square w-full max-w-64 border border-base-300 bg-white p-2"
         :src="qrLogin.qrImageDataUrl"
-        alt="KuGou login QR code"
+        :alt="t('KuGou login QR code')"
       />
       <div class="min-w-0">
         <div class="flex items-center gap-2 text-sm font-medium">
@@ -300,10 +301,10 @@ async function refreshAccountStatuses() {
           <Clock3 v-else :size="16" aria-hidden="true" />
           {{ qrStatus }}
         </div>
-        <p class="mt-2 text-sm text-muted">Scan with the KuGou Music mobile app.</p>
+        <p class="mt-2 text-sm text-muted">{{ t("Scan with the KuGou Music mobile app.") }}</p>
         <button class="btn btn-ghost btn-sm mt-4" type="button" @click="cancelQrLogin">
           <X :size="16" aria-hidden="true" />
-          Cancel
+          {{ t("Cancel") }}
         </button>
       </div>
     </div>
@@ -311,7 +312,7 @@ async function refreshAccountStatuses() {
     <div v-else-if="!activeAccountRef" class="grid min-h-52 place-items-center p-8 text-center">
       <div>
         <UserRound class="mx-auto text-base-content/35" :size="30" aria-hidden="true" />
-        <div class="mt-3 text-sm font-medium">No KuGou account connected</div>
+        <div class="mt-3 text-sm font-medium">{{ t("No KuGou account connected") }}</div>
       </div>
     </div>
   </section>

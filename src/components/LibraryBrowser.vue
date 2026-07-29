@@ -37,6 +37,7 @@ import {
   type LibraryColumnPreference,
 } from "../lib/library-preferences";
 import { normalizeError } from "../lib/errors";
+import { currentLocale, formatNumber, t } from "../i18n";
 import {
   useTrackListFollow,
   type TrackListScrollBehavior,
@@ -234,17 +235,29 @@ const scanPercent = computed(() => {
 });
 const resultSummary = computed(() => {
   const duration = formatLongDuration(totalDurationSeconds.value);
-  const groups = `${groupTotal.value.toLocaleString()} album${groupTotal.value === 1 ? "" : "s"}`;
+  const groups = t(groupTotal.value === 1 ? "{count} album" : "{count} albums", {
+    count: formatNumber(groupTotal.value),
+  });
   if (searchInput.value.trim()) {
-    return `${total.value.toLocaleString()} of ${libraryTotal.value.toLocaleString()} tracks in ${groups} · ${duration}`;
+    return t("{visible} of {total} tracks in {albums} · {duration}", {
+      visible: formatNumber(total.value),
+      total: formatNumber(libraryTotal.value),
+      albums: groups,
+      duration,
+    });
   }
-  return `${total.value.toLocaleString()} tracks in ${groups} · ${duration}`;
+  return t("{total} tracks in {albums} · {duration}", {
+    total: formatNumber(total.value),
+    albums: groups,
+    duration,
+  });
 });
 const activeSortLabel = computed(() => {
   if (sortField.value === "relevance") {
-    return "Relevance";
+    return t("Relevance");
   }
-  return columnDefinitions.find((column) => column.sortField === sortField.value)?.label ?? "Sort";
+  const label = columnDefinitions.find((column) => column.sortField === sortField.value)?.label;
+  return label ? t(label) : t("Sort");
 });
 const albumTaskPercent = computed(() => taskPercent(albumArtTask.value));
 const metadataTaskPercent = computed(() => taskPercent(metadataTask.value));
@@ -854,7 +867,9 @@ async function createPlaybackQueue(
       selection: selectionOverride ?? (useSelection ? selectionRequest() : null),
     });
     emit("playbackQueue", queue, autoplay);
-    showQueueStatus(`${queue.total.toLocaleString()} track${queue.total === 1 ? "" : "s"} queued`);
+    showQueueStatus(t(queue.total === 1 ? "{count} track queued" : "{count} tracks queued", {
+      count: formatNumber(queue.total),
+    }));
     closeMenus();
   } catch (error) {
     emit("error", normalizeError(error));
@@ -978,7 +993,7 @@ async function copyContextPath() {
   }
   try {
     await navigator.clipboard.writeText(track.filePath);
-    showQueueStatus("Path copied");
+    showQueueStatus(t("Path copied"));
     rowMenu.value = null;
   } catch (error) {
     emit("error", normalizeError(error));
@@ -1402,8 +1417,8 @@ async function chooseCoverCandidate(candidate: AlbumCoverCandidate) {
 function displayValue(track: LocalTrack, columnId: LibraryColumnId) {
   switch (columnId) {
     case "title": return track.title;
-    case "artist": return track.artist || "Unknown artist";
-    case "album": return track.album || "Unknown album";
+    case "artist": return track.artist || t("Unknown artist");
+    case "album": return track.album || t("Unknown album");
     case "albumArtist": return track.albumArtist || "";
     case "genre": return track.genre || "";
     case "year": return track.year?.toString() ?? "";
@@ -1418,7 +1433,7 @@ function displayValue(track: LocalTrack, columnId: LibraryColumnId) {
     case "fileSizeBytes": return formatFileSize(track.fileSizeBytes);
     case "modifiedAt": return formatTimestamp(track.modifiedAt);
     case "indexedAt": return formatTimestamp(track.indexedAt);
-    case "playCount": return track.playCount.toLocaleString();
+    case "playCount": return formatNumber(track.playCount);
     default: return "";
   }
 }
@@ -1438,10 +1453,12 @@ function formatDuration(seconds: number | null) {
 }
 
 function formatLongDuration(seconds: number) {
-  if (seconds <= 0) return "0 min";
+  if (seconds <= 0) return t("{count} min", { count: 0 });
   const hours = Math.floor(seconds / 3_600);
   const minutes = Math.round((seconds % 3_600) / 60);
-  return hours ? `${hours} hr ${minutes} min` : `${minutes} min`;
+  return hours
+    ? t("{hours} hr {minutes} min", { hours, minutes })
+    : t("{count} min", { count: minutes });
 }
 
 function formatFileSize(bytes: number) {
@@ -1456,7 +1473,7 @@ function formatSampleRate(hz: number) {
 
 function formatTimestamp(timestamp: number | null) {
   if (!timestamp) return "";
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(currentLocale.value, {
     year: "numeric",
     month: "short",
     day: "numeric",
@@ -1544,10 +1561,10 @@ defineExpose({
 <template>
   <section
     class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded border border-base-300 bg-base-100"
-    aria-label="Music library"
+    :aria-label="t('Music library')"
   >
     <div class="flex shrink-0 items-center gap-2 border-b border-base-300 p-2">
-      <label class="input input-sm min-w-0 flex-1" aria-label="Search local library">
+      <label class="input input-sm min-w-0 flex-1" :aria-label="t('Search local library')">
         <Search :size="15" aria-hidden="true" />
         <input
           ref="searchViewport"
@@ -1557,14 +1574,14 @@ defineExpose({
           role="searchbox"
           autocomplete="off"
           spellcheck="false"
-          placeholder="Search title, artist, album"
+          :placeholder="t('Search title, artist, album')"
         />
         <button
           v-if="searchInput"
           class="btn btn-square btn-ghost btn-sm"
           type="button"
-          aria-label="Clear library search"
-          title="Clear search"
+          :aria-label="t('Clear library search')"
+          :title="t('Clear search')"
           @click="clearSearch"
         >
           <X :size="16" aria-hidden="true" />
@@ -1572,12 +1589,12 @@ defineExpose({
       </label>
 
       <details ref="searchScopeMenu" class="dropdown dropdown-end" data-menu-surface>
-        <summary class="btn btn-sm" title="Search fields">
+        <summary class="btn btn-sm" :title="t('Search fields')">
         <SlidersHorizontal :size="16" aria-hidden="true" />
-          <span class="hidden xl:inline">{{ searchFields.length }} fields</span>
+          <span class="hidden xl:inline">{{ t("{count} fields", { count: searchFields.length }) }}</span>
         </summary>
         <ul class="menu dropdown-content z-50 mt-1 w-56 border border-base-300 bg-base-100 p-2 shadow-lg">
-          <li class="menu-title">Search fields</li>
+          <li class="menu-title">{{ t("Search fields") }}</li>
           <li v-for="field in searchFieldOptions" :key="field.id">
             <label class="flex cursor-pointer items-center gap-3">
               <input
@@ -1587,7 +1604,7 @@ defineExpose({
                 :disabled="searchFields.includes(field.id) && searchFields.length === 1"
                 @change="toggleSearchField(field.id)"
               />
-              <span>{{ field.label }}</span>
+              <span>{{ t(field.label) }}</span>
             </label>
           </li>
         </ul>
@@ -1597,19 +1614,19 @@ defineExpose({
         v-if="searchInput.trim() && sortField !== 'relevance'"
         class="btn btn-sm"
         type="button"
-        title="Sort by relevance"
+        :title="t('Sort by relevance')"
         @click="restoreRelevanceSort"
       >
         <ListFilter :size="16" aria-hidden="true" />
-        <span class="hidden 2xl:inline">Relevance</span>
+        <span class="hidden 2xl:inline">{{ t("Relevance") }}</span>
       </button>
 
-      <div class="tooltip tooltip-left" data-tip="Complete missing album covers">
+      <div class="tooltip tooltip-left" :data-tip="t('Complete missing album covers')">
         <button
           class="btn btn-square btn-ghost btn-sm"
           type="button"
           :disabled="albumArtTask?.state === 'running'"
-          aria-label="Complete missing album covers"
+          :aria-label="t('Complete missing album covers')"
           @click="requestAlbumBackfill"
         >
           <Download :size="16" aria-hidden="true" />
@@ -1625,12 +1642,12 @@ defineExpose({
     >
       <div class="flex items-center gap-3 text-xs">
         <RefreshCw class="shrink-0 animate-spin" :size="14" aria-hidden="true" />
-        <span class="min-w-0 flex-1 truncate">{{ scanMessage || "Indexing local tracks" }}</span>
+        <span class="min-w-0 flex-1 truncate">{{ scanMessage || t("Indexing local tracks") }}</span>
         <span class="shrink-0 tabular-nums">
-          {{ scanStatus.scannedFiles.toLocaleString() }} / {{ scanStatus.discoveredFiles.toLocaleString() }}
+          {{ formatNumber(scanStatus.scannedFiles) }} / {{ formatNumber(scanStatus.discoveredFiles) }}
         </span>
         <span v-if="scanStatus.errorCount" class="shrink-0 text-warning">
-          {{ scanStatus.errorCount }} errors
+          {{ t(scanStatus.errorCount === 1 ? "{count} error" : "{count} errors", { count: scanStatus.errorCount }) }}
         </span>
       </div>
       <progress class="progress mt-1.5 h-1" :value="scanPercent" max="100"></progress>
@@ -1645,13 +1662,13 @@ defineExpose({
         <LoaderCircle v-if="albumArtTask.state === 'running'" class="animate-spin" :size="14" aria-hidden="true" />
         <Download v-else :size="14" aria-hidden="true" />
         <span class="min-w-0 flex-1 truncate">
-          {{ albumArtTask.currentAlbum || (albumArtTask.state === 'paused' ? 'Album cover completion paused' : 'Completing album covers') }}
+          {{ albumArtTask.currentAlbum || (albumArtTask.state === 'paused' ? t('Album cover completion paused') : t('Completing album covers')) }}
         </span>
         <span class="shrink-0 tabular-nums">{{ albumArtTask.processed }} / {{ albumArtTask.total }}</span>
         <button
           class="btn btn-square btn-ghost btn-sm"
           type="button"
-          :aria-label="albumArtTask.state === 'running' ? 'Pause album cover completion' : 'Resume album cover completion'"
+          :aria-label="albumArtTask.state === 'running' ? t('Pause album cover completion') : t('Resume album cover completion')"
           @click="albumArtTask.state === 'running' ? pauseAlbumBackfill() : resumeAlbumBackfill()"
         >
           <Pause v-if="albumArtTask.state === 'running'" :size="16" aria-hidden="true" />
@@ -1670,13 +1687,13 @@ defineExpose({
         <LoaderCircle v-if="metadataTask.state === 'running'" class="animate-spin" :size="14" aria-hidden="true" />
         <Tags v-else :size="14" aria-hidden="true" />
         <span class="min-w-0 flex-1 truncate">
-          {{ metadataTask.currentTrack || (metadataTask.state === 'paused' ? 'Metadata lookup paused' : 'Looking up metadata') }}
+          {{ metadataTask.currentTrack || (metadataTask.state === 'paused' ? t('Metadata lookup paused') : t('Looking up metadata')) }}
         </span>
         <span class="shrink-0 tabular-nums">{{ metadataTask.processed }} / {{ metadataTask.total }}</span>
         <button
           class="btn btn-square btn-ghost btn-sm"
           type="button"
-          :aria-label="metadataTask.state === 'running' ? 'Pause metadata lookup' : 'Resume metadata lookup'"
+          :aria-label="metadataTask.state === 'running' ? t('Pause metadata lookup') : t('Resume metadata lookup')"
           @click="metadataTask.state === 'running' ? pauseMetadataLookup() : resumeMetadataLookup()"
         >
           <Pause v-if="metadataTask.state === 'running'" :size="16" aria-hidden="true" />
@@ -1691,7 +1708,7 @@ defineExpose({
         <Search v-if="searchInput.trim()" class="mx-auto text-base-content/35" :size="34" aria-hidden="true" />
         <ListMusic v-else class="mx-auto text-base-content/35" :size="34" aria-hidden="true" />
         <h2 class="mt-3 text-sm font-semibold">
-          {{ searchInput.trim() ? "No matching tracks" : "No local tracks indexed" }}
+          {{ searchInput.trim() ? t("No matching tracks") : t("No local tracks indexed") }}
         </h2>
       </div>
     </div>
@@ -1701,7 +1718,7 @@ defineExpose({
       ref="scrollViewport"
       class="relative min-h-0 flex-1 overflow-auto outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-base-content/25"
       role="table"
-      aria-label="Library tracks"
+      :aria-label="t('Library tracks')"
       :aria-rowcount="virtualTotal"
       :aria-colcount="visibleColumns.length"
       :aria-activedescendant="focusedVirtualIndex !== null ? `library-row-${focusedVirtualIndex}` : undefined"
@@ -1721,7 +1738,7 @@ defineExpose({
           class="group relative flex min-w-0 items-center border-r border-base-300 last:border-r-0"
           :class="column.definition.numeric ? 'justify-end' : ''"
           role="columnheader"
-          :aria-label="column.id === 'playing' ? 'Playback status' : column.definition.label"
+          :aria-label="column.id === 'playing' ? t('Playback status') : t(column.definition.label)"
           :aria-sort="sortAria(column.definition)"
           :draggable="!resizing"
           @dragstart="beginColumnDrag($event, column.id)"
@@ -1740,7 +1757,7 @@ defineExpose({
             @click="clickSort(column.definition)"
           >
             <Volume2 v-if="column.id === 'playing'" :size="13" aria-hidden="true" />
-            <span v-else class="truncate">{{ column.definition.label }}</span>
+            <span v-else class="truncate">{{ t(column.definition.label) }}</span>
             <ChevronUp
               v-if="sortField === column.definition.sortField && sortDirection === 'ascending'"
               class="shrink-0"
@@ -1757,7 +1774,7 @@ defineExpose({
           <button
             class="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize opacity-0 group-hover:opacity-100"
             type="button"
-            :aria-label="`Resize ${column.definition.label || 'playback status'} column`"
+            :aria-label="t('Resize {column} column', { column: t(column.definition.label || 'playback status') })"
             @pointerdown="beginResize($event, column)"
             @dblclick.stop="autoFitColumn(column.id)"
           >
@@ -1797,7 +1814,7 @@ defineExpose({
             <button
               class="grid w-7 shrink-0 place-items-center"
               type="button"
-              :aria-label="collapsedGroupIds.has(row.item.group.id) ? 'Expand album' : 'Collapse album'"
+              :aria-label="collapsedGroupIds.has(row.item.group.id) ? t('Expand album') : t('Collapse album')"
               @click.stop="toggleGroup(row.item.group)"
             >
               <ChevronRight
@@ -1816,19 +1833,19 @@ defineExpose({
                 v-if="coverFor(row.item.group.id)?.dataUrl"
                 class="size-full object-cover"
                 :src="coverFor(row.item.group.id)!.dataUrl!"
-                :alt="`${row.item.group.title || 'Ungrouped tracks'} cover`"
+                :alt="t('{title} cover', { title: row.item.group.title || t('Ungrouped tracks') })"
               />
               <div
                 v-else-if="!row.item.group.isUngrouped && !coverFor(row.item.group.id)"
                 class="skeleton size-full rounded-none"
-                aria-label="Loading album cover"
+                :aria-label="t('Loading album cover')"
               ></div>
               <Disc3 v-else :size="Math.max(20, albumCoverSize * 0.48)" :stroke-width="1.25" aria-hidden="true" />
             </div>
             <div class="flex min-w-0 flex-1 flex-col justify-center px-3">
               <div class="flex min-w-0 items-center gap-2">
-                <span class="truncate text-sm font-semibold" :title="row.item.group.title || 'Ungrouped tracks'">
-                  {{ row.item.group.title || "Ungrouped tracks" }}
+                <span class="truncate text-sm font-semibold" :title="row.item.group.title || t('Ungrouped tracks')">
+                  {{ row.item.group.title || t("Ungrouped tracks") }}
                 </span>
                 <span
                   v-if="row.item.group.year"
@@ -1840,23 +1857,23 @@ defineExpose({
                 <span
                   v-if="coverFor(row.item.group.id)?.status === 'failed' && !coverFor(row.item.group.id)?.failedTracks"
                   class="shrink-0 text-error"
-                  :title="coverFor(row.item.group.id)?.message || 'Album cover lookup failed'"
+                  :title="coverFor(row.item.group.id)?.message || t('Album cover lookup failed')"
                 >
-                  Cover failed
+                  {{ t("Cover failed") }}
                 </span>
                 <span
                   v-else-if="coverFor(row.item.group.id)?.failedTracks"
                   class="shrink-0 text-warning"
-                  :title="coverFor(row.item.group.id)?.message || 'Some album files could not be updated'"
+                  :title="coverFor(row.item.group.id)?.message || t('Some album files could not be updated')"
                 >
-                  {{ coverFor(row.item.group.id)!.failedTracks }} failed
+                  {{ t("{count} failed", { count: coverFor(row.item.group.id)!.failedTracks }) }}
                 </span>
                 <button
                   v-if="coverFor(row.item.group.id)?.status === 'needsReview'"
                   class="btn btn-square btn-ghost btn-sm shrink-0"
                   type="button"
-                  aria-label="Review album cover matches"
-                  title="Review cover matches"
+                  :aria-label="t('Review album cover matches')"
+                  :title="t('Review cover matches')"
                   @click.stop="reviewGroupCover(row.item.group)"
                 >
                   <Info :size="16" aria-hidden="true" />
@@ -1866,12 +1883,12 @@ defineExpose({
                 class="mt-0.5 flex min-w-0 items-center gap-2"
                 :class="isGroupSelected(row.item.group) ? 'text-neutral-content' : 'text-muted'"
               >
-                <span class="truncate">{{ row.item.group.albumArtist || (row.item.group.isUngrouped ? 'Missing album metadata' : 'Unknown artist') }}</span>
+                <span class="truncate">{{ row.item.group.albumArtist || (row.item.group.isUngrouped ? t('Missing album metadata') : t('Unknown artist')) }}</span>
                 <span class="shrink-0">·</span>
                 <span class="shrink-0 tabular-nums">
                   {{ row.item.group.matchedTracks === row.item.group.totalTracks
-                    ? `${row.item.group.totalTracks} tracks`
-                    : `${row.item.group.matchedTracks} / ${row.item.group.totalTracks} matched` }}
+                    ? t("{count} tracks", { count: row.item.group.totalTracks })
+                    : t("{matched} / {total} matched", { matched: row.item.group.matchedTracks, total: row.item.group.totalTracks }) }}
                 </span>
                 <span class="hidden shrink-0 sm:inline">· {{ formatLongDuration(row.item.group.totalDurationSeconds) }}</span>
               </div>
@@ -1936,13 +1953,13 @@ defineExpose({
                   v-if="activeTrackId === row.item.track.id && isPlaying"
                   :class="isTrackSelected(row.item.trackIndex) && !isTrackIncludedBySelectedAlbum(row.item.trackIndex) ? 'text-neutral-content' : 'text-primary'"
                   :size="13"
-                  aria-label="Playing"
+                  :aria-label="t('Playing')"
                 />
                 <Pause
                   v-else-if="activeTrackId === row.item.track.id"
                   :class="isTrackSelected(row.item.trackIndex) && !isTrackIncludedBySelectedAlbum(row.item.trackIndex) ? 'text-neutral-content' : 'text-primary'"
                   :size="13"
-                  aria-label="Paused"
+                  :aria-label="t('Paused')"
                 />
               </template>
               <span v-else class="truncate">{{ displayValue(row.item.track, column.id) }}</span>
@@ -1959,7 +1976,7 @@ defineExpose({
             }"
             role="row"
           >
-            Loading
+            {{ t("Loading") }}
           </div>
         </template>
       </div>
@@ -1967,7 +1984,7 @@ defineExpose({
 
     <div class="flex h-7 shrink-0 items-center gap-3 border-t border-base-300 bg-base-200 px-3 text-xs">
       <span class="min-w-0 flex-1 truncate">{{ queueStatus || resultSummary }}</span>
-      <span v-if="selectionCount" class="shrink-0 tabular-nums">{{ selectionCount.toLocaleString() }} selected</span>
+      <span v-if="selectionCount" class="shrink-0 tabular-nums">{{ t("{count} selected", { count: formatNumber(selectionCount) }) }}</span>
       <span v-if="searchInput.trim()" class="hidden shrink-0 text-muted xl:inline">{{ activeSortLabel }}</span>
     </div>
   </section>
@@ -1977,17 +1994,17 @@ defineExpose({
     class="menu fixed z-50 w-60 border border-base-300 bg-base-100 p-2 shadow-xl"
     :style="{ left: `${rowMenu.x}px`, top: `${rowMenu.y}px` }"
     data-menu-surface
-    aria-label="Track actions"
+    :aria-label="t('Track actions')"
   >
-      <li><button type="button" :disabled="isCreatingQueue" @click="createPlaybackQueue(rowMenu.trackIndex, true, true)"><Play :size="16" aria-hidden="true" />Play selection</button></li>
-      <li><button type="button" :disabled="isCreatingQueue" @click="createPlaybackQueue(rowMenu.trackIndex, false, true)"><ListMusic :size="16" aria-hidden="true" />Set playback queue</button></li>
-      <li><button type="button" @click="requestCollectionAction(false)"><ListPlus :size="16" aria-hidden="true" />Add selection to Collection</button></li>
-      <li><button type="button" @click="requestCollectionAction(true)"><FolderPlus :size="16" aria-hidden="true" />New Collection from selection</button></li>
-      <li><button type="button" :disabled="metadataTask?.state === 'running' || metadataTask?.state === 'paused'" @click="requestMetadataLookup"><Tags :size="16" aria-hidden="true" />Look up metadata</button></li>
+      <li><button type="button" :disabled="isCreatingQueue" @click="createPlaybackQueue(rowMenu.trackIndex, true, true)"><Play :size="16" aria-hidden="true" />{{ t("Play selection") }}</button></li>
+      <li><button type="button" :disabled="isCreatingQueue" @click="createPlaybackQueue(rowMenu.trackIndex, false, true)"><ListMusic :size="16" aria-hidden="true" />{{ t("Set playback queue") }}</button></li>
+      <li><button type="button" @click="requestCollectionAction(false)"><ListPlus :size="16" aria-hidden="true" />{{ t("Add selection to Collection") }}</button></li>
+      <li><button type="button" @click="requestCollectionAction(true)"><FolderPlus :size="16" aria-hidden="true" />{{ t("New Collection from selection") }}</button></li>
+      <li><button type="button" :disabled="metadataTask?.state === 'running' || metadataTask?.state === 'paused'" @click="requestMetadataLookup"><Tags :size="16" aria-hidden="true" />{{ t("Look up metadata") }}</button></li>
     <li class="my-1 h-px bg-base-300"></li>
-      <li><button type="button" @click="revealContextTrack"><FolderSearch :size="16" aria-hidden="true" />Show in file manager</button></li>
-      <li><button type="button" @click="copyContextPath"><Clipboard :size="16" aria-hidden="true" />Copy file path</button></li>
-      <li><button type="button" @click="showProperties"><Info :size="16" aria-hidden="true" />Properties</button></li>
+      <li><button type="button" @click="revealContextTrack"><FolderSearch :size="16" aria-hidden="true" />{{ t("Show in file manager") }}</button></li>
+      <li><button type="button" @click="copyContextPath"><Clipboard :size="16" aria-hidden="true" />{{ t("Copy file path") }}</button></li>
+      <li><button type="button" @click="showProperties"><Info :size="16" aria-hidden="true" />{{ t("Properties") }}</button></li>
   </ul>
 
   <ul
@@ -1995,16 +2012,16 @@ defineExpose({
     class="menu fixed z-50 w-64 border border-base-300 bg-base-100 p-2 shadow-xl"
     :style="{ left: `${groupMenu.x}px`, top: `${groupMenu.y}px` }"
     data-menu-surface
-    aria-label="Album actions"
+    :aria-label="t('Album actions')"
   >
-      <li><button type="button" :disabled="isCreatingQueue" @click="playGroup(groupMenu.group, true)"><Play :size="16" aria-hidden="true" />Play album group</button></li>
-      <li><button type="button" :disabled="isCreatingQueue" @click="playGroup(groupMenu.group, false)"><ListMusic :size="16" aria-hidden="true" />Set group as queue</button></li>
-      <li><button type="button" @click="requestCollectionAction(false)"><ListPlus :size="16" aria-hidden="true" />Add selection to Collection</button></li>
-      <li><button type="button" @click="requestCollectionAction(true)"><FolderPlus :size="16" aria-hidden="true" />New Collection from selection</button></li>
-      <li><button type="button" :disabled="metadataTask?.state === 'running' || metadataTask?.state === 'paused'" @click="requestMetadataLookup"><Tags :size="16" aria-hidden="true" />Look up metadata</button></li>
-      <li v-if="coverFor(groupMenu.group.id)?.status === 'needsReview'"><button type="button" @click="reviewGroupCover(groupMenu.group)"><Info :size="16" aria-hidden="true" />Review cover matches</button></li>
+      <li><button type="button" :disabled="isCreatingQueue" @click="playGroup(groupMenu.group, true)"><Play :size="16" aria-hidden="true" />{{ t("Play album group") }}</button></li>
+      <li><button type="button" :disabled="isCreatingQueue" @click="playGroup(groupMenu.group, false)"><ListMusic :size="16" aria-hidden="true" />{{ t("Set group as queue") }}</button></li>
+      <li><button type="button" @click="requestCollectionAction(false)"><ListPlus :size="16" aria-hidden="true" />{{ t("Add selection to Collection") }}</button></li>
+      <li><button type="button" @click="requestCollectionAction(true)"><FolderPlus :size="16" aria-hidden="true" />{{ t("New Collection from selection") }}</button></li>
+      <li><button type="button" :disabled="metadataTask?.state === 'running' || metadataTask?.state === 'paused'" @click="requestMetadataLookup"><Tags :size="16" aria-hidden="true" />{{ t("Look up metadata") }}</button></li>
+      <li v-if="coverFor(groupMenu.group.id)?.status === 'needsReview'"><button type="button" @click="reviewGroupCover(groupMenu.group)"><Info :size="16" aria-hidden="true" />{{ t("Review cover matches") }}</button></li>
     <li class="my-1 h-px bg-base-300"></li>
-      <li><button type="button" @click="toggleGroup(groupMenu.group)"><ChevronRight :class="{ 'rotate-90': !collapsedGroupIds.has(groupMenu.group.id) }" :size="16" aria-hidden="true" />{{ collapsedGroupIds.has(groupMenu.group.id) ? "Expand album" : "Collapse album" }}</button></li>
+      <li><button type="button" @click="toggleGroup(groupMenu.group)"><ChevronRight :class="{ 'rotate-90': !collapsedGroupIds.has(groupMenu.group.id) }" :size="16" aria-hidden="true" />{{ collapsedGroupIds.has(groupMenu.group.id) ? t("Expand album") : t("Collapse album") }}</button></li>
   </ul>
 
   <div
@@ -2012,48 +2029,48 @@ defineExpose({
     class="fixed z-50 max-h-[70vh] w-64 overflow-y-auto border border-base-300 bg-base-100 shadow-xl"
     :style="{ left: `${columnMenu.x}px`, top: `${columnMenu.y}px` }"
     data-menu-surface
-    aria-label="Library columns"
+    :aria-label="t('Library columns')"
   >
-    <div class="flex h-9 items-center border-b border-base-300 px-3 text-xs font-semibold">Columns</div>
+    <div class="flex h-9 items-center border-b border-base-300 px-3 text-xs font-semibold">{{ t("Columns") }}</div>
     <ul class="menu menu-sm p-2">
       <li v-for="column in columns" :key="column.id">
         <button type="button" @click="toggleColumn(column.id)">
           <span class="grid size-4 place-items-center"><Check v-if="column.visible" :size="16" aria-hidden="true" /></span>
-          {{ columnDefinitions.find((definition) => definition.id === column.id)?.label || "Playback status" }}
+          {{ t(columnDefinitions.find((definition) => definition.id === column.id)?.label || "Playback status") }}
         </button>
       </li>
       <li class="my-1 h-px bg-base-300"></li>
-      <li><button type="button" @click="resetColumns"><RotateCcw :size="16" aria-hidden="true" />Reset columns</button></li>
+      <li><button type="button" @click="resetColumns"><RotateCcw :size="16" aria-hidden="true" />{{ t("Reset columns") }}</button></li>
     </ul>
   </div>
 
-  <div v-if="networkPermissionOpen" class="modal modal-open" role="dialog" aria-modal="true" aria-label="Online metadata permission">
+  <div v-if="networkPermissionOpen" class="modal modal-open" role="dialog" aria-modal="true" :aria-label="t('Online metadata permission')">
     <div class="modal-box max-w-lg rounded">
-      <h2 class="text-base font-semibold">Enable online metadata completion</h2>
+      <h2 class="text-base font-semibold">{{ t("Enable online metadata completion") }}</h2>
       <p class="mt-3 text-sm leading-6 text-muted">
-        Fika Music will send album and track metadata to MusicBrainz, download Front artwork from Cover Art Archive, and write verified matches into empty audio tags. Album covers are embedded in every song in the matched album. Requests are rate-limited and ambiguous album matches require review.
+        {{ t("Fika Music will send album and track metadata to MusicBrainz, download Front artwork from Cover Art Archive, and write verified matches into empty audio tags. Album covers are embedded in every song in the matched album. Requests are rate-limited and ambiguous album matches require review.") }}
       </p>
       <p class="mt-3 text-xs leading-5 text-muted">
-        Cover Art Archive images remain copyrighted by their respective owners. This permission is stored for this application and can be declined now.
+        {{ t("Cover Art Archive images remain copyrighted by their respective owners. This permission is stored for this application and can be declined now.") }}
       </p>
       <div class="modal-action">
-        <button class="btn" type="button" @click="dismissOnlineMetadata">Not now</button>
-        <button class="btn btn-neutral" type="button" @click="authorizeOnlineMetadata">Enable</button>
+        <button class="btn" type="button" @click="dismissOnlineMetadata">{{ t("Not now") }}</button>
+        <button class="btn btn-neutral" type="button" @click="authorizeOnlineMetadata">{{ t("Enable") }}</button>
       </div>
     </div>
-    <button class="modal-backdrop" type="button" aria-label="Decline online metadata" @click="dismissOnlineMetadata"></button>
+    <button class="modal-backdrop" type="button" :aria-label="t('Decline online metadata')" @click="dismissOnlineMetadata"></button>
   </div>
 
-  <div v-if="coverReview" class="modal modal-open" role="dialog" aria-modal="true" aria-label="Choose album cover match">
+  <div v-if="coverReview" class="modal modal-open" role="dialog" aria-modal="true" :aria-label="t('Choose album cover match')">
     <div class="modal-box max-w-xl rounded">
       <div class="flex items-start gap-3">
         <div class="min-w-0 flex-1">
           <h2 class="truncate text-base font-semibold">{{ coverReview.group.title }}</h2>
           <p class="mt-1 text-sm text-muted">
-            {{ coverReview.message || "Choose the matching MusicBrainz release group." }}
+            {{ coverReview.message || t("Choose the matching MusicBrainz release group.") }}
           </p>
         </div>
-        <button class="btn btn-square btn-ghost btn-sm" type="button" aria-label="Close cover matches" @click="coverReview = null"><X :size="16" aria-hidden="true" /></button>
+        <button class="btn btn-square btn-ghost btn-sm" type="button" :aria-label="t('Close cover matches')" @click="coverReview = null"><X :size="16" aria-hidden="true" /></button>
       </div>
       <ul class="menu mt-4 max-h-80 overflow-y-auto border border-base-300 p-2">
         <li v-for="candidate in coverReview.candidates" :key="candidate.releaseGroupId">
@@ -2067,45 +2084,45 @@ defineExpose({
         </li>
       </ul>
     </div>
-    <button class="modal-backdrop" type="button" aria-label="Close cover matches" @click="coverReview = null"></button>
+    <button class="modal-backdrop" type="button" :aria-label="t('Close cover matches')" @click="coverReview = null"></button>
   </div>
 
-  <div v-if="metadataConfirmOpen" class="modal modal-open" role="dialog" aria-modal="true" aria-label="Confirm metadata lookup">
+  <div v-if="metadataConfirmOpen" class="modal modal-open" role="dialog" aria-modal="true" :aria-label="t('Confirm metadata lookup')">
     <div class="modal-box max-w-md rounded">
-      <h2 class="text-base font-semibold">Look up metadata for {{ selectionCount.toLocaleString() }} tracks?</h2>
+      <h2 class="text-base font-semibold">{{ t("Look up metadata for {count} tracks?", { count: formatNumber(selectionCount) }) }}</h2>
       <p class="mt-3 text-sm leading-6 text-muted">
-        MusicBrainz highest-confidence matches will fill empty tags only. Existing tag values are preserved. Completed writes cannot be undone by Fika Music.
+        {{ t("MusicBrainz highest-confidence matches will fill empty tags only. Existing tag values are preserved. Completed writes cannot be undone by Fika Music.") }}
       </p>
       <div class="modal-action">
-        <button class="btn" type="button" @click="metadataConfirmOpen = false">Cancel</button>
-        <button class="btn btn-neutral" type="button" @click="startMetadataLookup">Start</button>
+        <button class="btn" type="button" @click="metadataConfirmOpen = false">{{ t("Cancel") }}</button>
+        <button class="btn btn-neutral" type="button" @click="startMetadataLookup">{{ t("Start") }}</button>
       </div>
     </div>
-    <button class="modal-backdrop" type="button" aria-label="Cancel metadata lookup" @click="metadataConfirmOpen = false"></button>
+    <button class="modal-backdrop" type="button" :aria-label="t('Cancel metadata lookup')" @click="metadataConfirmOpen = false"></button>
   </div>
 
-  <div v-if="propertiesTrack" class="modal modal-open" role="dialog" aria-modal="true" aria-label="Track properties">
+  <div v-if="propertiesTrack" class="modal modal-open" role="dialog" aria-modal="true" :aria-label="t('Track properties')">
     <div class="modal-box max-w-2xl rounded">
       <div class="flex items-start gap-3">
         <div class="min-w-0 flex-1">
           <h2 class="truncate text-base font-semibold" :title="propertiesTrack.title">{{ propertiesTrack.title }}</h2>
           <p class="mt-0.5 truncate text-xs text-muted" :title="propertiesTrack.filePath">{{ propertiesTrack.filePath }}</p>
         </div>
-        <button class="btn btn-square btn-ghost btn-sm" type="button" aria-label="Close properties" title="Close" @click="propertiesTrack = null"><X :size="16" aria-hidden="true" /></button>
+        <button class="btn btn-square btn-ghost btn-sm" type="button" :aria-label="t('Close properties')" :title="t('Close')" @click="propertiesTrack = null"><X :size="16" aria-hidden="true" /></button>
       </div>
       <dl class="mt-5 grid grid-cols-[8rem_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
         <template
           v-for="entry in [
-            ['Artist', propertiesTrack.artist || 'Unknown artist'],
-            ['Album', propertiesTrack.album || 'Unknown album'],
-            ['Album artist', propertiesTrack.albumArtist || ''],
-            ['Genre', propertiesTrack.genre || ''],
-            ['Year', propertiesTrack.year?.toString() || ''],
-            ['Track / disc', `${propertiesTrack.trackNumber ?? '-'} / ${propertiesTrack.discNumber ?? '-'}`],
-            ['Duration', formatDuration(propertiesTrack.durationSeconds)],
-            ['Format', [propertiesTrack.codec, propertiesTrack.bitrateKbps ? `${propertiesTrack.bitrateKbps} kbps` : '', propertiesTrack.sampleRateHz ? formatSampleRate(propertiesTrack.sampleRateHz) : ''].filter(Boolean).join(' · ')],
-            ['File size', formatFileSize(propertiesTrack.fileSizeBytes)],
-            ['Play count', propertiesTrack.playCount.toLocaleString()],
+            [t('Artist'), propertiesTrack.artist || t('Unknown artist')],
+            [t('Album'), propertiesTrack.album || t('Unknown album')],
+            [t('Album artist'), propertiesTrack.albumArtist || ''],
+            [t('Genre'), propertiesTrack.genre || ''],
+            [t('Year'), propertiesTrack.year?.toString() || ''],
+            [t('Track / disc'), `${propertiesTrack.trackNumber ?? '-'} / ${propertiesTrack.discNumber ?? '-'}`],
+            [t('Duration'), formatDuration(propertiesTrack.durationSeconds)],
+            [t('Format'), [propertiesTrack.codec, propertiesTrack.bitrateKbps ? `${propertiesTrack.bitrateKbps} kbps` : '', propertiesTrack.sampleRateHz ? formatSampleRate(propertiesTrack.sampleRateHz) : ''].filter(Boolean).join(' · ')],
+            [t('File size'), formatFileSize(propertiesTrack.fileSizeBytes)],
+            [t('Play count'), formatNumber(propertiesTrack.playCount)],
           ]"
           :key="entry[0]"
         >
@@ -2114,6 +2131,6 @@ defineExpose({
         </template>
       </dl>
     </div>
-    <button class="modal-backdrop" type="button" aria-label="Close properties" @click="propertiesTrack = null"></button>
+    <button class="modal-backdrop" type="button" :aria-label="t('Close properties')" @click="propertiesTrack = null"></button>
   </div>
 </template>

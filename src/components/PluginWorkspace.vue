@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import { AudioLines, Plug, Settings } from "@lucide/vue";
 import type { PluginRecord } from "../lib/plugin-api";
+import { t } from "../i18n";
 
 const props = defineProps<{
   plugin: PluginRecord;
@@ -27,7 +28,7 @@ function actionLabel(action: string) {
     playlistAddTrack: "Add to playlists",
     playlistRemoveTrack: "Remove from playlists",
   };
-  return labels[action] ?? action;
+  return labels[action] ? t(labels[action]) : action;
 }
 </script>
 
@@ -48,7 +49,7 @@ function actionLabel(action: string) {
         <div class="min-w-0">
           <div class="flex flex-wrap items-center gap-2">
             <h2 class="truncate text-base font-semibold">{{ plugin.name }}</h2>
-            <span class="badge badge-success badge-sm">Enabled</span>
+            <span class="badge badge-success badge-sm">{{ t("Enabled") }}</span>
             <span v-if="plugin.version" class="badge badge-outline badge-sm">
               v{{ plugin.version }}
             </span>
@@ -61,7 +62,7 @@ function actionLabel(action: string) {
 
       <button class="btn btn-sm shrink-0" type="button" @click="emit('openPlugins')">
         <Settings :size="16" aria-hidden="true" />
-        Manage plugin
+        {{ t("Manage plugin") }}
       </button>
     </header>
 
@@ -70,10 +71,10 @@ function actionLabel(action: string) {
     </p>
 
     <div class="flex items-center justify-between gap-3 border-b border-base-300 px-4 py-3">
-      <h3 class="text-sm font-semibold">Source providers</h3>
+      <h3 class="text-sm font-semibold">{{ t("Source providers") }}</h3>
       <span class="text-xs text-muted">
-        {{ plugin.providers.length }} provider{{ plugin.providers.length === 1 ? "" : "s" }} ·
-        {{ sourceCount }} source{{ sourceCount === 1 ? "" : "s" }}
+        {{ t(plugin.providers.length === 1 ? "{count} provider" : "{count} providers", { count: plugin.providers.length }) }} ·
+        {{ t(sourceCount === 1 ? "{count} source" : "{count} sources", { count: sourceCount }) }}
       </span>
     </div>
 
@@ -90,7 +91,7 @@ function actionLabel(action: string) {
               class="badge badge-sm"
               :class="provider.initialized ? 'badge-success' : 'badge-warning'"
             >
-              {{ provider.initialized ? "Initialized" : "Unavailable" }}
+              {{ provider.initialized ? t("Initialized") : t("Unavailable") }}
             </span>
           </div>
           <p class="mt-1 truncate text-xs text-muted" :title="provider.entrypoint">
@@ -118,16 +119,16 @@ function actionLabel(action: string) {
               </div>
             </li>
           </ul>
-          <p v-else class="mt-3 text-xs text-muted">No source catalog entries.</p>
+          <p v-else class="mt-3 text-xs text-muted">{{ t("No source catalog entries.") }}</p>
         </div>
       </li>
     </ul>
 
-    <div v-else class="p-6 text-sm text-muted">No providers are registered.</div>
+    <div v-else class="p-6 text-sm text-muted">{{ t("No providers are registered.") }}</div>
 
     <footer class="flex flex-wrap gap-x-4 gap-y-1 border-t border-base-300 px-4 py-3 text-xs text-muted">
       <span>{{ plugin.id }}</span>
-      <span>{{ plugin.origin === "bundled" ? "Bundled" : "User installed" }}</span>
+      <span>{{ plugin.origin === "bundled" ? t("Bundled") : t("User installed") }}</span>
     </footer>
   </section>
 </template>

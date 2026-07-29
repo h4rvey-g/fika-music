@@ -20,6 +20,7 @@ import {
   type DesktopLyricsAlignment,
   type DesktopLyricsPreferences,
 } from "../lib/desktop-lyrics";
+import { t } from "../i18n";
 
 type DesktopLyricsColorPreference = "activeColor" | "inactiveColor" | "backgroundColor";
 
@@ -95,7 +96,7 @@ function colorPickerValue(color: string, fallback: string) {
   <section class="overflow-hidden rounded border border-base-300 bg-base-100">
     <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
       <Captions :size="18" aria-hidden="true" />
-      <h2 class="min-w-0 flex-1 text-base font-semibold">Lyrics display</h2>
+      <h2 class="min-w-0 flex-1 text-base font-semibold">{{ t("Lyrics display") }}</h2>
     </div>
 
     <div class="border-b border-base-300 bg-neutral p-5 text-neutral-content">
@@ -106,7 +107,7 @@ function colorPickerValue(color: string, fallback: string) {
           fontFamily: preferences.font === 'serif' ? 'serif' : preferences.font === 'monospace' ? 'monospace' : 'sans-serif',
           textAlign: preferences.alignment,
         }"
-        aria-label="Desktop lyrics preview"
+        :aria-label="t('Desktop lyrics preview')"
       >
         <div
           class="leading-tight"
@@ -117,7 +118,7 @@ function colorPickerValue(color: string, fallback: string) {
         >
           <DesktopLyricTextEffect
             :effect="preferences.effect"
-            text="Coffee cools, the melody stays"
+            :text="t('Coffee cools, the melody stays')"
             :text-color="preferences.activeColor"
             :lines="2"
             data-testid="desktop-lyrics-preview-effect"
@@ -127,7 +128,7 @@ function colorPickerValue(color: string, fallback: string) {
               :style="{
                 backgroundImage: `linear-gradient(90deg, ${preferences.activeColor} 0%, ${preferences.activeColor} 52%, ${preferences.inactiveColor} 52%, ${preferences.inactiveColor} 100%)`,
               }"
-            >Coffee cools, the melody stays</span>
+            >{{ t("Coffee cools, the melody stays") }}</span>
           </DesktopLyricTextEffect>
         </div>
         <div
@@ -137,7 +138,7 @@ function colorPickerValue(color: string, fallback: string) {
         >
           <DesktopLyricTextEffect
             :effect="preferences.effect"
-            text="Another quiet song begins"
+            :text="t('Another quiet song begins')"
             :text-color="preferences.inactiveColor"
             :lines="1"
           />
@@ -150,13 +151,13 @@ function colorPickerValue(color: string, fallback: string) {
         <label class="flex items-center justify-between gap-3">
           <span class="flex min-w-0 items-center gap-3 text-sm font-medium">
             <Captions class="shrink-0 text-muted" :size="17" aria-hidden="true" />
-            Desktop overlay
+            {{ t("Desktop overlay") }}
           </span>
           <input
             class="toggle toggle-md"
             type="checkbox"
             :checked="preferences.enabled"
-            aria-label="Show desktop lyrics"
+            :aria-label="t('Show desktop lyrics')"
             @change="update({ enabled: checkboxValue($event) })"
           />
         </label>
@@ -164,13 +165,13 @@ function colorPickerValue(color: string, fallback: string) {
         <label class="flex items-center justify-between gap-3">
           <span class="flex min-w-0 items-center gap-3 text-sm font-medium">
             <PanelTop class="shrink-0 text-muted" :size="17" aria-hidden="true" />
-            Menu bar lyrics <span class="text-xs font-normal text-muted">macOS</span>
+            {{ t("Menu bar lyrics") }} <span class="text-xs font-normal text-muted">macOS</span>
           </span>
           <input
             class="toggle toggle-md"
             type="checkbox"
             :checked="preferences.menuBarEnabled"
-            aria-label="Show lyrics in macOS menu bar"
+            :aria-label="t('Show lyrics in macOS menu bar')"
             @change="update({ menuBarEnabled: checkboxValue($event) })"
           />
         </label>
@@ -178,7 +179,7 @@ function colorPickerValue(color: string, fallback: string) {
         <label class="flex items-center justify-between gap-3">
           <span class="flex min-w-0 items-center gap-3 text-sm font-medium">
             <MonitorUp class="shrink-0 text-muted" :size="17" aria-hidden="true" />
-            Always on top
+            {{ t("Always on top") }}
           </span>
           <input
             class="toggle toggle-md"
@@ -191,7 +192,7 @@ function colorPickerValue(color: string, fallback: string) {
         <label class="flex items-center justify-between gap-3">
           <span class="flex min-w-0 items-center gap-3 text-sm font-medium">
             <Lock class="shrink-0 text-muted" :size="17" aria-hidden="true" />
-            Lock window
+            {{ t("Lock window") }}
           </span>
           <input
             class="toggle toggle-md"
@@ -204,7 +205,7 @@ function colorPickerValue(color: string, fallback: string) {
         <label class="flex items-center justify-between gap-3">
           <span class="flex min-w-0 items-center gap-3 text-sm font-medium">
             <Captions class="shrink-0 text-muted" :size="17" aria-hidden="true" />
-            Next line
+            {{ t("Next line") }}
           </span>
           <input
             class="toggle toggle-md"
@@ -217,9 +218,9 @@ function colorPickerValue(color: string, fallback: string) {
         <div class="flex items-center justify-between gap-3">
           <span class="flex min-w-0 items-center gap-3 text-sm font-medium">
             <MousePointer2Off class="shrink-0 text-muted" :size="17" aria-hidden="true" />
-            Pointer passthrough
+            {{ t("Pointer passthrough") }}
           </span>
-          <span class="text-xs text-muted">{{ preferences.locked ? "On" : "Off" }}</span>
+          <span class="text-xs text-muted">{{ preferences.locked ? t("On") : t("Off") }}</span>
         </div>
       </div>
 
@@ -229,25 +230,25 @@ function colorPickerValue(color: string, fallback: string) {
           :key="control.preference"
           class="flex items-center justify-between gap-3 text-sm font-medium"
         >
-          <span>{{ control.label }}</span>
+          <span>{{ t(control.label) }}</span>
           <div class="flex shrink-0 items-center gap-1">
             <input
               class="size-9 cursor-pointer rounded border border-base-300 bg-transparent p-1"
               type="color"
               :value="colorPickerValue(preferences[control.preference], control.fallback)"
-              :aria-label="control.inputLabel"
+              :aria-label="t(control.inputLabel)"
               @input="setColor(control.preference, stringValue($event))"
             />
-            <div class="tooltip tooltip-bottom" data-tip="No color">
+            <div class="tooltip tooltip-bottom" :data-tip="t('No color')">
               <button
                 class="btn btn-square btn-ghost btn-sm"
                 :class="{
                   'btn-active': preferences[control.preference] === DESKTOP_LYRICS_TRANSPARENT_COLOR,
                 }"
                 type="button"
-                :aria-label="control.noColorLabel"
+                :aria-label="t(control.noColorLabel)"
                 :aria-pressed="preferences[control.preference] === DESKTOP_LYRICS_TRANSPARENT_COLOR"
-                title="No color"
+                :title="t('No color')"
                 @click="setColor(control.preference, DESKTOP_LYRICS_TRANSPARENT_COLOR)"
               >
                 <Ban :size="16" aria-hidden="true" />
@@ -261,16 +262,16 @@ function colorPickerValue(color: string, fallback: string) {
         v-if="preferences.menuBarEnabled"
         class="flex items-center justify-between gap-3 px-4 py-4"
       >
-        <span class="text-sm font-medium">Menu bar width</span>
+        <span class="text-sm font-medium">{{ t("Menu bar width") }}</span>
         <select
           class="select select-sm w-36"
           :value="preferences.menuBarMaxWidth"
-          aria-label="Menu bar lyric width"
+          :aria-label="t('Menu bar lyric width')"
           @change="update({ menuBarMaxWidth: Number(stringValue($event)) })"
         >
-          <option :value="24">Compact</option>
-          <option :value="40">Standard</option>
-          <option :value="56">Wide</option>
+          <option :value="24">{{ t("Compact") }}</option>
+          <option :value="40">{{ t("Standard") }}</option>
+          <option :value="56">{{ t("Wide") }}</option>
         </select>
       </label>
 
@@ -278,7 +279,7 @@ function colorPickerValue(color: string, fallback: string) {
         <label class="flex items-center justify-between gap-3">
           <span class="flex items-center gap-3 text-sm font-medium">
             <Type class="text-muted" :size="17" aria-hidden="true" />
-            Typeface
+            {{ t("Typeface") }}
           </span>
           <select
             class="select select-sm w-40"
@@ -286,23 +287,23 @@ function colorPickerValue(color: string, fallback: string) {
             @change="update({ font: stringValue($event) as DesktopLyricsPreferences['font'] })"
           >
             <option v-for="font in DESKTOP_LYRICS_FONT_OPTIONS" :key="font.value" :value="font.value">
-              {{ font.label }}
+              {{ t(font.label) }}
             </option>
           </select>
         </label>
 
         <label class="flex items-center justify-between gap-3 text-sm font-medium">
-          Weight
+          {{ t("Weight") }}
           <select
             class="select select-sm w-40"
             :value="preferences.fontWeight"
             @change="update({ fontWeight: Number(stringValue($event)) })"
           >
-            <option :value="400">Regular</option>
-            <option :value="500">Medium</option>
-            <option :value="600">Semibold</option>
-            <option :value="700">Bold</option>
-            <option :value="800">Extra bold</option>
+            <option :value="400">{{ t("Regular") }}</option>
+            <option :value="500">{{ t("Medium") }}</option>
+            <option :value="600">{{ t("Semibold") }}</option>
+            <option :value="700">{{ t("Bold") }}</option>
+            <option :value="800">{{ t("Extra bold") }}</option>
           </select>
         </label>
       </div>
@@ -310,7 +311,7 @@ function colorPickerValue(color: string, fallback: string) {
       <div class="grid gap-5 px-4 py-4 sm:grid-cols-2">
         <label class="min-w-0">
           <span class="mb-2 flex items-center justify-between gap-3 text-sm font-medium">
-            Size
+            {{ t("Size") }}
             <output class="text-xs tabular-nums text-muted">{{ preferences.fontSize }} px</output>
           </span>
           <input
@@ -326,7 +327,7 @@ function colorPickerValue(color: string, fallback: string) {
 
         <label class="min-w-0">
           <span class="mb-2 flex items-center justify-between gap-3 text-sm font-medium">
-            Background opacity
+            {{ t("Background opacity") }}
             <output class="text-xs tabular-nums text-muted">
               {{ Math.round(preferences.backgroundOpacity * 100) }}%
             </output>
@@ -345,38 +346,38 @@ function colorPickerValue(color: string, fallback: string) {
 
       <div class="flex flex-col gap-4 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
         <div class="flex items-center gap-3">
-          <span class="text-sm font-medium">Alignment</span>
-          <div class="join" aria-label="Desktop lyrics alignment">
-            <div class="tooltip" data-tip="Left">
+          <span class="text-sm font-medium">{{ t("Alignment") }}</span>
+          <div class="join" :aria-label="t('Desktop lyrics alignment')">
+            <div class="tooltip" :data-tip="t('Left')">
               <button
                 class="btn btn-square btn-sm join-item"
                 :class="{ 'btn-active': preferences.alignment === 'left' }"
                 type="button"
-                aria-label="Align desktop lyrics left"
+                :aria-label="t('Align desktop lyrics left')"
                 :aria-pressed="preferences.alignment === 'left'"
                 @click="setAlignment('left')"
               >
                 <TextAlignStart :size="16" aria-hidden="true" />
               </button>
             </div>
-            <div class="tooltip" data-tip="Center">
+            <div class="tooltip" :data-tip="t('Center')">
               <button
                 class="btn btn-square btn-sm join-item"
                 :class="{ 'btn-active': preferences.alignment === 'center' }"
                 type="button"
-                aria-label="Center desktop lyrics"
+                :aria-label="t('Center desktop lyrics')"
                 :aria-pressed="preferences.alignment === 'center'"
                 @click="setAlignment('center')"
               >
                 <TextAlignCenter :size="16" aria-hidden="true" />
               </button>
             </div>
-            <div class="tooltip" data-tip="Right">
+            <div class="tooltip" :data-tip="t('Right')">
               <button
                 class="btn btn-square btn-sm join-item"
                 :class="{ 'btn-active': preferences.alignment === 'right' }"
                 type="button"
-                aria-label="Align desktop lyrics right"
+                :aria-label="t('Align desktop lyrics right')"
                 :aria-pressed="preferences.alignment === 'right'"
                 @click="setAlignment('right')"
               >
@@ -387,15 +388,15 @@ function colorPickerValue(color: string, fallback: string) {
         </div>
 
         <label class="flex items-center justify-between gap-3 sm:justify-start">
-          <span class="text-sm font-medium">Text effect</span>
+          <span class="text-sm font-medium">{{ t("Text effect") }}</span>
           <select
             class="select select-sm w-40"
             :value="preferences.effect"
             @change="update({ effect: stringValue($event) as DesktopLyricsPreferences['effect'] })"
           >
-            <option value="shadow">Shadow</option>
-            <option value="outline">Outline</option>
-            <option value="none">None</option>
+            <option value="shadow">{{ t("Shadow") }}</option>
+            <option value="outline">{{ t("Outline") }}</option>
+            <option value="none">{{ t("None") }}</option>
           </select>
         </label>
       </div>
@@ -403,7 +404,7 @@ function colorPickerValue(color: string, fallback: string) {
       <div class="flex justify-end px-4 py-3">
         <button class="btn btn-ghost btn-sm" type="button" @click="emit('reset')">
           <RotateCcw :size="16" aria-hidden="true" />
-          Reset lyrics display
+          {{ t("Reset lyrics display") }}
         </button>
       </div>
     </div>

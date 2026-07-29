@@ -1,4 +1,5 @@
 import { isAudioSourceId, type AudioSourceId } from "./audio-source-api";
+import { isSupportedLocale, type SupportedLocale } from "../i18n";
 
 export type ThemeCategory = "bright" | "dark";
 
@@ -68,6 +69,7 @@ export type StreamQuality = "128k" | "320k" | "flac" | "flac24bit";
 export type PlaybackMode = "sequential" | "shuffle" | "repeat";
 
 export type UiPreferences = {
+  locale: SupportedLocale;
   theme: ThemePreference;
   density: LayoutDensity;
   streamQuality: StreamQuality;
@@ -82,6 +84,7 @@ type WritableStorage = Pick<Storage, "setItem">;
 export const UI_PREFERENCES_STORAGE_KEY = "fika.ui-preferences";
 
 export const DEFAULT_UI_PREFERENCES: UiPreferences = {
+  locale: "en",
   theme: "system",
   density: "comfortable",
   streamQuality: "128k",
@@ -126,6 +129,9 @@ export function parseUiPreferences(value: unknown): UiPreferences {
   const storedAudioSourceId = candidate.audioSourceId ?? candidate.audioSourceFamily;
 
   return {
+    locale: isSupportedLocale(candidate.locale)
+      ? candidate.locale
+      : DEFAULT_UI_PREFERENCES.locale,
     theme: isThemePreference(candidate.theme) ? candidate.theme : DEFAULT_UI_PREFERENCES.theme,
     density: isLayoutDensity(candidate.density) ? candidate.density : DEFAULT_UI_PREFERENCES.density,
     streamQuality: isStreamQuality(candidate.streamQuality)

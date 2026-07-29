@@ -2,6 +2,7 @@ import { computed, ref, shallowRef, type ComputedRef } from "vue";
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import type { QueryClient, QueryKey } from "@tanstack/vue-query";
 import { cancelSourceRequest } from "../lib/plugin-api";
+import { t } from "../i18n";
 
 type QrLoginStart = {
   sessionId: string;
@@ -31,7 +32,14 @@ export function useQrLoginSession<Account extends QrAccount, Start extends QrLog
   options: QrLoginOptions<Account, Start>,
 ) {
   const login = shallowRef<Start | null>(null);
-  const status = ref("");
+  const statusCode = ref<"" | "waitingForScan" | "waitingForConfirmation">("");
+  const status = computed(() => {
+    if (statusCode.value === "waitingForScan") return t("Waiting for scan");
+    if (statusCode.value === "waitingForConfirmation") {
+      return t("Confirm in {provider}", { provider: options.providerName });
+    }
+    return "";
+  });
   const isConnecting = ref(false);
   const isPolling = ref(false);
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -40,14 +48,14 @@ export function useQrLoginSession<Account extends QrAccount, Start extends QrLog
     if (isConnecting.value) return;
     cancel();
     isConnecting.value = true;
-    status.value = "Waiting for scan";
+    statusCode.value = "waitingForScan";
     try {
       login.value = await options.start();
       schedulePoll();
     } catch (error) {
       options.onError(error);
       login.value = null;
-      status.value = "";
+      statusCode.value = "";
     } finally {
       isConnecting.value = false;
     }
@@ -69,26 +77,28 @@ export function useQrLoginSession<Account extends QrAccount, Start extends QrLog
       const result = await options.poll(sessionId);
       if (login.value?.sessionId !== sessionId) return;
       if (result.status === "waitingForScan") {
-        status.value = "Waiting for scan";
+        statusCode.value = "waitingForScan";
         schedulePoll();
         return;
       }
       if (result.status === "waitingForConfirmation") {
-        status.value = `Confirm in ${options.providerName}`;
+        statusCode.value = "waitingForConfirmation";
         schedulePoll();
         return;
       }
       if (result.status === "expired") {
         options.onError(
-          new Error(`${options.providerName} login QR code expired. Start a new connection.`),
+          new Error(t("{provider} login QR code expired. Start a new connection.", {
+            provider: options.providerName,
+          })),
         );
         login.value = null;
-        status.value = "";
+        statusCode.value = "";
         return;
       }
       if (result.account) {
         login.value = null;
-        status.value = "";
+        statusCode.value = "";
         try {
           await options.onConnected(result.account);
         } catch (error) {
@@ -96,7 +106,9 @@ export function useQrLoginSession<Account extends QrAccount, Start extends QrLog
         }
         return;
       }
-      throw new Error(`${options.providerName} login completed without an account.`);
+      throw new Error(t("{provider} login completed without an account.", {
+        provider: options.providerName,
+      }));
     } catch (error) {
       if (login.value?.sessionId === sessionId) {
         options.onError(error);
@@ -118,7 +130,7 @@ export function useQrLoginSession<Account extends QrAccount, Start extends QrLog
     const sessionId = login.value?.sessionId;
     stopPolling();
     login.value = null;
-    status.value = "";
+    statusCode.value = "";
     if (sessionId) {
       void options.cancel(sessionId).catch(() => undefined);
     }
@@ -178,7 +190,7 @@ export async function cancellableSourceQuery<T>(
   };
   if (signal.aborted) {
     cancel();
-    throw new DOMException("Source request cancelled", "AbortError");
+    throw new DOMException(t("Source request cancelled"), "AbortError");
   }
   signal.addEventListener("abort", cancel, { once: true });
   try {

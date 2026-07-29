@@ -12,6 +12,7 @@ import {
 } from "@lucide/vue";
 import type { AudioSourceRecord, OnlineChannel } from "../generated/bindings";
 import { normalizeError } from "../lib/errors";
+import { t } from "../i18n";
 import {
   clearOnlineSearchHistory,
   getOnlineMusicSettings,
@@ -58,16 +59,16 @@ const orderedAudioSources = computed(() => {
 
 const templatePreview = computed(() => {
   const sample = {
-    artist: "Artist",
-    title: "Song title",
-    album: "Album",
+    artist: t("Artist"),
+    title: t("Song title"),
+    album: t("Album"),
     trackNumber: "02",
-    channel: "Channel",
+    channel: t("Channel"),
   };
   try {
     return previewTemplate(templateDraft.value, sample);
   } catch (reason) {
-    return reason instanceof Error ? reason.message : "Invalid filename template";
+    return reason instanceof Error ? reason.message : t("Invalid filename template");
   }
 });
 
@@ -151,11 +152,11 @@ async function applyTemplate() {
   templateError.value = null;
   try {
     previewTemplate(templateDraft.value, {
-      artist: "Artist",
-      title: "Song title",
-      album: "Album",
+      artist: t("Artist"),
+      title: t("Song title"),
+      album: t("Album"),
       trackNumber: "02",
-      channel: "Channel",
+      channel: t("Channel"),
     });
   } catch (reason) {
     templateError.value = normalizeError(reason);
@@ -205,19 +206,21 @@ function moveBefore(items: string[], dragged: string, target: string) {
 
 function previewTemplate(template: string, values: Record<string, string>) {
   if (!template.trim() || template.length > 512 || !template.includes("{title}")) {
-    throw new Error("Template must include {title} and contain at most 512 characters.");
+    throw new Error(t("Template must include {title} and contain at most 512 characters."));
   }
   let output = template.replace(/\[((?:\\.|[^\]])*)\]/g, (_, group: string) => {
     const fields = [...group.matchAll(/\{([^}]+)\}/g)].map((match) => match[1]);
     return fields.every((field) => values[field]?.trim()) ? group : "";
   });
   output = output.replace(/\{([^}]+)\}/g, (_, field: string) => {
-    if (!(field in values)) throw new Error(`Unsupported field {${field}}.`);
+    if (!(field in values)) {
+      throw new Error(t("Unsupported field {field}.", { field: `{${field}}` }));
+    }
     return values[field];
   });
   output = output.replace(/\\([\[\]\\])/g, "$1");
   output = output.replace(/[\\/:*?"<>|\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim();
-  if (!output) throw new Error("Template produces an empty filename.");
+  if (!output) throw new Error(t("Template produces an empty filename."));
   return output;
 }
 
@@ -233,11 +236,11 @@ function previewTemplate(template: string, values: Record<string, string>) {
     <section class="overflow-hidden rounded border border-base-300 bg-base-100">
       <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
         <Radio :size="18" aria-hidden="true" />
-        <h2 class="text-base font-semibold">Online Music</h2>
+        <h2 class="text-base font-semibold">{{ t("Online Music") }}</h2>
       </div>
       <div class="divide-y divide-base-300">
         <div class="px-4 py-4">
-          <div class="mb-3 text-sm font-medium">Search channels and priority</div>
+          <div class="mb-3 text-sm font-medium">{{ t("Search channels and priority") }}</div>
           <ul class="divide-y divide-base-300">
             <li
               v-for="(channel, index) in orderedChannels"
@@ -252,17 +255,17 @@ function previewTemplate(template: string, values: Record<string, string>) {
                 class="checkbox checkbox-md"
                 type="checkbox"
                 :checked="!settings.excludedChannels.includes(channel.id)"
-                :aria-label="`Include ${channel.sourceName}`"
+                :aria-label="t('Include {name}', { name: channel.sourceName })"
                 @change="toggleChannel(channel, ($event.currentTarget as HTMLInputElement).checked)"
               />
               <div class="min-w-0 flex-1">
                 <div class="truncate text-sm">{{ channel.sourceName }}</div>
                 <div class="truncate text-xs text-muted">{{ channel.pluginName }} · {{ channel.sourceId }}</div>
               </div>
-              <button class="btn btn-square btn-ghost btn-sm" type="button" :disabled="index === 0 || Boolean(saving)" aria-label="Move channel up" title="Move up" @click="moveChannel(index, -1)">
+              <button class="btn btn-square btn-ghost btn-sm" type="button" :disabled="index === 0 || Boolean(saving)" :aria-label="t('Move channel up')" :title="t('Move up')" @click="moveChannel(index, -1)">
                 <ArrowUp :size="16" aria-hidden="true" />
               </button>
-              <button class="btn btn-square btn-ghost btn-sm" type="button" :disabled="index === orderedChannels.length - 1 || Boolean(saving)" aria-label="Move channel down" title="Move down" @click="moveChannel(index, 1)">
+              <button class="btn btn-square btn-ghost btn-sm" type="button" :disabled="index === orderedChannels.length - 1 || Boolean(saving)" :aria-label="t('Move channel down')" :title="t('Move down')" @click="moveChannel(index, 1)">
                 <ArrowDown :size="16" aria-hidden="true" />
               </button>
             </li>
@@ -272,15 +275,15 @@ function previewTemplate(template: string, values: Record<string, string>) {
         <div class="px-4 py-4">
           <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div class="min-w-0">
-              <div class="text-sm font-medium">Audio Source selection</div>
+              <div class="text-sm font-medium">{{ t("Audio Source selection") }}</div>
             </div>
-            <div class="join shrink-0" role="radiogroup" aria-label="Audio Source selection mode">
+            <div class="join shrink-0" role="radiogroup" :aria-label="t('Audio Source selection mode')">
               <input
                 class="btn btn-sm join-item"
                 type="radio"
                 name="audio-source-selection-mode"
                 value="automatic"
-                aria-label="Automatic"
+                :aria-label="t('Automatic')"
                 :checked="settings.audioSourceSelectionMode === 'automatic'"
                 :disabled="Boolean(saving)"
                 @change="persist({ audioSourceSelectionMode: 'automatic' }, 'audio-source-mode')"
@@ -290,7 +293,7 @@ function previewTemplate(template: string, values: Record<string, string>) {
                 type="radio"
                 name="audio-source-selection-mode"
                 value="manual"
-                aria-label="Manual"
+                :aria-label="t('Manual')"
                 :checked="settings.audioSourceSelectionMode === 'manual'"
                 :disabled="Boolean(saving)"
                 @change="persist({ audioSourceSelectionMode: 'manual' }, 'audio-source-mode')"
@@ -300,7 +303,7 @@ function previewTemplate(template: string, values: Record<string, string>) {
         </div>
 
         <div v-if="settings.audioSourceSelectionMode === 'manual'" class="px-4 py-4">
-          <div class="mb-3 text-sm font-medium">Manual fallback priority</div>
+          <div class="mb-3 text-sm font-medium">{{ t("Manual fallback priority") }}</div>
           <ul class="divide-y divide-base-300" data-testid="audio-source-priority">
             <li
               v-for="(source, index) in orderedAudioSources"
@@ -313,10 +316,10 @@ function previewTemplate(template: string, values: Record<string, string>) {
             >
               <span class="w-6 text-center text-xs tabular-nums text-muted">{{ index + 1 }}</span>
               <span class="min-w-0 flex-1 truncate text-sm">{{ source.name }}</span>
-              <button class="btn btn-square btn-ghost btn-sm" type="button" :disabled="index === 0 || Boolean(saving)" aria-label="Move Audio Source up" title="Move up" @click="moveAudioSource(index, -1)">
+              <button class="btn btn-square btn-ghost btn-sm" type="button" :disabled="index === 0 || Boolean(saving)" :aria-label="t('Move Audio Source up')" :title="t('Move up')" @click="moveAudioSource(index, -1)">
                 <ArrowUp :size="16" aria-hidden="true" />
               </button>
-              <button class="btn btn-square btn-ghost btn-sm" type="button" :disabled="index === orderedAudioSources.length - 1 || Boolean(saving)" aria-label="Move Audio Source down" title="Move down" @click="moveAudioSource(index, 1)">
+              <button class="btn btn-square btn-ghost btn-sm" type="button" :disabled="index === orderedAudioSources.length - 1 || Boolean(saving)" :aria-label="t('Move Audio Source down')" :title="t('Move down')" @click="moveAudioSource(index, 1)">
                 <ArrowDown :size="16" aria-hidden="true" />
               </button>
             </li>
@@ -325,7 +328,7 @@ function previewTemplate(template: string, values: Record<string, string>) {
 
         <div class="grid gap-4 px-4 py-4 sm:grid-cols-3">
           <label class="form-control">
-            <span class="label-text text-sm">Preferred quality</span>
+            <span class="label-text text-sm">{{ t("Preferred quality") }}</span>
             <select class="select select-sm mt-1" :value="settings.preferredQuality" @change="persist({ preferredQuality: ($event.currentTarget as HTMLSelectElement).value as OnlineMusicSettings['preferredQuality'] }, 'quality')">
               <option value="128k">128 kbps</option>
               <option value="320k">320 kbps</option>
@@ -334,11 +337,11 @@ function previewTemplate(template: string, values: Record<string, string>) {
             </select>
           </label>
           <label class="form-control">
-            <span class="label-text text-sm">Per-source budget</span>
+            <span class="label-text text-sm">{{ t("Per-source budget") }}</span>
             <input class="input input-sm mt-1" type="number" min="3" max="30" :value="settings.layerTimeoutSeconds" @change="persist({ layerTimeoutSeconds: Number(($event.currentTarget as HTMLInputElement).value) }, 'layer-timeout')" />
           </label>
           <label class="form-control">
-            <span class="label-text text-sm">Playback timeout</span>
+            <span class="label-text text-sm">{{ t("Playback timeout") }}</span>
             <input class="input input-sm mt-1" type="number" min="5" max="60" :value="settings.playbackTimeoutSeconds" @change="persist({ playbackTimeoutSeconds: Number(($event.currentTarget as HTMLInputElement).value) }, 'playback-timeout')" />
           </label>
         </div>
@@ -346,11 +349,11 @@ function previewTemplate(template: string, values: Record<string, string>) {
         <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
           <label class="flex min-w-0 items-center gap-3">
             <History :size="17" aria-hidden="true" />
-            <span><span class="block text-sm font-medium">Recent search history</span><span class="block text-xs text-muted">Stores up to 10 query strings locally</span></span>
+            <span><span class="block text-sm font-medium">{{ t("Recent search history") }}</span><span class="block text-xs text-muted">{{ t("Stores up to 10 query strings locally") }}</span></span>
           </label>
           <div class="flex items-center gap-2">
-          <button class="btn btn-sm" type="button" :disabled="saving === 'clear-history'" @click="clearHistory"><Trash2 :size="16" aria-hidden="true" />Clear</button>
-          <input class="toggle toggle-md" type="checkbox" :checked="settings.searchHistoryEnabled" aria-label="Store recent searches" @change="toggleHistory(($event.currentTarget as HTMLInputElement).checked)" />
+          <button class="btn btn-sm" type="button" :disabled="saving === 'clear-history'" @click="clearHistory"><Trash2 :size="16" aria-hidden="true" />{{ t("Clear") }}</button>
+          <input class="toggle toggle-md" type="checkbox" :checked="settings.searchHistoryEnabled" :aria-label="t('Store recent searches')" @change="toggleHistory(($event.currentTarget as HTMLInputElement).checked)" />
           </div>
         </div>
       </div>
@@ -359,24 +362,24 @@ function previewTemplate(template: string, values: Record<string, string>) {
     <section class="overflow-hidden rounded border border-base-300 bg-base-100">
       <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
         <Download :size="18" aria-hidden="true" />
-        <h2 class="text-base font-semibold">Downloads</h2>
+        <h2 class="text-base font-semibold">{{ t("Downloads") }}</h2>
       </div>
       <div class="divide-y divide-base-300">
         <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-          <div class="min-w-0"><div class="text-sm font-medium">Download directory</div><div class="truncate text-xs text-muted" :title="settings.downloadDirectory || undefined">{{ settings.downloadDirectory || 'Not configured' }}</div></div>
-        <button class="btn btn-sm shrink-0" type="button" :disabled="saving === 'directory'" @click="chooseDirectory"><FolderOpen :size="16" aria-hidden="true" />Choose</button>
+          <div class="min-w-0"><div class="text-sm font-medium">{{ t("Download directory") }}</div><div class="truncate text-xs text-muted" :title="settings.downloadDirectory || undefined">{{ settings.downloadDirectory || t('Not configured') }}</div></div>
+        <button class="btn btn-sm shrink-0" type="button" :disabled="saving === 'directory'" @click="chooseDirectory"><FolderOpen :size="16" aria-hidden="true" />{{ t("Choose") }}</button>
         </div>
         <div class="px-4 py-4">
-          <label for="filename-template" class="text-sm font-medium">Filename template</label>
+          <label for="filename-template" class="text-sm font-medium">{{ t("Filename template") }}</label>
           <div class="mt-2 flex gap-2">
             <input id="filename-template" v-model="templateDraft" class="input input-sm min-w-0 flex-1 font-mono" />
-          <button class="btn btn-primary btn-sm" type="button" :disabled="saving === 'template' || templateDraft === settings.filenameTemplate" @click="applyTemplate"><Save :size="16" aria-hidden="true" />Apply</button>
+          <button class="btn btn-primary btn-sm" type="button" :disabled="saving === 'template' || templateDraft === settings.filenameTemplate" @click="applyTemplate"><Save :size="16" aria-hidden="true" />{{ t("Apply") }}</button>
           </div>
           <div class="mt-1 truncate text-xs" :class="templateError ? 'text-error' : 'text-muted'">{{ templateError || templatePreview }}</div>
         </div>
         <div class="grid gap-4 px-4 py-4 sm:grid-cols-2">
-          <label class="form-control"><span class="label-text text-sm">Concurrent songs</span><input class="input input-sm mt-1" type="number" min="1" max="4" :value="settings.downloadConcurrency" @change="persist({ downloadConcurrency: Number(($event.currentTarget as HTMLInputElement).value) }, 'download-concurrency')" /></label>
-        <label class="flex items-center justify-between gap-3 self-end py-2"><span class="text-sm">Batch completion notifications</span><input class="toggle toggle-md" type="checkbox" :checked="settings.batchNotifications" @change="persist({ batchNotifications: ($event.currentTarget as HTMLInputElement).checked }, 'notifications')" /></label>
+          <label class="form-control"><span class="label-text text-sm">{{ t("Concurrent songs") }}</span><input class="input input-sm mt-1" type="number" min="1" max="4" :value="settings.downloadConcurrency" @change="persist({ downloadConcurrency: Number(($event.currentTarget as HTMLInputElement).value) }, 'download-concurrency')" /></label>
+        <label class="flex items-center justify-between gap-3 self-end py-2"><span class="text-sm">{{ t("Batch completion notifications") }}</span><input class="toggle toggle-md" type="checkbox" :checked="settings.batchNotifications" @change="persist({ batchNotifications: ($event.currentTarget as HTMLInputElement).checked }, 'notifications')" /></label>
         </div>
       </div>
     </section>

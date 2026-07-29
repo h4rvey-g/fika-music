@@ -18,6 +18,7 @@ import {
   type NowPlayingLyricsAlignment,
   type NowPlayingLyricsPreferences,
 } from "../lib/now-playing-lyrics";
+import { t } from "../i18n";
 
 type ColorPreference = "activeColor" | "inactiveColor";
 
@@ -99,12 +100,12 @@ function previewLineStyle(active: boolean) {
   >
     <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
       <Captions :size="18" aria-hidden="true" />
-      <h2 class="min-w-0 flex-1 text-base font-semibold">Now playing lyrics</h2>
+      <h2 class="min-w-0 flex-1 text-base font-semibold">{{ t("Now playing lyrics") }}</h2>
     </div>
 
     <div
       class="border-b border-base-300 bg-base-200 px-6 py-4"
-      aria-label="Now playing lyrics preview"
+      :aria-label="t('Now playing lyrics preview')"
     >
       <div
         class="mx-auto max-w-xl overflow-hidden"
@@ -113,9 +114,9 @@ function previewLineStyle(active: boolean) {
           textAlign: preferences.alignment,
         }"
       >
-        <p :style="previewLineStyle(false)">Slow mornings, open windows</p>
-        <p :style="previewLineStyle(true)">Coffee cools, the melody stays</p>
-        <p :style="previewLineStyle(false)">Another quiet song begins</p>
+        <p :style="previewLineStyle(false)">{{ t("Slow mornings, open windows") }}</p>
+        <p :style="previewLineStyle(true)">{{ t("Coffee cools, the melody stays") }}</p>
+        <p :style="previewLineStyle(false)">{{ t("Another quiet song begins") }}</p>
       </div>
     </div>
 
@@ -124,12 +125,12 @@ function previewLineStyle(active: boolean) {
         <label class="flex items-center justify-between gap-3">
           <span class="flex items-center gap-3 text-sm font-medium">
             <Type class="text-muted" :size="17" aria-hidden="true" />
-            Typeface
+            {{ t("Typeface") }}
           </span>
           <select
             class="select select-sm w-40"
             :value="preferences.font"
-            aria-label="Now playing lyric typeface"
+            :aria-label="t('Now playing lyric typeface')"
             @change="update({ font: stringValue($event) as NowPlayingLyricsPreferences['font'] })"
           >
             <option
@@ -137,24 +138,24 @@ function previewLineStyle(active: boolean) {
               :key="font.value"
               :value="font.value"
             >
-              {{ font.label }}
+              {{ t(font.label) }}
             </option>
           </select>
         </label>
 
         <label class="flex items-center justify-between gap-3 text-sm font-medium">
-          Current line weight
+          {{ t("Current line weight") }}
           <select
             class="select select-sm w-40"
             :value="preferences.activeFontWeight"
-            aria-label="Current lyric weight"
+            :aria-label="t('Current lyric weight')"
             @change="update({ activeFontWeight: numberValue($event) as NowPlayingLyricsPreferences['activeFontWeight'] })"
           >
-            <option :value="400">Regular</option>
-            <option :value="500">Medium</option>
-            <option :value="600">Semibold</option>
-            <option :value="700">Bold</option>
-            <option :value="800">Extra bold</option>
+            <option :value="400">{{ t("Regular") }}</option>
+            <option :value="500">{{ t("Medium") }}</option>
+            <option :value="600">{{ t("Semibold") }}</option>
+            <option :value="700">{{ t("Bold") }}</option>
+            <option :value="800">{{ t("Extra bold") }}</option>
           </select>
         </label>
       </div>
@@ -162,7 +163,7 @@ function previewLineStyle(active: boolean) {
       <div class="grid gap-5 px-4 py-4 sm:grid-cols-2">
         <label class="min-w-0">
           <span class="mb-2 flex items-center justify-between gap-3 text-sm font-medium">
-            Size
+            {{ t("Size") }}
             <output class="text-xs tabular-nums text-muted">
               {{ preferences.fontSize }} px
             </output>
@@ -174,14 +175,14 @@ function previewLineStyle(active: boolean) {
             max="30"
             step="1"
             :value="preferences.fontSize"
-            aria-label="Now playing lyric size"
+            :aria-label="t('Now playing lyric size')"
             @input="update({ fontSize: numberValue($event) })"
           />
         </label>
 
         <label class="min-w-0">
           <span class="mb-2 flex items-center justify-between gap-3 text-sm font-medium">
-            Line spacing
+            {{ t("Line spacing") }}
             <output class="text-xs tabular-nums text-muted">
               {{ preferences.lineGap }} px
             </output>
@@ -193,7 +194,7 @@ function previewLineStyle(active: boolean) {
             max="28"
             step="2"
             :value="preferences.lineGap"
-            aria-label="Now playing lyric line spacing"
+            :aria-label="t('Now playing lyric line spacing')"
             @input="update({ lineGap: numberValue($event) })"
           />
         </label>
@@ -201,15 +202,15 @@ function previewLineStyle(active: boolean) {
 
       <div class="grid gap-5 px-4 py-4 sm:grid-cols-2">
         <div class="flex items-center justify-between gap-3">
-          <span class="text-sm font-medium">Alignment</span>
-          <div class="join" aria-label="Now playing lyrics alignment">
+          <span class="text-sm font-medium">{{ t("Alignment") }}</span>
+          <div class="join" :aria-label="t('Now playing lyrics alignment')">
             <button
               class="btn btn-square btn-sm join-item"
               :class="{ 'btn-active': preferences.alignment === 'left' }"
               type="button"
-              aria-label="Align now playing lyrics left"
+              :aria-label="t('Align now playing lyrics left')"
               :aria-pressed="preferences.alignment === 'left'"
-              title="Left"
+              :title="t('Left')"
               @click="setAlignment('left')"
             >
               <TextAlignStart :size="16" aria-hidden="true" />
@@ -218,9 +219,9 @@ function previewLineStyle(active: boolean) {
               class="btn btn-square btn-sm join-item"
               :class="{ 'btn-active': preferences.alignment === 'center' }"
               type="button"
-              aria-label="Center now playing lyrics"
+              :aria-label="t('Center now playing lyrics')"
               :aria-pressed="preferences.alignment === 'center'"
-              title="Center"
+              :title="t('Center')"
               @click="setAlignment('center')"
             >
               <TextAlignCenter :size="16" aria-hidden="true" />
@@ -229,9 +230,9 @@ function previewLineStyle(active: boolean) {
               class="btn btn-square btn-sm join-item"
               :class="{ 'btn-active': preferences.alignment === 'right' }"
               type="button"
-              aria-label="Align now playing lyrics right"
+              :aria-label="t('Align now playing lyrics right')"
               :aria-pressed="preferences.alignment === 'right'"
-              title="Right"
+              :title="t('Right')"
               @click="setAlignment('right')"
             >
               <TextAlignEnd :size="16" aria-hidden="true" />
@@ -241,7 +242,7 @@ function previewLineStyle(active: boolean) {
 
         <label class="min-w-0">
           <span class="mb-2 flex items-center justify-between gap-3 text-sm font-medium">
-            Other line opacity
+            {{ t("Other line opacity") }}
             <output class="text-xs tabular-nums text-muted">
               {{ Math.round(preferences.inactiveOpacity * 100) }}%
             </output>
@@ -253,7 +254,7 @@ function previewLineStyle(active: boolean) {
             max="1"
             step="0.05"
             :value="preferences.inactiveOpacity"
-            aria-label="Other lyric opacity"
+            :aria-label="t('Other lyric opacity')"
             @input="update({ inactiveOpacity: numberValue($event) })"
           />
         </label>
@@ -267,26 +268,26 @@ function previewLineStyle(active: boolean) {
         >
           <span class="flex items-center gap-3">
             <Palette class="text-muted" :size="17" aria-hidden="true" />
-            {{ control.label }}
+            {{ t(control.label) }}
           </span>
           <div class="flex shrink-0 items-center gap-1">
             <input
               class="size-9 cursor-pointer rounded border border-base-300 bg-transparent p-1"
               type="color"
               :value="colorPickerValue(preferences[control.preference], control.fallback)"
-              :aria-label="control.inputLabel"
+              :aria-label="t(control.inputLabel)"
               @input="setColor(control.preference, stringValue($event))"
             />
-            <div class="tooltip tooltip-bottom" data-tip="Use theme color">
+            <div class="tooltip tooltip-bottom" :data-tip="t('Use theme color')">
               <button
                 class="btn btn-square btn-ghost btn-sm"
                 :class="{
                   'btn-active': preferences[control.preference] === NOW_PLAYING_LYRICS_THEME_COLOR,
                 }"
                 type="button"
-                :aria-label="control.themeLabel"
+                :aria-label="t(control.themeLabel)"
                 :aria-pressed="preferences[control.preference] === NOW_PLAYING_LYRICS_THEME_COLOR"
-                title="Use theme color"
+                :title="t('Use theme color')"
                 @click="setColor(control.preference, NOW_PLAYING_LYRICS_THEME_COLOR)"
               >
                 <Palette :size="16" aria-hidden="true" />
@@ -299,7 +300,7 @@ function previewLineStyle(active: boolean) {
       <div class="flex justify-end px-4 py-3">
         <button class="btn btn-ghost btn-sm" type="button" @click="emit('reset')">
           <RotateCcw :size="16" aria-hidden="true" />
-          Reset now playing lyrics
+          {{ t("Reset now playing lyrics") }}
         </button>
       </div>
     </div>

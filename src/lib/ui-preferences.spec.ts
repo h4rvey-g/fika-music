@@ -22,6 +22,7 @@ describe("UI preferences", () => {
   it("validates enum values and clamps volume", () => {
     expect(
       parseUiPreferences({
+        locale: "zh-TW",
         theme: "sepia",
         density: "compact",
         streamQuality: "lossless-plus",
@@ -30,6 +31,7 @@ describe("UI preferences", () => {
         playbackMode: "repeat-one",
       }),
     ).toEqual({
+      locale: "en",
       theme: "system",
       density: "compact",
       streamQuality: "128k",
@@ -43,6 +45,10 @@ describe("UI preferences", () => {
     for (const theme of THEME_OPTIONS) {
       expect(parseUiPreferences({ theme: theme.value }).theme).toBe(theme.value);
     }
+  });
+
+  it("accepts Simplified Chinese as a locale preference", () => {
+    expect(parseUiPreferences({ locale: "zh-CN" }).locale).toBe("zh-CN");
   });
 
   it("divides override themes into bright and dark groups", () => {
@@ -73,6 +79,7 @@ describe("UI preferences", () => {
 
     saveUiPreferences(
       {
+        locale: "zh-CN",
         theme: "dark",
         density: "comfortable",
         streamQuality: "flac",
@@ -86,6 +93,7 @@ describe("UI preferences", () => {
     expect(storage.setItem).toHaveBeenCalledWith(
       UI_PREFERENCES_STORAGE_KEY,
       JSON.stringify({
+        locale: "zh-CN",
         theme: "dark",
         density: "comfortable",
         streamQuality: "flac",
