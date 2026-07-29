@@ -84,6 +84,16 @@ export type MetadataLookupItemResult = { trackId: number, title: string, updated
 
 export type MetadataLookupTaskStatus = { state: LibraryTaskState, total: number, processed: number, updated: number, unchanged: number, failed: number, currentTrack: string | null, results: Array<MetadataLookupItemResult>, };
 
+export type MusicCollectionDetail = { collection: MusicCollectionSummary, items: Array<MusicCollectionItem>, };
+
+export type MusicCollectionItem = { id: string, position: number, kind: MusicCollectionItemKind, localTrack: LocalTrack | null, localAlbumGroupId: string | null, onlineTrack: OnlineTrack | null, addedAt: number, };
+
+export type MusicCollectionItemKind = "local" | "online";
+
+export type MusicCollectionMutation = { collection: MusicCollectionSummary, added: number, skipped: number, removed: number, };
+
+export type MusicCollectionSummary = { id: string, name: string, itemCount: number, localCount: number, onlineCount: number, createdAt: number, updatedAt: number, };
+
 export type MusicRecommendationKind = "daily" | "roaming" | "radar";
 
 export type NeteaseAccount = { accountRef: string, userId: string, displayName: string, avatarUrl: string | null, status: NeteaseAccountStatus, connectedAt: number, lastVerifiedAt: number, };
@@ -252,6 +262,15 @@ export const TAURI_COMMANDS = {
   localLibraryViewRange: "local_library_view_range",
   localLibraryTrackPosition: "local_library_track_position",
   setLocalLibraryGroupCollapsed: "set_local_library_group_collapsed",
+  listMusicCollections: "list_music_collections",
+  createMusicCollection: "create_music_collection",
+  renameMusicCollection: "rename_music_collection",
+  deleteMusicCollection: "delete_music_collection",
+  getMusicCollection: "get_music_collection",
+  addLocalSelectionToMusicCollection: "add_local_selection_to_music_collection",
+  addOnlineTracksToMusicCollection: "add_online_tracks_to_music_collection",
+  addMusicCollectionItemsToMusicCollection: "add_music_collection_items_to_music_collection",
+  removeMusicCollectionItems: "remove_music_collection_items",
   getAlbumArtSettings: "get_album_art_settings",
   setAlbumArtNetworkEnabled: "set_album_art_network_enabled",
   resolveLocalAlbumCover: "resolve_local_album_cover",
@@ -261,6 +280,7 @@ export const TAURI_COMMANDS = {
   pauseAlbumArtBackfill: "pause_album_art_backfill",
   getMetadataLookupTaskStatus: "get_metadata_lookup_task_status",
   startLocalMetadataLookup: "start_local_metadata_lookup",
+  startMusicCollectionMetadataLookup: "start_music_collection_metadata_lookup",
   resumeLocalMetadataLookup: "resume_local_metadata_lookup",
   pauseLocalMetadataLookup: "pause_local_metadata_lookup",
   createLocalLibraryPlaybackQueue: "create_local_library_playback_queue",

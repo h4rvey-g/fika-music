@@ -1276,6 +1276,10 @@ fn album_identity(track: &LocalTrack) -> AlbumIdentity {
     }
 }
 
+pub(crate) fn album_group_id(track: &LocalTrack) -> String {
+    album_identity(track).id
+}
+
 fn non_empty_trimmed(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)

@@ -28,8 +28,9 @@ use fika_music_lib::{
     LibrarySelectionRange, LibrarySelectionRequest, LibrarySortDirection, LibrarySortField,
     LibraryTaskState, LibraryTextField, LibraryViewItem, LibraryViewItemKind, LibraryViewRange,
     LocalTrack, MediaSource, MetadataLookupItemResult, MetadataLookupTaskStatus,
-    NeteaseCommandError, PluginCommandError, RemoteCommandError, ScanProgressEvent, ScanStatus,
-    TAURI_COMMAND_NAMES,
+    MusicCollectionDetail, MusicCollectionItem, MusicCollectionItemKind, MusicCollectionMutation,
+    MusicCollectionSummary, NeteaseCommandError, PluginCommandError, RemoteCommandError,
+    ScanProgressEvent, ScanStatus, TAURI_COMMAND_NAMES,
 };
 use ts_rs::{Config, TS};
 
@@ -94,6 +95,11 @@ fn generate(output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     export_all::<LibrarySelectionRequest>(&config)?;
     export_all::<LibraryPlaybackQueue>(&config)?;
     export_all::<LibraryQueueTrack>(&config)?;
+    export_all::<MusicCollectionSummary>(&config)?;
+    export_all::<MusicCollectionItemKind>(&config)?;
+    export_all::<MusicCollectionItem>(&config)?;
+    export_all::<MusicCollectionDetail>(&config)?;
+    export_all::<MusicCollectionMutation>(&config)?;
     export_all::<MediaSource>(&config)?;
     export_all::<LocalTrackPlaybackDetails>(&config)?;
     export_all::<TrackLyricsQuery>(&config)?;

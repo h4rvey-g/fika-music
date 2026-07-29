@@ -3,7 +3,7 @@ use rusqlite_migration::{Migrations, M};
 use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
-const CURRENT_SCHEMA_VERSION: i64 = 10;
+const CURRENT_SCHEMA_VERSION: i64 = 11;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CredentialStoreError {
@@ -326,6 +326,39 @@ fn migrations() -> Migrations<'static> {
             UPDATE kugou_accounts SET status = 'expired' WHERE status = 'active';
             ",
         ),
+        M::up(
+            "
+            CREATE TABLE IF NOT EXISTS music_collections (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS music_collection_items (
+                id TEXT PRIMARY KEY,
+                collection_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                item_kind TEXT NOT NULL CHECK(item_kind IN ('local', 'online')),
+                entry_key TEXT NOT NULL,
+                local_track_id INTEGER,
+                online_track_json TEXT,
+                added_at INTEGER NOT NULL,
+                FOREIGN KEY(collection_id) REFERENCES music_collections(id) ON DELETE CASCADE,
+                FOREIGN KEY(local_track_id) REFERENCES local_tracks(id) ON DELETE CASCADE,
+                UNIQUE(collection_id, entry_key),
+                UNIQUE(collection_id, position),
+                CHECK(
+                    (item_kind = 'local' AND local_track_id IS NOT NULL AND online_track_json IS NULL)
+                    OR
+                    (item_kind = 'online' AND local_track_id IS NULL AND online_track_json IS NOT NULL)
+                )
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_music_collection_items_collection_position
+                ON music_collection_items(collection_id, position);
+            ",
+        ),
     ])
 }
 
@@ -420,6 +453,8 @@ mod tests {
         assert!(has_table(&connection, "online_download_tasks"));
         assert!(has_table(&connection, "online_download_items"));
         assert!(has_table(&connection, "account_credentials"));
+        assert!(has_table(&connection, "music_collections"));
+        assert!(has_table(&connection, "music_collection_items"));
         assert!(has_column(
             &connection,
             "album_art_lookups",
@@ -567,6 +602,25 @@ mod tests {
                 active_accounts,
             ),
             (CURRENT_SCHEMA_VERSION, true, 0)
+        );
+    }
+
+    #[test]
+    fn initialize_should_upgrade_version_ten_with_music_collections() {
+        let mut connection = Connection::open_in_memory().expect("database should open");
+        migrations()
+            .to_version(&mut connection, 10)
+            .expect("version ten should initialize");
+
+        initialize(&mut connection).expect("latest migration should run");
+
+        assert_eq!(
+            (
+                user_version(&connection),
+                has_table(&connection, "music_collections"),
+                has_table(&connection, "music_collection_items"),
+            ),
+            (CURRENT_SCHEMA_VERSION, true, true),
         );
     }
 

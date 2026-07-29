@@ -23,6 +23,7 @@ mod account_commands;
 mod album_art;
 pub mod audio_source_system;
 pub mod bundled_plugins;
+mod collections;
 mod database;
 mod download_source_router;
 pub mod kugou;
@@ -57,6 +58,10 @@ pub use account_commands::{KugouCommandError, NeteaseCommandError};
 pub use album_art::{
     AlbumArtSettings, AlbumArtTaskStatus, AlbumCoverCandidate, AlbumCoverResult, AlbumCoverStatus,
     LibraryTaskState, MetadataLookupItemResult, MetadataLookupTaskStatus,
+};
+pub use collections::{
+    MusicCollectionDetail, MusicCollectionItem, MusicCollectionItemKind, MusicCollectionMutation,
+    MusicCollectionSummary,
 };
 pub use library::{
     LibraryAlbumGroup, LibraryGroupToggleResult, LibraryPlaybackQueue, LibraryQueryPage,
@@ -97,6 +102,15 @@ macro_rules! with_tauri_commands {
             local_library_view_range,
             local_library_track_position,
             set_local_library_group_collapsed,
+            list_music_collections,
+            create_music_collection,
+            rename_music_collection,
+            delete_music_collection,
+            get_music_collection,
+            add_local_selection_to_music_collection,
+            add_online_tracks_to_music_collection,
+            add_music_collection_items_to_music_collection,
+            remove_music_collection_items,
             get_album_art_settings,
             set_album_art_network_enabled,
             resolve_local_album_cover,
@@ -106,6 +120,7 @@ macro_rules! with_tauri_commands {
             pause_album_art_backfill,
             get_metadata_lookup_task_status,
             start_local_metadata_lookup,
+            start_music_collection_metadata_lookup,
             resume_local_metadata_lookup,
             pause_local_metadata_lookup,
             create_local_library_playback_queue,
@@ -224,6 +239,8 @@ enum AppError {
     TrackFileMissing(String),
     #[error("library error: {0}")]
     Library(#[from] library::LibraryError),
+    #[error("collection error: {0}")]
+    Collection(#[from] collections::CollectionError),
     #[error("library watcher error: {0}")]
     LibraryWatcher(#[from] library_watcher::LibraryWatcherError),
     #[error("album-art error: {0}")]
@@ -4241,6 +4258,136 @@ fn set_local_library_group_collapsed(
 }
 
 #[tauri::command]
+fn list_music_collections(
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<MusicCollectionSummary>> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("db").to_string())?;
+    collections::list_collections(&db).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn create_music_collection(
+    state: State<'_, AppState>,
+    name: String,
+) -> CommandResult<MusicCollectionSummary> {
+    let mut db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("db").to_string())?;
+    collections::create_collection(&mut db, &name).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn rename_music_collection(
+    state: State<'_, AppState>,
+    collection_id: String,
+    name: String,
+) -> CommandResult<MusicCollectionSummary> {
+    let mut db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("db").to_string())?;
+    collections::rename_collection(&mut db, collection_id.trim(), &name)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_music_collection(state: State<'_, AppState>, collection_id: String) -> CommandResult<()> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("db").to_string())?;
+    collections::delete_collection(&db, collection_id.trim()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_music_collection(
+    state: State<'_, AppState>,
+    collection_id: String,
+) -> CommandResult<MusicCollectionDetail> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("db").to_string())?;
+    collections::collection_detail(&db, collection_id.trim()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn add_local_selection_to_music_collection(
+    state: State<'_, AppState>,
+    collection_id: String,
+    snapshot_id: String,
+    selection: LibrarySelectionRequest,
+) -> CommandResult<MusicCollectionMutation> {
+    let track_ids = state
+        .library
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("library").to_string())?
+        .selected_tracks(snapshot_id.trim(), &selection)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|track| track.id)
+        .collect::<Vec<_>>();
+    let mut db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("db").to_string())?;
+    collections::add_local_tracks(&mut db, collection_id.trim(), &track_ids)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn add_online_tracks_to_music_collection(
+    state: State<'_, AppState>,
+    collection_id: String,
+    tracks: Vec<online_music::OnlineTrack>,
+) -> CommandResult<MusicCollectionMutation> {
+    let mut db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("db").to_string())?;
+    collections::add_online_tracks(&mut db, collection_id.trim(), &tracks)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn add_music_collection_items_to_music_collection(
+    state: State<'_, AppState>,
+    collection_id: String,
+    source_collection_id: String,
+    item_ids: Vec<String>,
+) -> CommandResult<MusicCollectionMutation> {
+    let mut db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("db").to_string())?;
+    collections::copy_items(
+        &mut db,
+        collection_id.trim(),
+        source_collection_id.trim(),
+        &item_ids,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn remove_music_collection_items(
+    state: State<'_, AppState>,
+    collection_id: String,
+    item_ids: Vec<String>,
+) -> CommandResult<MusicCollectionMutation> {
+    let mut db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("db").to_string())?;
+    collections::remove_items(&mut db, collection_id.trim(), &item_ids)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn get_album_art_settings(state: State<'_, AppState>) -> CommandResult<AlbumArtSettings> {
     state
         .album_art
@@ -4356,6 +4503,32 @@ fn start_local_metadata_lookup(
         .map_err(|error| error.to_string())?;
     if tracks.is_empty() {
         return Err("the metadata lookup selection is empty".to_owned());
+    }
+    state
+        .album_art
+        .start_metadata_lookup(tracks, move |status| {
+            let _ = app.emit(METADATA_LOOKUP_PROGRESS_EVENT, status);
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn start_music_collection_metadata_lookup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    collection_id: String,
+    item_ids: Vec<String>,
+) -> CommandResult<MetadataLookupTaskStatus> {
+    let tracks = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| AppError::StatePoisoned("db").to_string())?;
+        collections::local_tracks_for_items(&db, collection_id.trim(), &item_ids)
+            .map_err(|error| error.to_string())?
+    };
+    if tracks.is_empty() {
+        return Err("the metadata lookup selection has no local tracks".to_owned());
     }
     state
         .album_art

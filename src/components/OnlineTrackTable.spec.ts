@@ -1,7 +1,8 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import OnlineTrackTable from "./OnlineTrackTable.vue";
 import { createOnlineTrack } from "../test/fixtures";
+import { COLLECTION_DRAG_TYPE } from "../lib/collection-api";
 
 const track = createOnlineTrack({ key: "song-1", title: "Song 1" });
 
@@ -100,6 +101,20 @@ describe("OnlineTrackTable", () => {
       .find((button) => button.text().includes("Add to Playlist"));
     await addToPlaylist?.trigger("click");
     expect(wrapper.emitted("addSelectionToPlaylist")?.[0]).toEqual([[tracks[0], tracks[2]]]);
+
+    await rows[2].trigger("contextmenu", { clientX: 100, clientY: 100 });
+    const addToCollection = wrapper
+      .findAll("[data-online-track-menu] button")
+      .find((button) => button.text().includes("Add to Collection"));
+    await addToCollection?.trigger("click");
+    expect(wrapper.emitted("addToCollection")?.[0]).toEqual([[tracks[0], tracks[2]]]);
+
+    await rows[2].trigger("contextmenu", { clientX: 100, clientY: 100 });
+    const createCollection = wrapper
+      .findAll("[data-online-track-menu] button")
+      .find((button) => button.text().includes("New Collection"));
+    await createCollection?.trigger("click");
+    expect(wrapper.emitted("createCollection")?.[0]).toEqual([[tracks[0], tracks[2]]]);
   });
 
   it("selects a contiguous range with shift-click", async () => {
@@ -115,6 +130,24 @@ describe("OnlineTrackTable", () => {
     await rows[2].trigger("click", { shiftKey: true });
 
     expect(rows.every((row) => row.attributes("aria-selected") === "true")).toBe(true);
+  });
+
+  it("writes selected search results to the Collection drag payload", async () => {
+    const tracks = [track, createOnlineTrack({ key: "song-2", title: "Song 2" })];
+    const wrapper = mountTable(true, false, tracks);
+    const rows = wrapper.findAll("tbody tr");
+    const setData = vi.fn();
+
+    await rows[0].trigger("click");
+    await rows[1].trigger("click", { ctrlKey: true });
+    await rows[1].trigger("dragstart", {
+      dataTransfer: { effectAllowed: "none", setData },
+    });
+
+    const payload = JSON.parse(
+      setData.mock.calls.find(([type]) => type === COLLECTION_DRAG_TYPE)?.[1] ?? "null",
+    );
+    expect(payload).toEqual({ kind: "online", tracks });
   });
 
   it("opens comments for the single track selected from its context menu", async () => {

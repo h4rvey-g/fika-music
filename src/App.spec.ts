@@ -1,10 +1,15 @@
-import { config, flushPromises, mount } from "@vue/test-utils";
+import { config, DOMWrapper, flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent } from "vue";
 import App from "./App.vue";
 import type { PluginRecord } from "./lib/plugin-api";
 import type { AudioSourceRecord } from "./lib/audio-source-api";
 import type { OnlineTrack } from "./lib/online-music-api";
+import {
+  COLLECTION_DRAG_TYPE,
+  type MusicCollectionItem,
+  type MusicCollectionSummary,
+} from "./lib/collection-api";
 import {
   THEME_GROUPS,
   THEME_MODE_OPTIONS,
@@ -37,6 +42,10 @@ const dynamicThemeMocks = vi.hoisted(() => ({
   extractCoverTheme: vi.fn(),
 }));
 
+const collectionBrowserMocks = vi.hoisted(() => ({
+  startCollection: vi.fn(),
+}));
+
 vi.mock("./lib/dynamic-theme", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./lib/dynamic-theme")>();
   return {
@@ -47,6 +56,8 @@ vi.mock("./lib/dynamic-theme", async (importOriginal) => {
 
 let listedPlugins: PluginRecord[] = [];
 let listedAudioSources: AudioSourceRecord[] = [];
+let listedCollections: MusicCollectionSummary[] = [];
+let collectionBrowserPlaybackItems: MusicCollectionItem[] = [];
 let onlineMusicSettings = createOnlineMusicSettings();
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -82,7 +93,7 @@ vi.mock("./components/AudioSourceManager.vue", () => ({
 vi.mock("./components/LibraryBrowser.vue", () => ({
   default: defineComponent({
     name: "LibraryBrowser",
-    emits: ["playbackQueue", "summary", "error"],
+    emits: ["playbackQueue", "addToCollection", "createCollection", "summary", "error"],
     setup(_, { emit }) {
       function playSecond() {
         emit(
@@ -107,6 +118,37 @@ vi.mock("./components/LibraryBrowser.vue", () => ({
       return { playSecond };
     },
     template: '<button type="button" aria-label="Play Second" @click="playSecond">Library browser</button>',
+  }),
+}));
+
+vi.mock("./components/CollectionBrowser.vue", () => ({
+  default: defineComponent({
+    name: "CollectionBrowser",
+    props: {
+      collectionId: { type: String, required: true },
+      refreshKey: { type: Number, required: true },
+      activeLocalTrackId: { type: Number, default: null },
+      activeOnlineTrack: { type: Object, default: null },
+      isPlaying: { type: Boolean, required: true },
+      density: { type: String, required: true },
+    },
+    emits: ["play", "addToCollection", "createCollection", "changed", "error"],
+    setup(_, { emit, expose }) {
+      collectionBrowserMocks.startCollection.mockImplementation(async () => {
+        if (collectionBrowserPlaybackItems.length) {
+          emit("play", collectionBrowserPlaybackItems, 0, true);
+        }
+      });
+      const methods = {
+        refresh: vi.fn(async () => undefined),
+        startCollection: collectionBrowserMocks.startCollection,
+        startFirstTrack: vi.fn(async () => undefined),
+        updatePlayCount: vi.fn(),
+      };
+      expose(methods);
+      return methods;
+    },
+    template: '<div data-testid="collection-browser">Collection browser</div>',
   }),
 }));
 
@@ -139,6 +181,8 @@ describe("application shell", () => {
     vi.clearAllMocks();
     listedPlugins = [];
     listedAudioSources = [];
+    listedCollections = [];
+    collectionBrowserPlaybackItems = [];
     onlineMusicSettings = createOnlineMusicSettings();
     localStorage.clear();
     document.documentElement.removeAttribute("data-theme");
@@ -150,7 +194,7 @@ describe("application shell", () => {
     tauriMocks.emitTo.mockResolvedValue(undefined);
     tauriMocks.getByLabel.mockResolvedValue(null);
     config.global.plugins = [createTestQueryPlugin()];
-    tauriMocks.invoke.mockImplementation((command: string) => {
+    tauriMocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "get_scan_status") {
         return Promise.resolve(createScanStatus());
       }
@@ -159,6 +203,54 @@ describe("application shell", () => {
       }
       if (command === "list_audio_sources") {
         return Promise.resolve(listedAudioSources);
+      }
+      if (command === "list_music_collections") {
+        return Promise.resolve(listedCollections);
+      }
+      if (command === "create_music_collection") {
+        const collection: MusicCollectionSummary = {
+          id: `collection-${listedCollections.length + 1}`,
+          name: String(args?.name ?? "Collection"),
+          itemCount: 0,
+          localCount: 0,
+          onlineCount: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        };
+        listedCollections = [...listedCollections, collection];
+        return Promise.resolve(collection);
+      }
+      if (command === "add_online_tracks_to_music_collection") {
+        const collection = listedCollections.find(
+          (candidate) => candidate.id === args?.collectionId,
+        )!;
+        const added = Array.isArray(args?.tracks) ? args.tracks.length : 0;
+        const updated = { ...collection, itemCount: collection.itemCount + added };
+        listedCollections = listedCollections.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate
+        );
+        return Promise.resolve({
+          collection: updated,
+          added,
+          skipped: 0,
+          removed: 0,
+        });
+      }
+      if (command === "add_music_collection_items_to_music_collection") {
+        const collection = listedCollections.find(
+          (candidate) => candidate.id === args?.collectionId,
+        )!;
+        const added = Array.isArray(args?.itemIds) ? args.itemIds.length : 0;
+        const updated = { ...collection, itemCount: collection.itemCount + added };
+        listedCollections = listedCollections.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate
+        );
+        return Promise.resolve({
+          collection: updated,
+          added,
+          skipped: 0,
+          removed: 0,
+        });
       }
       if (command === "get_online_music_settings") {
         return Promise.resolve(onlineMusicSettings);
@@ -185,7 +277,7 @@ describe("application shell", () => {
     await flushPromises();
 
     const navigation = wrapper.get('nav[aria-label="Primary navigation"]');
-    expect(navigation.findAll("button").map((button) => button.text())).toEqual([
+    expect(navigation.findAll("[data-section-id]").map((button) => button.text())).toEqual([
       "Local Music",
       "Online Music",
       "Audio Sources",
@@ -225,6 +317,247 @@ describe("application shell", () => {
     await sourcesButton?.trigger("click");
     expect(wrapper.find('[data-testid="audio-source-manager"]').exists()).toBe(true);
     expect(wrapper.findComponent({ name: "NowPlayingPanel" }).exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("expands Collections below Local Music and creates a named Collection", async () => {
+    listedCollections = [{
+      id: "collection-1",
+      name: "Morning",
+      itemCount: 3,
+      localCount: 2,
+      onlineCount: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    }];
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const navigation = wrapper.get('nav[aria-label="Primary navigation"]');
+    const collection = navigation.get('[data-collection-id="collection-1"]');
+    const online = navigation.get('[data-section-id="online"]');
+    expect(
+      collection.element.compareDocumentPosition(online.element)
+      & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    await navigation.get('button[aria-label="Collapse Collections"]').trigger("click");
+    expect(navigation.find('[data-collection-id="collection-1"]').exists()).toBe(false);
+    await navigation.get('button[aria-label="New Collection"]').trigger("click");
+    const dialog = new DOMWrapper(document.body.querySelector('[aria-labelledby="collection-name-dialog-title"]')!);
+    await dialog.get('input[aria-label="Collection name"]').setValue("Road Trip");
+    const create = dialog.findAll("button").find((button) => button.text() === "Create");
+    await create?.trigger("click");
+    await flushPromises();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("create_music_collection", {
+      name: "Road Trip",
+    });
+    expect(wrapper.get("h1").text()).toBe("Road Trip");
+    expect(wrapper.find('[data-testid="collection-browser"]').exists()).toBe(true);
+    expect(navigation.find('[data-collection-id="collection-2"]').exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("starts a sidebar Collection from its first track on double-click", async () => {
+    const collection: MusicCollectionSummary = {
+      id: "collection-1",
+      name: "Morning",
+      itemCount: 1,
+      localCount: 1,
+      onlineCount: 0,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    listedCollections = [collection];
+    const track = createLocalTrack({ id: 7, title: "First Song" });
+    const item: MusicCollectionItem = {
+      id: "item-1",
+      position: 0,
+      kind: "local",
+      localTrack: track,
+      localAlbumGroupId: "album:morning",
+      onlineTrack: null,
+      addedAt: 1,
+    };
+    collectionBrowserPlaybackItems = [item];
+    const defaultInvoke = tauriMocks.invoke.getMockImplementation();
+    tauriMocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "local_track_media_source") {
+        return Promise.resolve({ filePath: "/music/first.mp3" });
+      }
+      if (command === "local_track_playback_details") {
+        return Promise.resolve({ coverDataUrl: null, lyrics: null, lyricsError: null });
+      }
+      return defaultInvoke?.(command, args);
+    });
+
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get('[data-collection-id="collection-1"]').trigger("dblclick");
+    await flushPromises();
+
+    expect(wrapper.get("h1").text()).toBe("Morning");
+    expect(collectionBrowserMocks.startCollection).toHaveBeenCalledWith("collection-1");
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("local_track_media_source", { trackId: 7 });
+    expect(wrapper.get('[data-testid="playback-track-info"]').text()).toContain("First Song");
+    wrapper.unmount();
+  });
+
+  it("opens New Collection from the Local Music context menu", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper
+      .get('nav[aria-label="Primary navigation"] [data-section-id="local"]')
+      .trigger("contextmenu", { clientX: 80, clientY: 80 });
+
+    const contextMenu = document.body.querySelector<HTMLElement>(
+      '[data-sidebar-context-menu][aria-label="Local Music actions"]',
+    );
+    expect(contextMenu?.textContent).toContain("New Collection");
+    contextMenu?.querySelector<HTMLButtonElement>("button")?.click();
+    await wrapper.vm.$nextTick();
+    expect(document.body.querySelector('input[aria-label="Collection name"]')).not.toBeNull();
+    wrapper.unmount();
+  });
+
+  it("accepts dragged search results on a sidebar Collection", async () => {
+    listedCollections = [{
+      id: "collection-1",
+      name: "Drop Target",
+      itemCount: 0,
+      localCount: 0,
+      onlineCount: 0,
+      createdAt: 1,
+      updatedAt: 1,
+    }];
+    const track = createOnlineTrack({ key: "drop-track" });
+    const dataTransfer = {
+      types: [COLLECTION_DRAG_TYPE],
+      dropEffect: "none",
+      getData: (type: string) => type === COLLECTION_DRAG_TYPE
+        ? JSON.stringify({ kind: "online", tracks: [track] })
+        : "",
+    };
+    const wrapper = mount(App);
+    await flushPromises();
+    const target = wrapper.get('[data-collection-id="collection-1"]');
+
+    await target.trigger("dragover", { dataTransfer });
+    expect(target.classes()).toContain("outline-primary");
+    await target.trigger("drop", { dataTransfer });
+    await flushPromises();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith(
+      "add_online_tracks_to_music_collection",
+      { collectionId: "collection-1", tracks: [track] },
+    );
+    expect(target.text()).toContain("1");
+    wrapper.unmount();
+  });
+
+  it("copies a Collection selection through the Collection picker", async () => {
+    listedCollections = [
+      {
+        id: "source",
+        name: "Source",
+        itemCount: 2,
+        localCount: 1,
+        onlineCount: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      {
+        id: "target",
+        name: "Target",
+        itemCount: 0,
+        localCount: 0,
+        onlineCount: 0,
+        createdAt: 2,
+        updatedAt: 2,
+      },
+    ];
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get('[data-collection-id="source"]').trigger("click");
+    const browser = wrapper.getComponent({ name: "CollectionBrowser" });
+
+    browser.vm.$emit("addToCollection", {
+      sourceCollectionId: "source",
+      itemIds: ["item-1", "item-2"],
+    });
+    await wrapper.vm.$nextTick();
+    const picker = new DOMWrapper(
+      document.body.querySelector('[aria-labelledby="collection-picker-title"]')!,
+    );
+    expect(picker.text()).toContain("Target");
+    expect(picker.text()).not.toContain("Source");
+    const add = picker.findAll("button").find((button) => button.text() === "Add");
+    await add?.trigger("click");
+    await flushPromises();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith(
+      "add_music_collection_items_to_music_collection",
+      {
+        collectionId: "target",
+        sourceCollectionId: "source",
+        itemIds: ["item-1", "item-2"],
+      },
+    );
+    wrapper.unmount();
+  });
+
+  it("keeps a Collection queue pending until playback is requested", async () => {
+    listedCollections = [{
+      id: "collection-1",
+      name: "Queue",
+      itemCount: 1,
+      localCount: 1,
+      onlineCount: 0,
+      createdAt: 1,
+      updatedAt: 1,
+    }];
+    const track = createLocalTrack({ id: 7, title: "Queued Song" });
+    const item: MusicCollectionItem = {
+      id: "item-1",
+      position: 0,
+      kind: "local",
+      localTrack: track,
+      localAlbumGroupId: "album:queue",
+      onlineTrack: null,
+      addedAt: 1,
+    };
+    const defaultInvoke = tauriMocks.invoke.getMockImplementation();
+    tauriMocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "local_track_media_source") {
+        return Promise.resolve({ filePath: "/music/queued.mp3" });
+      }
+      if (command === "local_track_playback_details") {
+        return Promise.resolve({ coverDataUrl: null, lyrics: null, lyricsError: null });
+      }
+      return defaultInvoke?.(command, args);
+    });
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get('[data-collection-id="collection-1"]').trigger("click");
+
+    wrapper.getComponent({ name: "CollectionBrowser" }).vm.$emit(
+      "play",
+      [item],
+      0,
+      false,
+    );
+    await flushPromises();
+    expect(tauriMocks.invoke).not.toHaveBeenCalledWith(
+      "local_track_media_source",
+      expect.anything(),
+    );
+
+    await wrapper.get('button[aria-label="Play playback"]').trigger("click");
+    await flushPromises();
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("local_track_media_source", { trackId: 7 });
+    expect(wrapper.get('[data-testid="playback-track-info"]').text()).toContain("Queued Song");
     wrapper.unmount();
   });
 

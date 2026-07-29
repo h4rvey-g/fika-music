@@ -10,6 +10,7 @@ import type {
 } from "../generated/bindings";
 import { createLocalTrack, createScanStatus } from "../test/fixtures";
 import { virtualizerMocks } from "../test/vue-virtual.mock";
+import { COLLECTION_DRAG_TYPE } from "../lib/collection-api";
 
 const tauriMocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -348,6 +349,60 @@ describe("LibraryBrowser", () => {
     expect(wrapper.emitted("playbackQueue")?.[0]?.[0]).toEqual(
       expect.objectContaining({ queueId: "queue-1", total: 2 }),
     );
+  });
+
+  it("sends the snapshot-backed selection to Collection actions", async () => {
+    const wrapper = mountLibrary();
+    await flushPromises();
+    const grid = wrapper.get('[role="table"]');
+    const firstRow = wrapper.get("#library-row-2");
+
+    await grid.trigger("keydown", { key: "a", ctrlKey: true });
+    await firstRow.trigger("contextmenu", { clientX: 100, clientY: 100 });
+    const add = wrapper
+      .findAll('[aria-label="Track actions"] button')
+      .find((button) => button.text().includes("Add selection to Collection"));
+    await add?.trigger("click");
+
+    expect(wrapper.emitted("addToCollection")?.[0]).toEqual([{
+      snapshotId: "snapshot-1",
+      selection: {
+        selectAll: true,
+        ranges: [],
+        excludedRanges: [],
+      },
+    }]);
+
+    await firstRow.trigger("contextmenu", { clientX: 100, clientY: 100 });
+    const create = wrapper
+      .findAll('[aria-label="Track actions"] button')
+      .find((button) => button.text().includes("New Collection"));
+    await create?.trigger("click");
+    expect(wrapper.emitted("createCollection")?.[0]).toEqual(
+      wrapper.emitted("addToCollection")?.[0],
+    );
+  });
+
+  it("writes the selected Local Music rows to the Collection drag payload", async () => {
+    const wrapper = mountLibrary();
+    await flushPromises();
+    const setData = vi.fn();
+    const dataTransfer = { effectAllowed: "none", setData };
+
+    await wrapper.get("#library-row-2").trigger("dragstart", { dataTransfer });
+
+    const payload = JSON.parse(
+      setData.mock.calls.find(([type]) => type === COLLECTION_DRAG_TYPE)?.[1] ?? "null",
+    );
+    expect(payload).toEqual({
+      kind: "local",
+      snapshotId: "snapshot-1",
+      selection: {
+        selectAll: false,
+        ranges: [{ start: 0, end: 0 }],
+        excludedRanges: [],
+      },
+    });
   });
 
   it("double-clicks into the full query snapshot instead of narrowing to the clicked row", async () => {

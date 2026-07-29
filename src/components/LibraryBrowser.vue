@@ -12,10 +12,12 @@ import {
   Clipboard,
   Disc3,
   Download,
+  FolderPlus,
   FolderSearch,
   Info,
   ListFilter,
   ListMusic,
+  ListPlus,
   LoaderCircle,
   Pause,
   Play,
@@ -62,6 +64,10 @@ import type {
   ScanStatus,
 } from "../generated/bindings";
 import type { LayoutDensity } from "../lib/ui-preferences";
+import {
+  writeCollectionDragPayload,
+  type LocalCollectionSelection,
+} from "../lib/collection-api";
 
 type ColumnDefinition = {
   id: LibraryColumnId;
@@ -86,6 +92,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   playbackQueue: [queue: LibraryPlaybackQueue, autoplay: boolean];
+  addToCollection: [source: LocalCollectionSelection];
+  createCollection: [source: LocalCollectionSelection];
   error: [message: string];
   summary: [summary: LibrarySummary];
 }>();
@@ -780,7 +788,7 @@ function openRowMenu(event: MouseEvent, trackIndex: number, track: LocalTrack) {
   }
   columnMenu.value = null;
   groupMenu.value = null;
-  rowMenu.value = { ...menuPosition(event.clientX, event.clientY, 240, 330), track, trackIndex };
+  rowMenu.value = { ...menuPosition(event.clientX, event.clientY, 240, 410), track, trackIndex };
 }
 
 function openGroupMenu(event: MouseEvent, virtualIndex: number, group: LibraryAlbumGroup) {
@@ -797,7 +805,7 @@ function openGroupMenu(event: MouseEvent, virtualIndex: number, group: LibraryAl
   rowMenu.value = null;
   columnMenu.value = null;
   groupMenu.value = {
-    ...menuPosition(event.clientX, event.clientY, 250, 350),
+    ...menuPosition(event.clientX, event.clientY, 250, 420),
     group,
     virtualIndex,
   };
@@ -876,6 +884,50 @@ function groupSelection(group: LibraryAlbumGroup): LibrarySelectionRequest {
     ranges: [{ start: group.startIndex, end: group.endIndex }],
     excludedRanges: [],
   };
+}
+
+function selectedCollectionSource(): LocalCollectionSelection | null {
+  const selection = selectionRequest();
+  if (!snapshotId.value || !selection) return null;
+  return { snapshotId: snapshotId.value, selection };
+}
+
+function requestCollectionAction(createNew: boolean) {
+  const source = selectedCollectionSource();
+  if (!source) return;
+  if (createNew) emit("createCollection", source);
+  else emit("addToCollection", source);
+  closeMenus();
+}
+
+function beginTrackDrag(event: DragEvent, trackIndex: number) {
+  if (!isTrackSelected(trackIndex)) {
+    selectAll.value = false;
+    excludedRanges.value = [];
+    selectionRanges.value = [{ start: trackIndex, end: trackIndex }];
+    selectedAlbumRanges.value = new Map();
+    selectionAnchor.value = trackIndex;
+  }
+  const source = selectedCollectionSource();
+  if (source) {
+    writeCollectionDragPayload(event.dataTransfer, { kind: "local", ...source });
+  }
+  closeMenus();
+}
+
+function beginGroupDrag(event: DragEvent, group: LibraryAlbumGroup) {
+  if (!isGroupRangeSelected(group)) {
+    selectAll.value = false;
+    excludedRanges.value = [];
+    selectionRanges.value = [{ start: group.startIndex, end: group.endIndex }];
+    selectionAnchor.value = group.startIndex;
+    markAlbumSelected(group, false);
+  }
+  const source = selectedCollectionSource();
+  if (source) {
+    writeCollectionDragPayload(event.dataTransfer, { kind: "local", ...source });
+  }
+  closeMenus();
 }
 
 async function toggleGroup(group: LibraryAlbumGroup) {
@@ -1736,9 +1788,11 @@ defineExpose({
             role="row"
             :aria-rowindex="row.virtual.index + 1"
             :aria-selected="isGroupSelected(row.item.group)"
+            draggable="true"
             @click="selectGroup($event, row.virtual.index, row.item.group)"
             @dblclick="playGroup(row.item.group, true)"
             @contextmenu.stop="openGroupMenu($event, row.virtual.index, row.item.group)"
+            @dragstart="beginGroupDrag($event, row.item.group)"
           >
             <button
               class="grid w-7 shrink-0 place-items-center"
@@ -1863,9 +1917,11 @@ defineExpose({
             :aria-selected="isTrackSelected(row.item.trackIndex)"
             :aria-current="activeTrackId === row.item.track.id ? 'true' : undefined"
             :data-playing-track="activeTrackId === row.item.track.id ? '' : undefined"
+            draggable="true"
             @click="selectTrack($event, row.virtual.index, row.item.trackIndex)"
             @dblclick="createPlaybackQueue(row.item.trackIndex, true)"
             @contextmenu.stop="openRowMenu($event, row.item.trackIndex, row.item.track)"
+            @dragstart="beginTrackDrag($event, row.item.trackIndex)"
           >
             <div
               v-for="column in visibleColumns"
@@ -1925,6 +1981,8 @@ defineExpose({
   >
       <li><button type="button" :disabled="isCreatingQueue" @click="createPlaybackQueue(rowMenu.trackIndex, true, true)"><Play :size="16" aria-hidden="true" />Play selection</button></li>
       <li><button type="button" :disabled="isCreatingQueue" @click="createPlaybackQueue(rowMenu.trackIndex, false, true)"><ListMusic :size="16" aria-hidden="true" />Set playback queue</button></li>
+      <li><button type="button" @click="requestCollectionAction(false)"><ListPlus :size="16" aria-hidden="true" />Add selection to Collection</button></li>
+      <li><button type="button" @click="requestCollectionAction(true)"><FolderPlus :size="16" aria-hidden="true" />New Collection from selection</button></li>
       <li><button type="button" :disabled="metadataTask?.state === 'running' || metadataTask?.state === 'paused'" @click="requestMetadataLookup"><Tags :size="16" aria-hidden="true" />Look up metadata</button></li>
     <li class="my-1 h-px bg-base-300"></li>
       <li><button type="button" @click="revealContextTrack"><FolderSearch :size="16" aria-hidden="true" />Show in file manager</button></li>
@@ -1941,6 +1999,8 @@ defineExpose({
   >
       <li><button type="button" :disabled="isCreatingQueue" @click="playGroup(groupMenu.group, true)"><Play :size="16" aria-hidden="true" />Play album group</button></li>
       <li><button type="button" :disabled="isCreatingQueue" @click="playGroup(groupMenu.group, false)"><ListMusic :size="16" aria-hidden="true" />Set group as queue</button></li>
+      <li><button type="button" @click="requestCollectionAction(false)"><ListPlus :size="16" aria-hidden="true" />Add selection to Collection</button></li>
+      <li><button type="button" @click="requestCollectionAction(true)"><FolderPlus :size="16" aria-hidden="true" />New Collection from selection</button></li>
       <li><button type="button" :disabled="metadataTask?.state === 'running' || metadataTask?.state === 'paused'" @click="requestMetadataLookup"><Tags :size="16" aria-hidden="true" />Look up metadata</button></li>
       <li v-if="coverFor(groupMenu.group.id)?.status === 'needsReview'"><button type="button" @click="reviewGroupCover(groupMenu.group)"><Info :size="16" aria-hidden="true" />Review cover matches</button></li>
     <li class="my-1 h-px bg-base-300"></li>

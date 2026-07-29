@@ -7,20 +7,25 @@ import {
   AudioLines,
   Captions,
   Check,
+  ChevronRight,
   Download,
   Ellipsis,
   FolderOpen,
+  FolderPlus,
   Gauge,
   Headphones,
   Heart,
   Library,
+  ListMusic,
   ListPlus,
   ListOrdered,
   Menu,
   Music2,
   Pause,
   Palette,
+  Pencil,
   Play,
+  Plus,
   Plug,
   Radio,
   RefreshCw,
@@ -30,10 +35,12 @@ import {
   Shuffle,
   SkipBack,
   SkipForward,
+  Trash2,
   Volume2,
   X,
 } from "@lucide/vue";
 import LibraryBrowser from "./components/LibraryBrowser.vue";
+import CollectionBrowser from "./components/CollectionBrowser.vue";
 import AudioSourceManager from "./components/AudioSourceManager.vue";
 import KugouSource from "./components/KugouSource.vue";
 import PluginManager from "./components/PluginManager.vue";
@@ -72,6 +79,7 @@ import {
 import { TAURI_COMMANDS } from "./generated/bindings";
 import type {
   AudioSourceSelectionMode,
+  LibraryChangedEvent,
   LibraryPlaybackQueue,
   LibraryQueueTrack,
   LocalTrack,
@@ -122,10 +130,34 @@ import {
   saveNowPlayingLyricsPreferences,
   type NowPlayingLyricsPreferences,
 } from "./lib/now-playing-lyrics";
+import {
+  COLLECTION_DRAG_TYPE,
+  addMusicCollectionItemsToMusicCollection,
+  addLocalSelectionToMusicCollection,
+  addOnlineTracksToMusicCollection,
+  createMusicCollection,
+  deleteMusicCollection,
+  listMusicCollections,
+  readCollectionDragPayload,
+  renameMusicCollection,
+  type CollectionSeed,
+  type CollectionItemSelection,
+  type LocalCollectionSelection,
+  type MusicCollectionItem,
+  type MusicCollectionMutation,
+  type MusicCollectionSummary,
+} from "./lib/collection-api";
 
 type LibraryBrowserInstance = {
   refresh: () => Promise<void>;
   startFirstTrack: () => Promise<void>;
+  updatePlayCount: (trackId: number, playCount: number) => void;
+};
+
+type CollectionBrowserInstance = {
+  refresh: () => Promise<void>;
+  startCollection: (collectionId?: string) => Promise<void>;
+  startFirstTrack: (collectionId?: string) => Promise<void>;
   updatePlayCount: (trackId: number, playCount: number) => void;
 };
 
@@ -190,10 +222,16 @@ const STREAM_QUALITY_OPTIONS: ReadonlyArray<{ value: StreamQuality; label: strin
 
 const sections = [...mainSections, settingsSection];
 type AppSection = (typeof sections)[number]["id"];
-type ActiveSection = AppSection | "plugin";
+type ActiveSection = AppSection | "plugin" | "collection";
 type AppLocation =
-  | { section: AppSection; pluginId: null }
-  | { section: "plugin"; pluginId: string };
+  | { section: AppSection; pluginId: null; collectionId: null }
+  | { section: "plugin"; pluginId: string; collectionId: null }
+  | { section: "collection"; pluginId: null; collectionId: string };
+
+type PositionedMenu = { x: number; y: number };
+type CollectionNameDialog =
+  | { intent: "create"; seed: CollectionSeed }
+  | { intent: "rename"; collectionId: string };
 
 const MOUSE_BACK_BUTTON = 3;
 const MOUSE_FORWARD_BUTTON = 4;
@@ -214,8 +252,24 @@ const {
 } = libraryScan;
 const activeSection = ref<ActiveSection>("local");
 const activePluginId = ref<string | null>(null);
+const activeCollectionId = ref<string | null>(null);
 const pluginRecords = ref<PluginRecord[]>([]);
 const audioSourceRecords = ref<AudioSourceRecord[]>([]);
+const musicCollections = ref<MusicCollectionSummary[]>([]);
+const collectionsExpanded = ref(true);
+const collectionRefreshKey = ref(0);
+const collectionDropTargetId = ref<string | null>(null);
+const localMusicContextMenu = ref<PositionedMenu | null>(null);
+const collectionContextMenu = ref<(PositionedMenu & { collectionId: string }) | null>(null);
+const collectionPickerSeed = ref<CollectionSeed | null>(null);
+const selectedCollectionId = ref("");
+const collectionNameDialog = ref<CollectionNameDialog | null>(null);
+const collectionName = ref("");
+const collectionNameInput = ref<HTMLInputElement | null>(null);
+const collectionActionError = ref<string | null>(null);
+const collectionActionBusy = ref(false);
+const collectionDeleteTarget = ref<MusicCollectionSummary | null>(null);
+const collectionNotice = ref<string | null>(null);
 const sidebarOpen = ref(false);
 const activeTrack = ref<LocalTrack | null>(null);
 const activeRemoteTitle = ref<string | null>(null);
@@ -247,6 +301,7 @@ const isPreparingPlayback = ref(false);
 const audioElement = ref<HTMLAudioElement | null>(null);
 const playbackOptionsMenu = ref<HTMLDetailsElement | null>(null);
 const libraryBrowser = ref<LibraryBrowserInstance | null>(null);
+const collectionBrowser = ref<CollectionBrowserInstance | null>(null);
 const onlineMusic = ref<OnlineMusicInstance | null>(null);
 const libraryTrackCount = ref(0);
 const filteredLibraryTrackCount = ref(0);
@@ -259,13 +314,18 @@ const remoteQueue = ref<OnlineTrack[]>([]);
 const remoteQueueIndex = ref(-1);
 const remoteQueueActive = ref(false);
 const remoteQueueLoadMore = ref<OnlineQueueLoadMore | null>(null);
+const collectionQueue = ref<MusicCollectionItem[]>([]);
+const collectionQueueIndex = ref(-1);
+const collectionQueueActive = ref(false);
 const resolvingOnlineTrackKey = ref<string | null>(null);
 const playbackAudioSourceId = ref(savedUiPreferences.audioSourceId);
 const remoteQuality = ref(savedUiPreferences.streamQuality);
 const audioSourceSelectionMode = ref<AudioSourceSelectionMode>("automatic");
 const onlineMusicConfig = useOnlineMusicConfig();
 
-const navigationHistory: AppLocation[] = [{ section: "local", pluginId: null }];
+const navigationHistory: AppLocation[] = [
+  { section: "local", pluginId: null, collectionId: null },
+];
 let navigationHistoryIndex = 0;
 let playbackDetailsGeneration = 0;
 let onlinePlaybackController: AbortController | null = null;
@@ -276,8 +336,11 @@ let pendingRemoteQueueLoad: Promise<OnlineTrack[]> | null = null;
 let remoteQueueGeneration = 0;
 let audioSourceSelectionModeGeneration = 0;
 let sourceChangeMessageTimer: ReturnType<typeof setTimeout> | null = null;
+let collectionNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+let sidebarCollectionPlaybackGeneration = 0;
 let dynamicThemeGeneration = 0;
 const desktopLyricsUnlisteners: UnlistenFn[] = [];
+const collectionUnlisteners: UnlistenFn[] = [];
 const failedOnlineAttempts = new ExpiringCache<string, true>(5 * 60_000, 256);
 const failedOnlineUrls = new ExpiringCache<string, true>(5 * 60_000, 256);
 const playCountTracker = new PlayCountTracker();
@@ -287,7 +350,16 @@ const availableAudioSources = computed(() => buildAudioSourceOptions(audioSource
 const activePlugin = computed(
   () => enabledPlugins.value.find((plugin) => plugin.id === activePluginId.value) ?? null,
 );
+const activeCollection = computed(
+  () => musicCollections.value.find((collection) => collection.id === activeCollectionId.value) ?? null,
+);
 const currentSection = computed(() => {
+  if (activeSection.value === "collection" && activeCollection.value) {
+    return {
+      label: activeCollection.value.name,
+      description: `${activeCollection.value.itemCount.toLocaleString()} tracks in this Collection`,
+    };
+  }
   if (activeSection.value === "plugin" && activePlugin.value) {
     return {
       label: activePlugin.value.name,
@@ -343,6 +415,9 @@ const currentPlaybackQuality = computed(() =>
     : remoteQuality.value,
 );
 const canGoPrevious = computed(() => {
+  if (collectionQueueActive.value && collectionQueueIndex.value >= 0) {
+    return playbackMode.value !== "sequential" || collectionQueueIndex.value > 0;
+  }
   if (remoteQueueActive.value && remoteQueueIndex.value >= 0) {
     return playbackMode.value !== "sequential" || remoteQueueIndex.value > 0;
   }
@@ -357,6 +432,10 @@ const canGoPrevious = computed(() => {
   return playbackMode.value !== "sequential" || localQueueIndex.value > 0;
 });
 const canGoNext = computed(() => {
+  if (collectionQueueActive.value && collectionQueueIndex.value >= 0) {
+    return playbackMode.value !== "sequential"
+      || collectionQueueIndex.value < collectionQueue.value.length - 1;
+  }
   if (remoteQueueActive.value && remoteQueueIndex.value >= 0) {
     return (
       Boolean(remoteQueueLoadMore.value) ||
@@ -497,10 +576,12 @@ onMounted(async () => {
   window.addEventListener("mouseup", handleMouseNavigation);
   window.addEventListener("auxclick", suppressMouseNavigationDefault);
   await setupDesktopLyricsEvents();
+  await setupCollectionEvents();
   await Promise.all([
     libraryScan.initialize(),
     loadPluginNavigation(),
     loadAudioSourceNavigation(),
+    loadCollectionNavigation(),
   ]);
   const modeGeneration = audioSourceSelectionModeGeneration;
   void onlineMusicConfig.load().then(({ settings }) => {
@@ -521,10 +602,12 @@ onBeforeUnmount(() => {
   window.removeEventListener("auxclick", suppressMouseNavigationDefault);
   libraryScan.dispose();
   if (sourceChangeMessageTimer) clearTimeout(sourceChangeMessageTimer);
+  if (collectionNoticeTimer) clearTimeout(collectionNoticeTimer);
   playbackDetailsGeneration += 1;
   onlinePlaybackController?.abort();
   cancelOnlinePreload();
   for (const unlisten of desktopLyricsUnlisteners) unlisten();
+  for (const unlisten of collectionUnlisteners) unlisten();
   sampleListeningTime();
 });
 
@@ -542,9 +625,18 @@ async function setupDesktopLyricsEvents() {
   );
 }
 
+async function setupCollectionEvents() {
+  collectionUnlisteners.push(
+    await listen<LibraryChangedEvent>("library:changed", () => {
+      collectionRefreshKey.value += 1;
+      void loadCollectionNavigation();
+    }),
+  );
+}
+
 function selectSection(section: AppSection) {
   const resetOnlineHome = section === "online" && activeSection.value === "online";
-  navigateTo({ section, pluginId: null });
+  navigateTo({ section, pluginId: null, collectionId: null });
   if (resetOnlineHome) {
     void nextTick(() => onlineMusic.value?.showHome());
   }
@@ -559,16 +651,41 @@ async function openNowPlayingLyricsSettings() {
 }
 
 function selectPlugin(pluginId: string) {
-  navigateTo({ section: "plugin", pluginId });
+  navigateTo({ section: "plugin", pluginId, collectionId: null });
+}
+
+function selectCollection(collectionId: string) {
+  navigateTo({ section: "collection", pluginId: null, collectionId });
+}
+
+async function playCollectionFromSidebar(collection: MusicCollectionSummary) {
+  selectCollection(collection.id);
+  const generation = ++sidebarCollectionPlaybackGeneration;
+  if (!collection.itemCount) {
+    showCollectionNotice(`${collection.name} has no tracks to play.`);
+    return;
+  }
+  await nextTick();
+  if (
+    generation !== sidebarCollectionPlaybackGeneration
+    || activeSection.value !== "collection"
+    || activeCollectionId.value !== collection.id
+  ) {
+    return;
+  }
+  await collectionBrowser.value?.startCollection(collection.id);
 }
 
 function locationsMatch(left: AppLocation, right: AppLocation) {
-  return left.section === right.section && left.pluginId === right.pluginId;
+  return left.section === right.section
+    && left.pluginId === right.pluginId
+    && left.collectionId === right.collectionId;
 }
 
 function applyLocation(location: AppLocation) {
   activeSection.value = location.section;
   activePluginId.value = location.pluginId;
+  activeCollectionId.value = location.collectionId;
   sidebarOpen.value = false;
 }
 
@@ -591,8 +708,13 @@ function replaceCurrentLocation(location: AppLocation) {
 }
 
 function isLocationAvailable(location: AppLocation) {
-  return location.section !== "plugin"
-    || enabledPlugins.value.some((plugin) => plugin.id === location.pluginId);
+  if (location.section === "plugin") {
+    return enabledPlugins.value.some((plugin) => plugin.id === location.pluginId);
+  }
+  if (location.section === "collection") {
+    return musicCollections.value.some((collection) => collection.id === location.collectionId);
+  }
+  return true;
 }
 
 function moveThroughNavigationHistory(direction: -1 | 1) {
@@ -640,6 +762,318 @@ async function loadAudioSourceNavigation() {
   }
 }
 
+async function loadCollectionNavigation() {
+  try {
+    const collections = await listMusicCollections();
+    musicCollections.value = Array.isArray(collections) ? collections : [];
+    if (
+      activeSection.value === "collection"
+      && !musicCollections.value.some((collection) => collection.id === activeCollectionId.value)
+    ) {
+      replaceCurrentLocation({ section: "local", pluginId: null, collectionId: null });
+    }
+  } catch (error) {
+    appError.value = normalizeError(error);
+  }
+}
+
+function updateCollectionSummary(collection: MusicCollectionSummary) {
+  const index = musicCollections.value.findIndex((candidate) => candidate.id === collection.id);
+  if (index < 0) {
+    musicCollections.value = [...musicCollections.value, collection];
+  } else {
+    const next = [...musicCollections.value];
+    next[index] = collection;
+    musicCollections.value = next;
+  }
+  collectionRefreshKey.value += 1;
+}
+
+function openCreateCollection(seed: CollectionSeed = { kind: "empty" }) {
+  collectionPickerSeed.value = null;
+  collectionNameDialog.value = { intent: "create", seed };
+  collectionName.value = "";
+  collectionActionError.value = null;
+  closeSidebarContextMenus();
+  void nextTick(() => collectionNameInput.value?.focus());
+}
+
+function openRenameCollection(collection: MusicCollectionSummary) {
+  collectionNameDialog.value = { intent: "rename", collectionId: collection.id };
+  collectionName.value = collection.name;
+  collectionActionError.value = null;
+  closeSidebarContextMenus();
+  void nextTick(() => {
+    collectionNameInput.value?.focus();
+    collectionNameInput.value?.select();
+  });
+}
+
+function openCollectionPicker(seed: Exclude<CollectionSeed, { kind: "empty" }>) {
+  const options = seed.kind === "collection"
+    ? musicCollections.value.filter((collection) => collection.id !== seed.sourceCollectionId)
+    : musicCollections.value;
+  if (!options.length) {
+    openCreateCollection(seed);
+    return;
+  }
+  collectionPickerSeed.value = seed;
+  selectedCollectionId.value = options[0].id;
+  collectionActionError.value = null;
+}
+
+function collectionPickerOptions() {
+  const seed = collectionPickerSeed.value;
+  return seed?.kind === "collection"
+    ? musicCollections.value.filter((collection) => collection.id !== seed.sourceCollectionId)
+    : musicCollections.value;
+}
+
+function addLocalSelectionToCollection(source: LocalCollectionSelection) {
+  openCollectionPicker({ kind: "local", ...source });
+}
+
+function createCollectionFromLocalSelection(source: LocalCollectionSelection) {
+  openCreateCollection({ kind: "local", ...source });
+}
+
+function addOnlineTracksToCollection(tracks: OnlineTrack[]) {
+  if (tracks.length) openCollectionPicker({ kind: "online", tracks: [...tracks] });
+}
+
+function createCollectionFromOnlineTracks(tracks: OnlineTrack[]) {
+  if (tracks.length) openCreateCollection({ kind: "online", tracks: [...tracks] });
+}
+
+function addCollectionItemsToCollection(source: CollectionItemSelection) {
+  if (source.itemIds.length) openCollectionPicker({ kind: "collection", ...source });
+}
+
+function createCollectionFromCollectionItems(source: CollectionItemSelection) {
+  if (source.itemIds.length) openCreateCollection({ kind: "collection", ...source });
+}
+
+function closeCollectionDialogs() {
+  if (collectionActionBusy.value) return;
+  collectionPickerSeed.value = null;
+  collectionNameDialog.value = null;
+  collectionDeleteTarget.value = null;
+  collectionActionError.value = null;
+}
+
+function createCollectionFromPicker() {
+  const seed = collectionPickerSeed.value;
+  if (seed && seed.kind !== "empty") openCreateCollection(seed);
+}
+
+async function submitCollectionName() {
+  const dialog = collectionNameDialog.value;
+  if (!dialog || collectionActionBusy.value) return;
+  collectionActionBusy.value = true;
+  collectionActionError.value = null;
+
+  let created: MusicCollectionSummary | null = null;
+  try {
+    if (dialog.intent === "rename") {
+      const renamed = await renameMusicCollection(dialog.collectionId, collectionName.value);
+      updateCollectionSummary(renamed);
+      collectionNameDialog.value = null;
+      showCollectionNotice(`Renamed Collection to ${renamed.name}.`);
+      return;
+    }
+
+    created = await createMusicCollection(collectionName.value);
+    const mutation = await addCollectionSeed(created.id, dialog.seed);
+    updateCollectionSummary(mutation?.collection ?? created);
+    collectionsExpanded.value = true;
+    collectionNameDialog.value = null;
+    selectCollection(created.id);
+    showCollectionNotice(
+      mutation
+        ? collectionMutationMessage(mutation, created.name)
+        : `Created ${created.name}.`,
+    );
+  } catch (error) {
+    if (created) {
+      await deleteMusicCollection(created.id).catch(() => undefined);
+    }
+    collectionActionError.value = normalizeError(error);
+  } finally {
+    collectionActionBusy.value = false;
+  }
+}
+
+async function confirmCollectionAdd() {
+  const seed = collectionPickerSeed.value;
+  if (!seed || seed.kind === "empty" || !selectedCollectionId.value) return;
+  collectionActionBusy.value = true;
+  collectionActionError.value = null;
+  try {
+    const mutation = await addCollectionSeed(selectedCollectionId.value, seed);
+    if (!mutation) return;
+    updateCollectionSummary(mutation.collection);
+    collectionPickerSeed.value = null;
+    collectionsExpanded.value = true;
+    showCollectionNotice(collectionMutationMessage(mutation, mutation.collection.name));
+  } catch (error) {
+    collectionActionError.value = normalizeError(error);
+  } finally {
+    collectionActionBusy.value = false;
+  }
+}
+
+function addCollectionSeed(collectionId: string, seed: CollectionSeed) {
+  if (seed.kind === "local") {
+    return addLocalSelectionToMusicCollection(collectionId, seed);
+  }
+  if (seed.kind === "online") {
+    return addOnlineTracksToMusicCollection(collectionId, seed.tracks);
+  }
+  if (seed.kind === "collection") {
+    return addMusicCollectionItemsToMusicCollection(collectionId, seed);
+  }
+  return Promise.resolve<MusicCollectionMutation | null>(null);
+}
+
+function collectionSeedCount(seed: CollectionSeed | null) {
+  if (!seed || seed.kind === "empty") return 0;
+  if (seed.kind === "online") return seed.tracks.length;
+  if (seed.kind === "collection") return seed.itemIds.length;
+  if (seed.selection.selectAll) return null;
+  return seed.selection.ranges.reduce(
+    (total, range) => total + Math.abs(range.end - range.start) + 1,
+    0,
+  );
+}
+
+function collectionMutationMessage(
+  mutation: MusicCollectionMutation,
+  collectionNameValue: string,
+) {
+  if (!mutation.added) {
+    return `The selected tracks are already in ${collectionNameValue}.`;
+  }
+  const duplicateSuffix = mutation.skipped
+    ? ` ${mutation.skipped} duplicate${mutation.skipped === 1 ? " was" : "s were"} skipped.`
+    : "";
+  return `Added ${mutation.added} track${mutation.added === 1 ? "" : "s"} to ${collectionNameValue}.${duplicateSuffix}`;
+}
+
+function showCollectionNotice(message: string) {
+  collectionNotice.value = message;
+  if (collectionNoticeTimer) clearTimeout(collectionNoticeTimer);
+  collectionNoticeTimer = setTimeout(() => {
+    collectionNotice.value = null;
+    collectionNoticeTimer = null;
+  }, 4_000);
+}
+
+function openLocalMusicContextMenu(event: MouseEvent) {
+  event.preventDefault();
+  collectionContextMenu.value = null;
+  localMusicContextMenu.value = appMenuPosition(event.clientX, event.clientY, 220, 96);
+}
+
+function openCollectionContextMenu(event: MouseEvent, collectionId: string) {
+  event.preventDefault();
+  localMusicContextMenu.value = null;
+  collectionContextMenu.value = {
+    ...appMenuPosition(event.clientX, event.clientY, 220, 128),
+    collectionId,
+  };
+}
+
+function closeSidebarContextMenus() {
+  localMusicContextMenu.value = null;
+  collectionContextMenu.value = null;
+}
+
+function appMenuPosition(x: number, y: number, width: number, height: number) {
+  return {
+    x: Math.max(8, Math.min(x, window.innerWidth - width - 8)),
+    y: Math.max(8, Math.min(y, window.innerHeight - height - 8)),
+  };
+}
+
+function collectionForContextMenu() {
+  return musicCollections.value.find(
+    (collection) => collection.id === collectionContextMenu.value?.collectionId,
+  ) ?? null;
+}
+
+function renameContextCollection() {
+  const collection = collectionForContextMenu();
+  if (collection) openRenameCollection(collection);
+}
+
+function deleteContextCollection() {
+  const collection = collectionForContextMenu();
+  if (collection) requestCollectionDelete(collection);
+}
+
+function requestCollectionDelete(collection: MusicCollectionSummary) {
+  collectionDeleteTarget.value = collection;
+  closeSidebarContextMenus();
+}
+
+async function confirmCollectionDelete() {
+  const collection = collectionDeleteTarget.value;
+  if (!collection || collectionActionBusy.value) return;
+  collectionActionBusy.value = true;
+  collectionActionError.value = null;
+  try {
+    await deleteMusicCollection(collection.id);
+    musicCollections.value = musicCollections.value.filter(
+      (candidate) => candidate.id !== collection.id,
+    );
+    if (activeCollectionId.value === collection.id) {
+      clearCollectionPlaybackQueue();
+      replaceCurrentLocation({ section: "local", pluginId: null, collectionId: null });
+    }
+    collectionDeleteTarget.value = null;
+    showCollectionNotice(`Deleted ${collection.name}.`);
+  } catch (error) {
+    collectionActionError.value = normalizeError(error);
+  } finally {
+    collectionActionBusy.value = false;
+  }
+}
+
+function handleCollectionDragOver(event: DragEvent, collectionId: string) {
+  const types = event.dataTransfer ? Array.from(event.dataTransfer.types) : [];
+  if (!types.includes(COLLECTION_DRAG_TYPE)) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  collectionDropTargetId.value = collectionId;
+}
+
+function handleCollectionDragLeave(event: DragEvent, collectionId: string) {
+  const currentTarget = event.currentTarget;
+  if (
+    currentTarget instanceof Element
+    && event.relatedTarget instanceof Node
+    && currentTarget.contains(event.relatedTarget)
+  ) {
+    return;
+  }
+  if (collectionDropTargetId.value === collectionId) collectionDropTargetId.value = null;
+}
+
+async function handleCollectionDrop(event: DragEvent, collectionId: string) {
+  event.preventDefault();
+  collectionDropTargetId.value = null;
+  const payload = readCollectionDragPayload(event.dataTransfer);
+  if (!payload) return;
+  try {
+    const mutation = await addCollectionSeed(collectionId, payload);
+    if (!mutation) return;
+    updateCollectionSummary(mutation.collection);
+    showCollectionNotice(collectionMutationMessage(mutation, mutation.collection.name));
+  } catch (error) {
+    appError.value = normalizeError(error);
+  }
+}
+
 function updatePluginRecords(records: PluginRecord[]) {
   pluginRecords.value = records;
   onlineMusicConfig.invalidateChannels();
@@ -647,7 +1081,7 @@ function updatePluginRecords(records: PluginRecord[]) {
     activeSection.value === "plugin" &&
     !records.some((plugin) => plugin.id === activePluginId.value && plugin.enabled)
   ) {
-    replaceCurrentLocation({ section: "plugins", pluginId: null });
+    replaceCurrentLocation({ section: "plugins", pluginId: null, collectionId: null });
   }
 }
 
@@ -825,8 +1259,9 @@ function retryLyrics() {
   }
 }
 
-async function playTrack(track: LocalTrack) {
+async function playTrack(track: LocalTrack, preserveCollectionQueue = false) {
   sampleListeningTime();
+  if (!preserveCollectionQueue) clearCollectionPlaybackQueue();
   clearRemotePlaybackQueue();
   isPreparingPlayback.value = true;
   appError.value = null;
@@ -859,6 +1294,7 @@ async function playTrack(track: LocalTrack) {
 }
 
 async function handleLibraryPlaybackQueue(queue: LibraryPlaybackQueue, autoplay: boolean) {
+  clearCollectionPlaybackQueue();
   localQueueId.value = queue.queueId;
   localQueueTotal.value = queue.total;
   localQueueIndex.value = queue.currentIndex;
@@ -875,6 +1311,12 @@ function clearLocalPlaybackQueue() {
   localQueueIndex.value = -1;
   queuedLocalTrack.value = null;
   localQueueActive.value = false;
+}
+
+function clearCollectionPlaybackQueue() {
+  collectionQueue.value = [];
+  collectionQueueIndex.value = -1;
+  collectionQueueActive.value = false;
 }
 
 function clearRemotePlaybackQueue() {
@@ -975,6 +1417,7 @@ async function handleOnlinePlayRequest(
   appendable: boolean,
   loadMore?: OnlineQueueLoadMore,
 ) {
+  clearCollectionPlaybackQueue();
   remoteQueueGeneration += 1;
   cancelOnlinePreload();
   clearFailedOnlinePlayback(track.key);
@@ -985,6 +1428,59 @@ async function handleOnlinePlayRequest(
   remoteQueueLoadMore.value = loadMore ?? null;
   pendingRemoteQueueLoad = null;
   await playOnlineQueueTrack(Math.max(0, targetIndex));
+}
+
+async function handleCollectionPlayback(
+  items: MusicCollectionItem[],
+  index: number,
+  autoplay = true,
+) {
+  if (!items[index]) return;
+  clearLocalPlaybackQueue();
+  clearRemotePlaybackQueue();
+  collectionQueue.value = [...items];
+  collectionQueueIndex.value = index;
+  collectionQueueActive.value = autoplay;
+  if (autoplay) await playCollectionQueueTrack(index);
+}
+
+async function playCollectionQueueTrack(index: number) {
+  const item = collectionQueue.value[index];
+  if (!item) return;
+  collectionQueueIndex.value = index;
+  if (item.localTrack) {
+    await playTrack(item.localTrack, true);
+    return;
+  }
+  if (item.onlineTrack) {
+    await playCollectionOnlineTrack(item.onlineTrack);
+  }
+}
+
+async function playCollectionOnlineTrack(track: OnlineTrack) {
+  clearRemotePlaybackQueue();
+  const controller = new AbortController();
+  onlinePlaybackController = controller;
+  resolvingOnlineTrackKey.value = track.key;
+  isPreparingPlayback.value = true;
+  appError.value = null;
+  clearFailedOnlinePlayback(track.key);
+  clearOnlinePlaybackFailures(track.key);
+
+  try {
+    const playback = await resolveConfiguredOnlinePlayback(track, controller.signal, true);
+    if (controller.signal.aborted || onlinePlaybackController !== controller) return;
+    await applyOnlinePlayback(playback);
+  } catch (error) {
+    if (!(error instanceof DOMException && error.name === "AbortError")) {
+      appError.value = normalizeError(error);
+    }
+  } finally {
+    if (onlinePlaybackController === controller) {
+      resolvingOnlineTrackKey.value = null;
+      isPreparingPlayback.value = false;
+    }
+  }
 }
 
 async function playOnlineQueueTrack(index: number) {
@@ -1218,6 +1714,24 @@ async function applyOnlinePlayback(playback: OnlinePlayback) {
 
 async function togglePlayback() {
   if (
+    !collectionQueueActive.value
+    && collectionQueue.value.length
+    && collectionQueueIndex.value >= 0
+    && (!audioElement.value || audioElement.value.ended)
+  ) {
+    collectionQueueActive.value = true;
+    await playCollectionQueueTrack(collectionQueueIndex.value);
+    return;
+  }
+  if (
+    collectionQueueActive.value
+    && collectionQueueIndex.value >= 0
+    && (!audioElement.value || audioElement.value.ended)
+  ) {
+    await playCollectionQueueTrack(collectionQueueIndex.value);
+    return;
+  }
+  if (
     !localQueueActive.value &&
     queuedLocalTrack.value &&
     (!audioElement.value || audioElement.value.ended)
@@ -1237,7 +1751,11 @@ async function togglePlayback() {
       await playTrack(queuedLocalTrack.value);
       return;
     }
-    await libraryBrowser.value?.startFirstTrack();
+    if (activeSection.value === "collection") {
+      await collectionBrowser.value?.startFirstTrack();
+    } else {
+      await libraryBrowser.value?.startFirstTrack();
+    }
     return;
   }
 
@@ -1264,6 +1782,11 @@ function cyclePlaybackMode() {
 }
 
 async function playPreviousTrack() {
+  if (collectionQueueActive.value) {
+    const index = collectionQueueNavigationIndex("previous");
+    if (index >= 0) await playCollectionQueueTrack(index);
+    return;
+  }
   if (remoteQueueActive.value) {
     const index = remoteQueueNavigationIndex("previous");
     if (index >= 0) await playOnlineQueueTrack(index);
@@ -1281,7 +1804,7 @@ async function playPreviousTrack() {
 
   let previousIndex: number;
   if (playbackMode.value === "shuffle") {
-    previousIndex = randomQueueIndex(localQueueIndex.value);
+    previousIndex = randomQueueIndex(localQueueIndex.value, localQueueTotal.value);
   } else if (localQueueIndex.value > 0) {
     previousIndex = localQueueIndex.value - 1;
   } else if (playbackMode.value === "repeat") {
@@ -1294,6 +1817,11 @@ async function playPreviousTrack() {
 }
 
 async function playNextTrack() {
+  if (collectionQueueActive.value) {
+    const index = collectionQueueNavigationIndex("next");
+    if (index >= 0) await playCollectionQueueTrack(index);
+    return;
+  }
   if (remoteQueueActive.value) {
     if (
       remoteQueueLoadMore.value &&
@@ -1317,7 +1845,7 @@ async function playNextTrack() {
 
   let nextIndex: number;
   if (playbackMode.value === "shuffle") {
-    nextIndex = randomQueueIndex(localQueueIndex.value);
+    nextIndex = randomQueueIndex(localQueueIndex.value, localQueueTotal.value);
   } else if (localQueueIndex.value < localQueueTotal.value - 1) {
     nextIndex = localQueueIndex.value + 1;
   } else if (playbackMode.value === "repeat") {
@@ -1387,12 +1915,24 @@ async function playLocalQueueTrack(index: number) {
   }
 }
 
-function randomQueueIndex(currentIndex: number) {
-  if (localQueueTotal.value <= 1) {
+function collectionQueueNavigationIndex(direction: "previous" | "next") {
+  const total = collectionQueue.value.length;
+  const current = collectionQueueIndex.value;
+  if (!total || current < 0) return -1;
+  if (playbackMode.value === "shuffle") return randomQueueIndex(current, total);
+  const offset = direction === "previous" ? -1 : 1;
+  const candidate = current + offset;
+  if (candidate >= 0 && candidate < total) return candidate;
+  if (playbackMode.value === "repeat") return direction === "previous" ? total - 1 : 0;
+  return -1;
+}
+
+function randomQueueIndex(currentIndex: number, total: number) {
+  if (total <= 1) {
     return 0;
   }
 
-  const candidate = Math.floor(Math.random() * (localQueueTotal.value - 1));
+  const candidate = Math.floor(Math.random() * (total - 1));
   return candidate >= currentIndex ? candidate + 1 : candidate;
 }
 
@@ -1407,6 +1947,15 @@ async function onAudioEnded() {
   isPlaying.value = false;
   isPlaybackWaiting.value = false;
   playbackPosition.value = playbackDuration.value;
+  if (
+    !collectionQueueActive.value
+    && collectionQueue.value.length
+    && collectionQueueIndex.value >= 0
+  ) {
+    collectionQueueActive.value = true;
+    await playCollectionQueueTrack(collectionQueueIndex.value);
+    return;
+  }
   if (!localQueueActive.value && localQueueId.value && queuedLocalTrack.value) {
     localQueueActive.value = true;
     await playTrack(queuedLocalTrack.value);
@@ -1505,6 +2054,7 @@ async function recordPlayCount(track: LocalTrack) {
       trackId: track.id,
     });
     libraryBrowser.value?.updatePlayCount(track.id, playCount);
+    collectionBrowser.value?.updatePlayCount(track.id, playCount);
     if (activeTrack.value?.id === track.id) {
       activeTrack.value = { ...activeTrack.value, playCount };
     }
@@ -1544,7 +2094,10 @@ function seekPlayback(event: Event) {
 function onAudioError() {
   isPlaying.value = false;
   isPlaybackWaiting.value = false;
-  if (activeOnlineTrack.value && remoteQueueActive.value) {
+  if (
+    activeOnlineTrack.value
+    && (remoteQueueActive.value || collectionQueueActive.value)
+  ) {
     void recoverOnlinePlayback();
     return;
   }
@@ -1553,7 +2106,13 @@ function onAudioError() {
 
 async function recoverOnlinePlayback() {
   const track = activeOnlineTrack.value;
-  if (!track || remoteQueueIndex.value < 0) return;
+  if (
+    !track
+    || (!remoteQueueActive.value && !collectionQueueActive.value)
+    || (remoteQueueActive.value && remoteQueueIndex.value < 0)
+  ) {
+    return;
+  }
   if (activeOnlineAttemptKey.value) {
     failedOnlineAttempts.set(
       `${track.key}::${activeOnlineAttemptKey.value}`,
@@ -1677,6 +2236,27 @@ function trackSubtitle(track: LocalTrack) {
           </button>
         </div>
 
+        <div v-else-if="activeSection === 'collection' && activeCollection" class="navbar-end w-auto gap-1">
+          <button
+            class="btn btn-square btn-ghost btn-sm"
+            type="button"
+            aria-label="Rename Collection"
+            title="Rename Collection"
+            @click="openRenameCollection(activeCollection)"
+          >
+            <Pencil :size="16" aria-hidden="true" />
+          </button>
+          <button
+            class="btn btn-square btn-ghost btn-sm text-error"
+            type="button"
+            aria-label="Delete Collection"
+            title="Delete Collection"
+            @click="requestCollectionDelete(activeCollection)"
+          >
+            <Trash2 :size="16" aria-hidden="true" />
+          </button>
+        </div>
+
         <div v-else-if="activeSection === 'settings'" class="navbar-end w-auto">
           <button class="btn btn-ghost btn-sm" type="button" @click="resetUiPreferences">
             <RotateCcw :size="16" aria-hidden="true" />
@@ -1687,7 +2267,7 @@ function trackSubtitle(track: LocalTrack) {
 
       <main
         class="min-h-0 flex-1"
-        :class="activeSection === 'local' ? 'overflow-hidden' : 'overflow-y-auto'"
+        :class="activeSection === 'local' || activeSection === 'collection' ? 'overflow-hidden' : 'overflow-y-auto'"
       >
         <section
           v-if="activeSection === 'local'"
@@ -1717,6 +2297,8 @@ function trackSubtitle(track: LocalTrack) {
               :scan-status="scanStatus"
               :scan-message="scanMessage"
               @playback-queue="handleLibraryPlaybackQueue"
+              @add-to-collection="addLocalSelectionToCollection"
+              @create-collection="createCollectionFromLocalSelection"
               @summary="updateLibrarySummary"
               @error="showLibraryError"
             />
@@ -1741,6 +2323,61 @@ function trackSubtitle(track: LocalTrack) {
         </aside>
       </div>
     </section>
+
+        <section
+          v-if="activeSection === 'collection' && activeCollection"
+          class="mx-auto flex h-full min-h-0 w-full flex-col"
+          :class="layoutDensity === 'compact' ? 'gap-3 px-3 py-3 lg:px-4' : 'gap-4 px-4 py-4 lg:px-6'"
+        >
+          <div v-if="appError" role="alert" class="alert alert-error">
+            <AlertCircle :size="18" aria-hidden="true" />
+            <span class="min-w-0 flex-1">{{ appError }}</span>
+            <button
+              class="btn btn-square btn-ghost btn-sm"
+              type="button"
+              aria-label="Dismiss error"
+              title="Dismiss error"
+              @click="appError = null"
+            >
+              <X :size="16" aria-hidden="true" />
+            </button>
+          </div>
+
+          <div class="grid min-h-0 flex-1 grid-cols-1 gap-4 min-[1000px]:grid-cols-[minmax(0,1fr)_20rem]">
+            <CollectionBrowser
+              ref="collectionBrowser"
+              :collection-id="activeCollection.id"
+              :refresh-key="collectionRefreshKey"
+              :active-local-track-id="activeTrack?.id ?? null"
+              :active-online-track="activeOnlineTrack"
+              :is-playing="isPlaying"
+              :density="layoutDensity"
+              @play="handleCollectionPlayback"
+              @add-to-collection="addCollectionItemsToCollection"
+              @create-collection="createCollectionFromCollectionItems"
+              @changed="updateCollectionSummary"
+              @error="showLibraryError"
+            />
+
+            <aside class="hidden min-h-0 flex-col min-[1000px]:flex">
+              <NowPlayingPanel
+                fill-height
+                :title="nowPlayingTitle"
+                :subtitle="nowPlayingSubtitle"
+                :cover-url="nowPlayingCoverUrl"
+                :lyrics="activeLyrics"
+                :lyrics-loading="isLoadingLyrics"
+                :lyrics-error="lyricsError"
+                :playback-position="playbackPosition"
+                :can-retry="Boolean(activeTrack || activeRemoteLyricsQuery)"
+                :lyrics-preferences="nowPlayingLyricsPreferences"
+                @retry-lyrics="retryLyrics"
+                @seek-playback="seekPlaybackTo"
+                @open-lyrics-settings="openNowPlayingLyricsSettings"
+              />
+            </aside>
+          </div>
+        </section>
 
         <section
           v-if="activeSection === 'sources'"
@@ -1794,6 +2431,8 @@ function trackSubtitle(track: LocalTrack) {
               :is-playing="isPlaying"
               :local-music-folder="selectedFolder"
               @play-request="handleOnlinePlayRequest"
+              @add-to-collection="addOnlineTracksToCollection"
+              @create-collection="createCollectionFromOnlineTracks"
               @open-audio-sources="selectSection('sources')"
               @open-plugin="selectPlugin"
           @toggle-playback="togglePlayback"
@@ -2111,7 +2750,7 @@ function trackSubtitle(track: LocalTrack) {
               <button
                 class="btn btn-circle btn-neutral btn-sm mx-0.5 shrink-0"
                 type="button"
-                :disabled="isPreparingPlayback || (!activeTrack && !activeRemoteTitle && !queuedLocalTrack && !libraryTrackCount)"
+                :disabled="isPreparingPlayback || (!activeTrack && !activeRemoteTitle && !queuedLocalTrack && !collectionQueue.length && !libraryTrackCount)"
                 :aria-label="isPlaying ? 'Pause playback' : 'Play playback'"
                 :title="isPlaying ? 'Pause' : 'Play'"
                 @click="togglePlayback"
@@ -2381,17 +3020,101 @@ function trackSubtitle(track: LocalTrack) {
             class="menu min-h-0 w-full flex-1 flex-nowrap gap-1 overflow-y-auto p-0"
             :class="layoutDensity === 'compact' ? 'menu-sm' : 'menu-md'"
           >
-            <li v-for="section in mainSections" :key="section.id">
-              <button
-                type="button"
-                :class="{ 'menu-active': activeSection === section.id }"
-                :aria-current="activeSection === section.id ? 'page' : undefined"
-                @click="selectSection(section.id)"
-              >
-                <component :is="section.icon" :size="18" aria-hidden="true" />
-                <span>{{ section.label }}</span>
-              </button>
-            </li>
+            <template v-for="section in mainSections" :key="section.id">
+              <template v-if="section.id === 'local'">
+                <li class="group/local">
+                  <div
+                    class="flex min-h-10 items-center rounded px-1"
+                    :class="[
+                      activeSection === 'local'
+                        ? 'bg-neutral text-neutral-content'
+                        : activeSection === 'collection'
+                          ? 'bg-base-200'
+                          : 'hover:bg-base-200',
+                    ]"
+                    @contextmenu="openLocalMusicContextMenu"
+                  >
+                    <button
+                      class="flex min-w-0 flex-1 items-center gap-2 self-stretch px-2 text-left"
+                      type="button"
+                      data-section-id="local"
+                      :aria-current="activeSection === 'local' ? 'page' : undefined"
+                      @click="selectSection('local')"
+                    >
+                      <Library :size="18" aria-hidden="true" />
+                      <span class="min-w-0 flex-1 truncate">Local Music</span>
+                    </button>
+                    <button
+                      class="btn btn-square btn-ghost btn-xs size-7 shrink-0"
+                      :class="activeSection === 'local' ? 'text-neutral-content' : undefined"
+                      type="button"
+                      :aria-label="collectionsExpanded ? 'Collapse Collections' : 'Expand Collections'"
+                      :aria-expanded="collectionsExpanded"
+                      :title="collectionsExpanded ? 'Collapse Collections' : 'Expand Collections'"
+                      @click.stop="collectionsExpanded = !collectionsExpanded"
+                    >
+                      <ChevronRight
+                        class="transition-transform"
+                        :class="{ 'rotate-90': collectionsExpanded }"
+                        :size="15"
+                        aria-hidden="true"
+                      />
+                    </button>
+                    <button
+                      class="btn btn-square btn-ghost btn-xs size-7 shrink-0"
+                      :class="activeSection === 'local' ? 'text-neutral-content' : undefined"
+                      type="button"
+                      aria-label="New Collection"
+                      title="New Collection"
+                      @click.stop="openCreateCollection()"
+                    >
+                      <Plus :size="15" aria-hidden="true" />
+                    </button>
+                  </div>
+                </li>
+
+                <template v-if="collectionsExpanded">
+            <li v-for="collection in musicCollections" :key="collection.id">
+                    <button
+                      type="button"
+                      class="group/collection min-h-9 gap-2 pl-9 pr-2"
+                      :class="[
+                        { 'menu-active': activeSection === 'collection' && activeCollectionId === collection.id },
+                        collectionDropTargetId === collection.id ? 'outline outline-2 -outline-offset-2 outline-primary' : '',
+                      ]"
+                      :aria-current="activeSection === 'collection' && activeCollectionId === collection.id ? 'page' : undefined"
+                      :data-collection-id="collection.id"
+                      :title="`${collection.name} (${collection.itemCount} tracks)`"
+                      @click="selectCollection(collection.id)"
+                      @dblclick="playCollectionFromSidebar(collection)"
+                      @contextmenu="openCollectionContextMenu($event, collection.id)"
+                      @dragover="handleCollectionDragOver($event, collection.id)"
+                      @dragleave="handleCollectionDragLeave($event, collection.id)"
+                      @drop="handleCollectionDrop($event, collection.id)"
+                    >
+                      <ListMusic class="shrink-0" :size="16" aria-hidden="true" />
+                      <span class="min-w-0 flex-1 truncate text-left">{{ collection.name }}</span>
+                      <span class="shrink-0 text-xs tabular-nums opacity-60">
+                        {{ collection.itemCount }}
+                      </span>
+                    </button>
+                  </li>
+                </template>
+              </template>
+
+              <li v-else>
+                <button
+                  type="button"
+                  :data-section-id="section.id"
+                  :class="{ 'menu-active': activeSection === section.id }"
+                  :aria-current="activeSection === section.id ? 'page' : undefined"
+                  @click="selectSection(section.id)"
+                >
+                  <component :is="section.icon" :size="18" aria-hidden="true" />
+                  <span>{{ section.label }}</span>
+                </button>
+              </li>
+            </template>
 
             <li v-if="enabledPlugins.length" class="menu-title mt-3">
               <span>Enabled plugins</span>
@@ -2422,6 +3145,7 @@ function trackSubtitle(track: LocalTrack) {
             <li>
               <button
                 type="button"
+                data-section-id="settings"
                 :class="{ 'menu-active': activeSection === settingsSection.id }"
                 :aria-current="activeSection === settingsSection.id ? 'page' : undefined"
                 @click="selectSection(settingsSection.id)"
@@ -2446,5 +3170,283 @@ function trackSubtitle(track: LocalTrack) {
         </div>
       </aside>
     </div>
+
+    <Teleport to="body">
+      <div
+        v-if="localMusicContextMenu || collectionContextMenu"
+        class="fixed inset-0 z-50"
+        aria-hidden="true"
+        @pointerdown="closeSidebarContextMenus"
+        @contextmenu.prevent="closeSidebarContextMenus"
+      ></div>
+      <ul
+        v-if="localMusicContextMenu"
+        class="menu menu-sm fixed z-[60] w-56 rounded border border-base-300 bg-base-100 p-2 shadow-xl"
+        :style="{ left: `${localMusicContextMenu.x}px`, top: `${localMusicContextMenu.y}px` }"
+        data-sidebar-context-menu
+        aria-label="Local Music actions"
+      >
+        <li>
+          <button type="button" @click="openCreateCollection()">
+            <FolderPlus :size="16" aria-hidden="true" />
+            New Collection
+          </button>
+        </li>
+        <li>
+          <button type="button" @click="collectionsExpanded = !collectionsExpanded; closeSidebarContextMenus()">
+            <ChevronRight
+              :class="{ 'rotate-90': collectionsExpanded }"
+              :size="16"
+              aria-hidden="true"
+            />
+            {{ collectionsExpanded ? "Collapse Collections" : "Expand Collections" }}
+          </button>
+        </li>
+      </ul>
+
+      <ul
+        v-if="collectionContextMenu && collectionForContextMenu()"
+        class="menu menu-sm fixed z-[60] w-56 rounded border border-base-300 bg-base-100 p-2 shadow-xl"
+        :style="{ left: `${collectionContextMenu.x}px`, top: `${collectionContextMenu.y}px` }"
+        data-sidebar-context-menu
+        aria-label="Collection actions"
+      >
+        <li>
+          <button type="button" @click="renameContextCollection">
+            <Pencil :size="16" aria-hidden="true" />
+            Rename Collection
+          </button>
+        </li>
+        <li>
+          <button class="text-error" type="button" @click="deleteContextCollection">
+            <Trash2 :size="16" aria-hidden="true" />
+            Delete Collection
+          </button>
+        </li>
+      </ul>
+
+      <dialog
+        v-if="collectionNameDialog"
+        open
+        tabindex="0"
+        class="modal"
+        aria-labelledby="collection-name-dialog-title"
+        @cancel.prevent="closeCollectionDialogs"
+      >
+        <form class="modal-box max-w-md rounded" @submit.prevent="submitCollectionName">
+          <div class="flex items-start gap-3">
+            <div class="min-w-0 flex-1">
+              <h2 id="collection-name-dialog-title" class="text-base font-semibold">
+                {{ collectionNameDialog.intent === "rename" ? "Rename Collection" : "New Collection" }}
+              </h2>
+              <p
+                v-if="collectionNameDialog.intent === 'create' && collectionNameDialog.seed.kind !== 'empty'"
+                class="mt-1 text-sm text-muted"
+              >
+                {{ collectionSeedCount(collectionNameDialog.seed) === null
+                  ? "Add the selected tracks"
+                  : `${collectionSeedCount(collectionNameDialog.seed)} selected track${collectionSeedCount(collectionNameDialog.seed) === 1 ? '' : 's'}` }}
+              </p>
+            </div>
+            <button
+              class="btn btn-square btn-ghost btn-sm"
+              type="button"
+              :disabled="collectionActionBusy"
+              aria-label="Close Collection dialog"
+              @click="closeCollectionDialogs"
+            >
+              <X :size="17" aria-hidden="true" />
+            </button>
+          </div>
+
+          <div v-if="collectionActionError" class="alert alert-error mt-4 py-2 text-sm" role="alert">
+            <AlertCircle :size="16" aria-hidden="true" />
+            <span>{{ collectionActionError }}</span>
+          </div>
+
+          <label class="mt-5 block">
+            <span class="mb-1.5 block text-sm font-medium">Name</span>
+            <input
+              ref="collectionNameInput"
+              v-model="collectionName"
+              class="input input-sm w-full"
+              type="text"
+              maxlength="80"
+              autocomplete="off"
+              placeholder="Collection name"
+              aria-label="Collection name"
+            />
+          </label>
+
+          <div class="modal-action">
+            <button
+              class="btn btn-ghost btn-sm"
+              type="button"
+              :disabled="collectionActionBusy"
+              @click="closeCollectionDialogs"
+            >
+              Cancel
+            </button>
+            <button
+              class="btn btn-neutral btn-sm"
+              type="submit"
+              :disabled="!collectionName.trim() || collectionActionBusy"
+            >
+              <RefreshCw
+                v-if="collectionActionBusy"
+                class="animate-spin"
+                :size="16"
+                aria-hidden="true"
+              />
+              <FolderPlus v-else :size="16" aria-hidden="true" />
+              {{ collectionNameDialog.intent === "rename" ? "Save" : "Create" }}
+            </button>
+          </div>
+        </form>
+        <form method="dialog" class="modal-backdrop" @submit.prevent="closeCollectionDialogs">
+          <button type="submit" :disabled="collectionActionBusy">Close</button>
+        </form>
+      </dialog>
+
+      <dialog
+        v-if="collectionPickerSeed && collectionPickerSeed.kind !== 'empty'"
+        open
+        tabindex="0"
+        class="modal"
+        aria-labelledby="collection-picker-title"
+        @cancel.prevent="closeCollectionDialogs"
+      >
+        <form class="modal-box max-w-lg rounded" @submit.prevent="confirmCollectionAdd">
+          <div class="flex items-start gap-3">
+            <div class="min-w-0 flex-1">
+              <h2 id="collection-picker-title" class="text-base font-semibold">Add to Collection</h2>
+              <p class="mt-1 text-sm text-muted">
+                {{ collectionSeedCount(collectionPickerSeed) === null
+                  ? "Selected Local Music tracks"
+                  : `${collectionSeedCount(collectionPickerSeed)} selected track${collectionSeedCount(collectionPickerSeed) === 1 ? '' : 's'}` }}
+              </p>
+            </div>
+            <button
+              class="btn btn-square btn-ghost btn-sm"
+              type="button"
+              :disabled="collectionActionBusy"
+              aria-label="Close Collection picker"
+              @click="closeCollectionDialogs"
+            >
+              <X :size="17" aria-hidden="true" />
+            </button>
+          </div>
+
+          <div v-if="collectionActionError" class="alert alert-error mt-4 py-2 text-sm" role="alert">
+            <AlertCircle :size="16" aria-hidden="true" />
+            <span>{{ collectionActionError }}</span>
+          </div>
+
+          <ul class="menu mt-4 max-h-72 w-full overflow-y-auto rounded border border-base-300 p-1">
+          <li v-for="collection in collectionPickerOptions()" :key="collection.id">
+              <button
+                type="button"
+                :class="{ 'menu-active': selectedCollectionId === collection.id }"
+                :aria-pressed="selectedCollectionId === collection.id"
+                @click="selectedCollectionId = collection.id"
+              >
+                <ListMusic :size="17" aria-hidden="true" />
+                <span class="min-w-0 flex-1 truncate text-left">{{ collection.name }}</span>
+                <span class="badge badge-ghost badge-sm shrink-0">{{ collection.itemCount }}</span>
+              </button>
+            </li>
+          </ul>
+
+          <div class="modal-action justify-between">
+            <button
+              class="btn btn-ghost btn-sm"
+              type="button"
+              :disabled="collectionActionBusy"
+              @click="createCollectionFromPicker"
+            >
+              <Plus :size="16" aria-hidden="true" />
+              New Collection
+            </button>
+            <div class="flex gap-2">
+              <button
+                class="btn btn-ghost btn-sm"
+                type="button"
+                :disabled="collectionActionBusy"
+                @click="closeCollectionDialogs"
+              >
+                Cancel
+              </button>
+              <button
+                class="btn btn-neutral btn-sm"
+                type="submit"
+                :disabled="!selectedCollectionId || collectionActionBusy"
+              >
+                <RefreshCw
+                  v-if="collectionActionBusy"
+                  class="animate-spin"
+                  :size="16"
+                  aria-hidden="true"
+                />
+                <ListPlus v-else :size="16" aria-hidden="true" />
+                Add
+              </button>
+            </div>
+          </div>
+        </form>
+        <form method="dialog" class="modal-backdrop" @submit.prevent="closeCollectionDialogs">
+          <button type="submit" :disabled="collectionActionBusy">Close</button>
+        </form>
+      </dialog>
+
+      <dialog
+        v-if="collectionDeleteTarget"
+        open
+        tabindex="0"
+        class="modal"
+        aria-labelledby="delete-collection-title"
+        @cancel.prevent="closeCollectionDialogs"
+      >
+        <form class="modal-box max-w-md rounded" @submit.prevent="confirmCollectionDelete">
+          <h2 id="delete-collection-title" class="text-base font-semibold">Delete Collection?</h2>
+          <p class="mt-3 text-sm leading-6 text-muted">
+            {{ collectionDeleteTarget.name }} and its {{ collectionDeleteTarget.itemCount }} saved track{{ collectionDeleteTarget.itemCount === 1 ? "" : "s" }} will be removed. Music files are not deleted.
+          </p>
+          <div v-if="collectionActionError" class="alert alert-error mt-4 py-2 text-sm" role="alert">
+            <AlertCircle :size="16" aria-hidden="true" />
+            <span>{{ collectionActionError }}</span>
+          </div>
+          <div class="modal-action">
+            <button
+              class="btn btn-ghost btn-sm"
+              type="button"
+              :disabled="collectionActionBusy"
+              @click="closeCollectionDialogs"
+            >
+              Cancel
+            </button>
+            <button class="btn btn-error btn-sm" type="submit" :disabled="collectionActionBusy">
+              <RefreshCw
+                v-if="collectionActionBusy"
+                class="animate-spin"
+                :size="16"
+                aria-hidden="true"
+              />
+              <Trash2 v-else :size="16" aria-hidden="true" />
+              Delete
+            </button>
+          </div>
+        </form>
+        <form method="dialog" class="modal-backdrop" @submit.prevent="closeCollectionDialogs">
+          <button type="submit" :disabled="collectionActionBusy">Close</button>
+        </form>
+      </dialog>
+
+      <div v-if="collectionNotice" class="toast toast-end toast-bottom z-[70] mb-20" role="status">
+        <div class="alert alert-success py-2 text-sm shadow-lg">
+          <Check :size="16" aria-hidden="true" />
+          <span>{{ collectionNotice }}</span>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>

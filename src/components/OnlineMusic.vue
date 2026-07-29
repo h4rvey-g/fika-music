@@ -169,6 +169,8 @@ const emit = defineEmits<{
   downloadCompleted: [destination: string];
   togglePlayback: [];
   openPlugin: [pluginId: string];
+  addToCollection: [tracks: OnlineTrack[]];
+  createCollection: [tracks: OnlineTrack[]];
 }>();
 
 const sections: Array<{ id: OnlineSearchSection; label: string; icon: typeof Music2 }> = [
@@ -2534,6 +2536,8 @@ defineExpose({
           @favorite="addToFavorites"
           @add-to-playlist="openPlaylistPicker"
           @add-selection-to-playlist="openPlaylistPicker"
+          @add-to-collection="emit('addToCollection', $event)"
+          @create-collection="emit('createCollection', $event)"
           @view-comments="openTrackComments"
           @open-artist="openTrackArtist"
           @open-album="openTrackAlbum"
@@ -2752,6 +2756,8 @@ defineExpose({
         @favorite="addToFavorites"
         @add-to-playlist="openPlaylistPicker"
         @add-selection-to-playlist="openPlaylistPicker"
+        @add-to-collection="emit('addToCollection', $event)"
+        @create-collection="emit('createCollection', $event)"
         @view-comments="openTrackComments"
         @open-artist="openTrackArtist"
         @open-album="openTrackAlbum"
@@ -3106,6 +3112,8 @@ defineExpose({
           @favorite="addToFavorites"
           @add-to-playlist="openPlaylistPicker"
           @add-selection-to-playlist="openPlaylistPicker"
+          @add-to-collection="emit('addToCollection', $event)"
+          @create-collection="emit('createCollection', $event)"
           @view-comments="openTrackComments"
           @open-artist="openTrackArtist"
           @open-album="openTrackAlbum"
