@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     runs-on: macos-latest
@@ -25,6 +29,11 @@ jobs:
         with:
           toolchain: 1.96.1
           components: clippy,rustfmt
+
+      - name: Cache Rust build artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
 
       - name: Install frontend dependencies
         run: npm ci
