@@ -1,76 +1,104 @@
-# Fika Music
+<p align="center">
+  <img src="./src-tauri/icons/fika.svg" alt="Fika Music logo" width="160">
+</p>
 
-Fika Music is a local-first Tauri music player for indexed local audio and
-LX-compatible Rust Source Providers and constrained imported Audio Sources.
+<h1 align="center">Fika Music</h1>
 
-The current v0.1 implementation includes:
+<p align="center">
+  A local-first desktop music player built with Tauri, Rust, and Vue.
+</p>
 
-- Local MP3, FLAC, M4A, and AAC indexing and playback.
-- A capability-enforced Rust Source Runtime.
-- Bundled and user Plugin package lifecycle through the Plugin System.
-- A separate Audio Source Registry and configuration view for local-file and
-  HTTP(S) URL import of LX Music JavaScript sources. Imported scripts are
-  statically checked, fingerprinted, permission-reviewed, and executed in a
-  resource-limited QuickJS runtime with host-mediated network access. The
-  registry also supports permission-reviewed, host-registered Rust sources.
-- A bundled NetEase Cloud Music Plugin with QR account connection,
-  recommendations, Remote Track playback, Playlist list/read, confirmed
-  add/remove mutations, and audit history.
-- A bundled public YouTube Music catalog Plugin for search, artists, albums,
-  playlists, artwork, and lyrics, paired with a separate bundled Rust Audio
-  Source that uses an integrity-checked official `yt-dlp` sidecar for playback
-  and download.
+<p align="center">
+  <a href="https://github.com/h4rvey-g/fika-music/actions/workflows/ci.yml"><img src="https://github.com/h4rvey-g/fika-music/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/h4rvey-g/fika-music/actions/workflows/release.yml"><img src="https://github.com/h4rvey-g/fika-music/actions/workflows/release.yml/badge.svg" alt="Release status"></a>
+  <a href="https://github.com/h4rvey-g/fika-music/releases"><img src="https://img.shields.io/github/v/release/h4rvey-g/fika-music?display_name=tag&sort=semver" alt="Latest release"></a>
+</p>
 
-NetEase behavior is implemented by a Node-free Rust Service Bridge pinned to
-the selected `NeteaseCloudMusicApiEnhanced/api-enhanced` v4.32.1 contract.
-NetEase and KuGou sessions are stored in the application-private SQLite
-database so runtime requests do not trigger operating-system credential
-prompts. Source Providers and the frontend receive only opaque Account Refs.
+Fika Music combines an indexed local library with capability-enforced Source
+Providers and separately managed Audio Sources. It supports local playback,
+remote catalogs, account-backed services, and constrained LX Music-compatible
+JavaScript sources without exposing service credentials to plugins or the
+frontend.
 
-## Development
+## Highlights
 
-Prerequisites are Node.js, npm, Rust, and the platform requirements for Tauri 2.
+- **Local library:** Index and play MP3, FLAC, M4A, and AAC files.
+- **Constrained extensions:** Run Rust Source Providers through a
+  capability-enforced Source Runtime and manage bundled or user Plugin
+  packages through a dedicated lifecycle.
+- **Flexible playback sources:** Import LX Music JavaScript sources from local
+  files or HTTP(S) URLs. Scripts are statically checked, fingerprinted,
+  permission-reviewed, and executed in a resource-limited QuickJS runtime with
+  host-mediated network access. The registry also supports permission-reviewed,
+  host-registered Rust sources.
+- **NetEase Cloud Music:** Connect by QR code, browse recommendations and
+  playlists, play remote tracks, confirm playlist mutations, and inspect audit
+  history through a Node-free Rust Service Bridge pinned to the
+  `NeteaseCloudMusicApiEnhanced/api-enhanced` v4.32.1 contract.
+- **YouTube Music:** Search and browse public artists, albums, playlists,
+  artwork, and lyrics. Playback and downloads use a separate Rust Audio Source
+  with an integrity-checked official `yt-dlp` sidecar.
+- **Private account state:** NetEase and KuGou sessions stay in the
+  application-private SQLite database. Plugins and the frontend receive only
+  opaque Account Refs.
 
-```sh
+## Getting started
+
+Install Node.js, npm, Rust, and the platform prerequisites for
+[Tauri 2](https://v2.tauri.app/start/prerequisites/), then run:
+
+```bash
 npm install
 npm run tauri dev
 ```
 
-Frontend-only checks:
+Bundled Plugins start disabled. Enabling one automatically grants the
+capabilities declared by its current manifest.
 
-```sh
+## Development
+
+Run the frontend and contract checks:
+
+```bash
 npm run bindings:check
 npm run plugins:check
 npm test
 npm run build
 ```
 
-Regenerate `src/generated/bindings.ts` after changing a Tauri command or an
-IPC DTO with `npm run bindings:generate`.
+Run the Rust checks:
 
-Rust checks:
-
-```sh
+```bash
 cargo fmt --check --manifest-path src-tauri/Cargo.toml
 cargo clippy --all-targets --all-features --locked --manifest-path src-tauri/Cargo.toml -- -D warnings
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 ```
 
+After changing a Tauri command or IPC DTO, regenerate the TypeScript bindings:
+
+```bash
+npm run bindings:generate
+```
+
 ## Releases
 
 A push to `main` that changes the application version runs the multi-platform
-release workflow. Keep the version synchronized in `package.json`,
-`package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and
-`src-tauri/tauri.conf.json`. The workflow publishes Windows and Linux x86_64
-bundles plus Intel and Apple silicon macOS bundles after every build succeeds.
-It can also be started manually from GitHub Actions to retry an unpublished
-version.
+release workflow. Keep the version synchronized in:
 
-Bundled Plugins start disabled. Enabling one automatically grants the
-capabilities declared by its current manifest.
+- `package.json`
+- `package-lock.json`
+- `src-tauri/Cargo.toml`
+- `src-tauri/Cargo.lock`
+- `src-tauri/tauri.conf.json`
+
+The workflow publishes Windows and Linux x86_64 bundles plus Intel and Apple
+silicon macOS bundles after every build succeeds. It can also be started
+manually from GitHub Actions to retry an unpublished version.
 
 ## Documentation
 
 - [Documentation index](./docs/README.md)
 - [Writing Plugins](./docs/PLUGINS.md)
 - [Plugin manifest reference](./docs/PLUGIN_MANIFEST.md)
+- [Audio Sources](./docs/AUDIO_SOURCES.md)
+- [Architecture decisions](./docs/adr/)
