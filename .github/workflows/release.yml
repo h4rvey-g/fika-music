@@ -1,0 +1,265 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - package.json
+      - package-lock.json
+      - src-tauri/Cargo.toml
+      - src-tauri/Cargo.lock
+      - src-tauri/tauri.conf.json
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Check version bump
+    runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      should_release: ${{ steps.version.outputs.should_release }}
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Read and validate version
+        id: version
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          version="$(jq -er '.version | select(type == "string")' package.json)"
+          package_lock_version="$(jq -er '.version | select(type == "string")' package-lock.json)"
+          package_lock_root_version="$(jq -er '.packages[""].version | select(type == "string")' package-lock.json)"
+          tauri_version="$(jq -er '.version | select(type == "string")' src-tauri/tauri.conf.json)"
+
+          read -r cargo_version cargo_lock_version < <(
+            python3 - <<'PY'
+          import pathlib
+          import tomllib
+
+          manifest = tomllib.loads(pathlib.Path("src-tauri/Cargo.toml").read_text())
+          lockfile = tomllib.loads(pathlib.Path("src-tauri/Cargo.lock").read_text())
+          package_name = manifest["package"]["name"]
+          locked = [
+              package["version"]
+              for package in lockfile["package"]
+              if package["name"] == package_name
+          ]
+          if len(locked) != 1:
+              raise SystemExit(f"expected one {package_name!r} package in Cargo.lock")
+          print(manifest["package"]["version"], locked[0])
+          PY
+          )
+
+          VERSION="$version" node <<'NODE'
+          const version = process.env.VERSION;
+          const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+          if (!semver.test(version)) {
+            console.error(`::error::${version} is not a valid semantic version`);
+            process.exit(1);
+          }
+          NODE
+
+          assert_version_matches() {
+            local source="$1"
+            local candidate="$2"
+            if [[ "$candidate" != "$version" ]]; then
+              echo "::error file=${source}::Version ${candidate} does not match package.json version ${version}"
+              exit 1
+            fi
+          }
+
+          assert_version_matches package-lock.json "$package_lock_version"
+          assert_version_matches package-lock.json "$package_lock_root_version"
+          assert_version_matches src-tauri/tauri.conf.json "$tauri_version"
+          assert_version_matches src-tauri/Cargo.toml "$cargo_version"
+          assert_version_matches src-tauri/Cargo.lock "$cargo_lock_version"
+
+          should_release=true
+          if [[ "$EVENT_NAME" == "push" ]] &&
+             [[ -n "${BEFORE_SHA:-}" ]] &&
+             [[ ! "$BEFORE_SHA" =~ ^0+$ ]] &&
+             git cat-file -e "${BEFORE_SHA}:package.json" 2>/dev/null; then
+            previous_version="$(git show "${BEFORE_SHA}:package.json" | jq -er '.version')"
+            if [[ "$previous_version" == "$version" ]]; then
+              should_release=false
+              echo "::notice::Release skipped because package.json remains at ${version}"
+            else
+              echo "Version changed from ${previous_version} to ${version}"
+            fi
+          fi
+
+          prerelease=false
+          if [[ "$version" == *-* ]]; then
+            prerelease=true
+          fi
+
+          {
+            echo "prerelease=$prerelease"
+            echo "should_release=$should_release"
+            echo "tag=v$version"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+  create-release:
+    name: Create draft release
+    needs: version
+    if: needs.version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+    steps:
+      - name: Create draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$TAG" --json isDraft --jq '.isDraft')"
+            if [[ "$is_draft" != "true" ]]; then
+              echo "::error::Release ${TAG} already exists and is published"
+              exit 1
+            fi
+            echo "Using existing draft release ${TAG}"
+          else
+            args=(
+              "$TAG"
+              --draft
+              --generate-notes
+              --target "$GITHUB_SHA"
+              --title "Fika Music ${TAG}"
+            )
+            if [[ "$PRERELEASE" == "true" ]]; then
+              args+=(--prerelease)
+            fi
+            gh release create "${args[@]}"
+          fi
+
+          release_id="$(gh release view "$TAG" --json databaseId --jq '.databaseId')"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs:
+      - version
+      - create-release
+    if: needs.version.outputs.should_release == 'true'
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (Apple silicon)
+            platform: macos-latest
+            rust_target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin
+            cache_key: macos-aarch64
+          - name: macOS (Intel)
+            platform: macos-latest
+            rust_target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin
+            cache_key: macos-x86_64
+          - name: Linux (x86_64)
+            platform: ubuntu-22.04
+            rust_target: ""
+            args: ""
+            cache_key: linux-x86_64
+          - name: Windows (x86_64)
+            platform: windows-latest
+            rust_target: ""
+            args: ""
+            cache_key: windows-x86_64
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Linux dependencies
+        if: startsWith(matrix.platform, 'ubuntu-')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.1
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache Rust build artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.cache_key }}
+          workspaces: ./src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and upload release bundles
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          args: ${{ matrix.args }}
+          prerelease: ${{ needs.version.outputs.prerelease }}
+          releaseDraft: true
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          retryAttempts: 2
+          tagName: ${{ needs.version.outputs.tag }}
+
+  publish-release:
+    name: Publish release
+    needs:
+      - version
+      - build
+    if: needs.version.outputs.should_release == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+          TAG: ${{ needs.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=("$TAG" "--draft=false")
+          if [[ "$PRERELEASE" != "true" ]]; then
+            args+=(--latest)
+          fi
+          gh release edit "${args[@]}"

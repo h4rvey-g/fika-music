@@ -56,6 +56,16 @@ cargo clippy --all-targets --all-features --locked --manifest-path src-tauri/Car
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 ```
 
+## Releases
+
+A push to `main` that changes the application version runs the multi-platform
+release workflow. Keep the version synchronized in `package.json`,
+`package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and
+`src-tauri/tauri.conf.json`. The workflow publishes Windows and Linux x86_64
+bundles plus Intel and Apple silicon macOS bundles after every build succeeds.
+It can also be started manually from GitHub Actions to retry an unpublished
+version.
+
 Bundled Plugins start disabled. Enabling one automatically grants the
 capabilities declared by its current manifest.
 
