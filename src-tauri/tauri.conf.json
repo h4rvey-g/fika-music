@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "fika-music",
+  "productName": "Fika Music",
   "mainBinaryName": "fika-music",
   "version": "0.1.0",
   "identifier": "com.hvg.fika-music",
@@ -15,7 +15,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "fika-music",
+        "title": "Fika Music",
         "width": 1440,
         "height": 760,
         "minWidth": 1000,
