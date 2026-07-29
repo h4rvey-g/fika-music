@@ -2396,7 +2396,7 @@ defineExpose({
             </div>
             <div class="flex shrink-0 gap-1">
               <button
-                v-if="task.state === 'paused' || task.state === 'queued' || task.state === 'completedWithErrors'"
+                v-if="task.state === 'paused' || task.state === 'queued'"
                 class="btn btn-square btn-ghost btn-sm"
                 type="button"
                 :disabled="downloadActionId === task.taskId"

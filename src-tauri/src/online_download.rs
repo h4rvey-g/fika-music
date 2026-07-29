@@ -408,6 +408,37 @@ pub fn reset_resumable_items(
     Ok(())
 }
 
+pub fn prepare_task_start(
+    connection: &Connection,
+    task_id: &str,
+    updated_at: i64,
+) -> Result<OnlineDownloadTask, OnlineDownloadError> {
+    let transaction = connection.unchecked_transaction()?;
+    let current = task(&transaction, task_id)?.ok_or_else(|| {
+        OnlineDownloadError::Invalid(format!("download task {task_id} was not found"))
+    })?;
+    if !matches!(
+        current.state,
+        OnlineDownloadState::Queued | OnlineDownloadState::Paused
+    ) {
+        return Err(OnlineDownloadError::Invalid(
+            "only queued or paused download tasks can be started".to_owned(),
+        ));
+    }
+    reset_resumable_items(&transaction, task_id)?;
+    set_task_state(
+        &transaction,
+        task_id,
+        OnlineDownloadState::Running,
+        updated_at,
+    )?;
+    let prepared = task(&transaction, task_id)?.ok_or_else(|| {
+        OnlineDownloadError::Invalid(format!("download task {task_id} disappeared"))
+    })?;
+    transaction.commit()?;
+    Ok(prepared)
+}
+
 pub fn retry_item(
     connection: &Connection,
     task_id: &str,
@@ -947,6 +978,153 @@ mod tests {
         assert_eq!(paused.items[0].state, OnlineDownloadItemState::Paused);
         assert_eq!(paused.items[0].bytes_downloaded, 0);
         assert_eq!(paused.items[0].total_bytes, None);
+    }
+
+    #[test]
+    fn prepare_task_start_should_reject_completed_tasks_with_errors() {
+        let directory = tempfile::tempdir().expect("temporary directory should open");
+        let mut connection = Connection::open_in_memory().expect("database should open");
+        database::initialize(&mut connection).expect("database should initialize");
+        let created = create_task(
+            &connection,
+            "track",
+            "A song",
+            directory.path(),
+            &[track(None)],
+            None,
+            10,
+        )
+        .expect("task should create");
+        let item = claim_next_item(&connection, &created.task_id)
+            .expect("item should claim")
+            .expect("item should exist");
+        set_item_state(
+            &connection,
+            &item.item_id,
+            OnlineDownloadItemState::Failed,
+            None,
+            Some("source failed"),
+            0,
+            None,
+        )
+        .expect("item should fail");
+        set_task_state(
+            &connection,
+            &created.task_id,
+            OnlineDownloadState::CompletedWithErrors,
+            20,
+        )
+        .expect("task should record its terminal state");
+
+        let error = prepare_task_start(&connection, &created.task_id, 30)
+            .expect_err("completed task should not restart without retrying an item");
+
+        assert!(error
+            .to_string()
+            .contains("only queued or paused download tasks can be started"));
+    }
+
+    #[test]
+    fn prepare_task_start_should_resume_paused_items() {
+        let directory = tempfile::tempdir().expect("temporary directory should open");
+        let mut connection = Connection::open_in_memory().expect("database should open");
+        database::initialize(&mut connection).expect("database should initialize");
+        let created = create_task(
+            &connection,
+            "track",
+            "A song",
+            directory.path(),
+            &[track(None)],
+            None,
+            10,
+        )
+        .expect("task should create");
+        mark_pending_items(
+            &connection,
+            &created.task_id,
+            OnlineDownloadItemState::Paused,
+            "Paused by user",
+        )
+        .expect("item should pause");
+        set_task_state(
+            &connection,
+            &created.task_id,
+            OnlineDownloadState::Paused,
+            20,
+        )
+        .expect("task should pause");
+
+        let resumed = prepare_task_start(&connection, &created.task_id, 30)
+            .expect("paused task should resume");
+
+        assert_eq!(resumed.state, OnlineDownloadState::Running);
+        assert_eq!(resumed.updated_at, 30);
+        assert_eq!(resumed.items[0].state, OnlineDownloadItemState::Queued);
+        assert_eq!(resumed.items[0].message, None);
+    }
+
+    #[test]
+    fn prepare_task_start_should_roll_back_partial_state_changes() {
+        let directory = tempfile::tempdir().expect("temporary directory should open");
+        let mut connection = Connection::open_in_memory().expect("database should open");
+        database::initialize(&mut connection).expect("database should initialize");
+        let created = create_task(
+            &connection,
+            "track",
+            "A song",
+            directory.path(),
+            &[track(None)],
+            None,
+            10,
+        )
+        .expect("task should create");
+        mark_pending_items(
+            &connection,
+            &created.task_id,
+            OnlineDownloadItemState::Paused,
+            "Paused by user",
+        )
+        .expect("item should pause");
+        set_task_state(
+            &connection,
+            &created.task_id,
+            OnlineDownloadState::Paused,
+            20,
+        )
+        .expect("task should pause");
+        connection
+            .execute_batch(
+                "CREATE TRIGGER corrupt_download_snapshot_after_start
+                 AFTER UPDATE OF state ON online_download_tasks
+                 WHEN NEW.state = 'running'
+                 BEGIN
+                   UPDATE online_download_items
+                   SET track_json = 'invalid json'
+                   WHERE task_id = NEW.task_id;
+                 END;",
+            )
+            .expect("failure trigger should install");
+
+        prepare_task_start(&connection, &created.task_id, 30)
+            .expect_err("invalid prepared snapshot should roll back the transaction");
+
+        let task_state = connection
+            .query_row(
+                "SELECT state FROM online_download_tasks WHERE task_id = ?1",
+                [&created.task_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("task state should load");
+        let (item_state, track_json) = connection
+            .query_row(
+                "SELECT state, track_json FROM online_download_items WHERE task_id = ?1",
+                [&created.task_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("item state should load");
+        assert_eq!(task_state, "paused");
+        assert_eq!(item_state, "paused");
+        assert_ne!(track_json, "invalid json");
     }
 
     #[test]

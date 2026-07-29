@@ -334,6 +334,7 @@ const navigationHistory: AppLocation[] = [
 ];
 let navigationHistoryIndex = 0;
 let playbackDetailsGeneration = 0;
+let playbackRequestGeneration = 0;
 let onlinePlaybackController: AbortController | null = null;
 let onlinePreloadController: AbortController | null = null;
 let onlinePreloadTimer: ReturnType<typeof setTimeout> | null = null;
@@ -607,6 +608,7 @@ onBeforeUnmount(() => {
   if (sourceChangeMessageTimer) clearTimeout(sourceChangeMessageTimer);
   if (collectionNoticeTimer) clearTimeout(collectionNoticeTimer);
   playbackDetailsGeneration += 1;
+  playbackRequestGeneration += 1;
   onlinePlaybackController?.abort();
   cancelOnlinePreload();
   for (const unlisten of desktopLyricsUnlisteners) unlisten();
@@ -1276,7 +1278,26 @@ function retryLyrics() {
   }
 }
 
+function beginPlaybackRequest() {
+  playbackRequestGeneration += 1;
+  return playbackRequestGeneration;
+}
+
+function ownsPlaybackRequest(generation: number) {
+  return generation === playbackRequestGeneration;
+}
+
+function ownsOnlinePlaybackRequest(
+  generation: number,
+  controller: AbortController,
+) {
+  return ownsPlaybackRequest(generation)
+    && !controller.signal.aborted
+    && onlinePlaybackController === controller;
+}
+
 async function playTrack(track: LocalTrack, preserveCollectionQueue = false) {
+  const generation = beginPlaybackRequest();
   sampleListeningTime();
   if (!preserveCollectionQueue) clearCollectionPlaybackQueue();
   clearRemotePlaybackQueue();
@@ -1287,6 +1308,7 @@ async function playTrack(track: LocalTrack, preserveCollectionQueue = false) {
     const source = await invoke<MediaSource>(TAURI_COMMANDS.localTrackMediaSource, {
       trackId: track.id,
     });
+    if (!ownsPlaybackRequest(generation)) return;
 
     activeTrack.value = track;
     activeRemoteTitle.value = null;
@@ -1297,16 +1319,22 @@ async function playTrack(track: LocalTrack, preserveCollectionQueue = false) {
     void loadLocalTrackPlaybackDetails(track);
 
     await nextTick();
-    if (audioElement.value) {
-      audioElement.value.volume = volume.value;
-      await audioElement.value.play();
+    if (!ownsPlaybackRequest(generation)) return;
+    const audio = audioElement.value;
+    if (audio) {
+      audio.volume = volume.value;
+      await audio.play();
+      if (!ownsPlaybackRequest(generation)) return;
       isPlaying.value = true;
     }
   } catch (error) {
+    if (!ownsPlaybackRequest(generation)) return;
     appError.value = normalizeError(error);
     isPlaying.value = false;
   } finally {
-    isPreparingPlayback.value = false;
+    if (ownsPlaybackRequest(generation)) {
+      isPreparingPlayback.value = false;
+    }
   }
 }
 
@@ -1475,6 +1503,7 @@ async function playCollectionQueueTrack(index: number) {
 
 async function playCollectionOnlineTrack(track: OnlineTrack) {
   clearRemotePlaybackQueue();
+  const generation = beginPlaybackRequest();
   const controller = new AbortController();
   onlinePlaybackController = controller;
   resolvingOnlineTrackKey.value = track.key;
@@ -1485,14 +1514,17 @@ async function playCollectionOnlineTrack(track: OnlineTrack) {
 
   try {
     const playback = await resolveConfiguredOnlinePlayback(track, controller.signal, true);
-    if (controller.signal.aborted || onlinePlaybackController !== controller) return;
-    await applyOnlinePlayback(playback);
+    if (!ownsOnlinePlaybackRequest(generation, controller)) return;
+    await applyOnlinePlayback(playback, generation);
   } catch (error) {
-    if (!(error instanceof DOMException && error.name === "AbortError")) {
+    if (
+      ownsPlaybackRequest(generation)
+      && !(error instanceof DOMException && error.name === "AbortError")
+    ) {
       appError.value = normalizeError(error);
     }
   } finally {
-    if (onlinePlaybackController === controller) {
+    if (ownsOnlinePlaybackRequest(generation, controller)) {
       resolvingOnlineTrackKey.value = null;
       isPreparingPlayback.value = false;
     }
@@ -1501,26 +1533,38 @@ async function playCollectionOnlineTrack(track: OnlineTrack) {
 
 async function playOnlineQueueTrack(index: number) {
   const snapshotTrack = remoteQueue.value[index];
-  if (!snapshotTrack) return;
+  if (!snapshotTrack) return null;
+  const generation = beginPlaybackRequest();
 
   const prepared = takePreloadedOnlinePlayback(index, snapshotTrack);
   if (prepared) {
     onlinePlaybackController?.abort();
+    onlinePlaybackController = null;
     resolvingOnlineTrackKey.value = snapshotTrack.key;
     isPreparingPlayback.value = true;
     appError.value = null;
     try {
       remoteQueueIndex.value = index;
-      await applyOnlinePlayback(prepared);
-      if (index === remoteQueue.value.length - 1) void loadMoreRemoteQueue();
+      const applied = await applyOnlinePlayback(prepared, generation);
+      if (
+        applied
+        && ownsPlaybackRequest(generation)
+        && index === remoteQueue.value.length - 1
+      ) {
+        void loadMoreRemoteQueue();
+      }
     } catch (error) {
-      appError.value = normalizeError(error);
+      if (ownsPlaybackRequest(generation)) {
+        appError.value = normalizeError(error);
+      }
     } finally {
-      clearPreloadedMedia();
-      resolvingOnlineTrackKey.value = null;
-      isPreparingPlayback.value = false;
+      if (ownsPlaybackRequest(generation)) {
+        clearPreloadedMedia();
+        resolvingOnlineTrackKey.value = null;
+        isPreparingPlayback.value = false;
+      }
     }
-    return;
+    return generation;
   }
 
   cancelOnlinePreload();
@@ -1537,20 +1581,30 @@ async function playOnlineQueueTrack(index: number) {
       controller.signal,
       true,
     );
-    if (controller.signal.aborted || onlinePlaybackController !== controller) return;
+    if (!ownsOnlinePlaybackRequest(generation, controller)) return generation;
     remoteQueueIndex.value = index;
-    await applyOnlinePlayback(playback);
-    if (index === remoteQueue.value.length - 1) void loadMoreRemoteQueue();
+    const applied = await applyOnlinePlayback(playback, generation);
+    if (
+      applied
+      && ownsPlaybackRequest(generation)
+      && index === remoteQueue.value.length - 1
+    ) {
+      void loadMoreRemoteQueue();
+    }
   } catch (error) {
-    if (!(error instanceof DOMException && error.name === "AbortError")) {
+    if (
+      ownsPlaybackRequest(generation)
+      && !(error instanceof DOMException && error.name === "AbortError")
+    ) {
       appError.value = normalizeError(error);
     }
   } finally {
-    if (onlinePlaybackController === controller) {
+    if (ownsOnlinePlaybackRequest(generation, controller)) {
       resolvingOnlineTrackKey.value = null;
       isPreparingPlayback.value = false;
     }
   }
+  return generation;
 }
 
 async function resolveConfiguredOnlinePlayback(
@@ -1671,6 +1725,7 @@ function cancelOnlinePreload() {
 }
 
 async function playStandaloneOnlineTrack(track: OnlineTrack) {
+  const generation = beginPlaybackRequest();
   onlinePlaybackController?.abort();
   const controller = new AbortController();
   onlinePlaybackController = controller;
@@ -1680,21 +1735,26 @@ async function playStandaloneOnlineTrack(track: OnlineTrack) {
 
   try {
     const playback = await resolveConfiguredOnlinePlayback(track, controller.signal, false);
-    if (controller.signal.aborted || onlinePlaybackController !== controller) return;
-    await applyOnlinePlayback(playback);
+    if (!ownsOnlinePlaybackRequest(generation, controller)) return generation;
+    await applyOnlinePlayback(playback, generation);
   } catch (error) {
-    if (!(error instanceof DOMException && error.name === "AbortError")) {
+    if (
+      ownsPlaybackRequest(generation)
+      && !(error instanceof DOMException && error.name === "AbortError")
+    ) {
       appError.value = normalizeError(error);
     }
   } finally {
-    if (onlinePlaybackController === controller) {
+    if (ownsOnlinePlaybackRequest(generation, controller)) {
       resolvingOnlineTrackKey.value = null;
       isPreparingPlayback.value = false;
     }
   }
+  return generation;
 }
 
-async function applyOnlinePlayback(playback: OnlinePlayback) {
+async function applyOnlinePlayback(playback: OnlinePlayback, generation: number) {
+  if (!ownsPlaybackRequest(generation)) return false;
   sampleListeningTime();
   clearLocalPlaybackQueue();
   activeTrack.value = null;
@@ -1721,11 +1781,15 @@ async function applyOnlinePlayback(playback: OnlinePlayback) {
   );
 
   await nextTick();
-  if (audioElement.value) {
-    audioElement.value.volume = volume.value;
-    await audioElement.value.play();
+  if (!ownsPlaybackRequest(generation)) return false;
+  const audio = audioElement.value;
+  if (audio) {
+    audio.volume = volume.value;
+    await audio.play();
+    if (!ownsPlaybackRequest(generation)) return false;
     isPlaying.value = true;
   }
+  return true;
 }
 
 async function togglePlayback() {
@@ -2150,10 +2214,11 @@ async function reloadActiveOnlinePlayback(message: string) {
   const wasPlaying = isPlaying.value;
   sourceChangeMessage.value = message;
 
-  if (remoteQueueActive.value && remoteQueueIndex.value >= 0) {
-    await playOnlineQueueTrack(remoteQueueIndex.value);
-  } else {
-    await playStandaloneOnlineTrack(track);
+  const generation = remoteQueueActive.value && remoteQueueIndex.value >= 0
+    ? await playOnlineQueueTrack(remoteQueueIndex.value)
+    : await playStandaloneOnlineTrack(track);
+  if (generation === null || !ownsPlaybackRequest(generation)) {
+    return;
   }
 
   const nextDuration = playbackDuration.value || activeOnlineTrack.value?.durationSeconds || 0;

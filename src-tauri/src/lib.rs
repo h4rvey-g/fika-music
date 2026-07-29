@@ -668,37 +668,44 @@ fn start_online_download_task(
     if task_id.is_empty() {
         return Err("download task id must not be empty".to_owned());
     }
-    let cancellation = source_runtime::SourceCancellationToken::default();
-    {
-        let mut active = state
-            .online_download_requests
-            .lock()
-            .map_err(|_| "download request lock was poisoned".to_owned())?;
-        if active.contains_key(&task_id) {
-            return Err("download task is already running".to_owned());
-        }
-        active.insert(task_id.clone(), cancellation.clone());
-    }
-    let task = {
-        let db = state
-            .db
-            .lock()
-            .map_err(|_| "database lock was poisoned".to_owned())?;
-        online_download::reset_resumable_items(&db, &task_id).map_err(|error| error.to_string())?;
-        online_download::set_task_state(
-            &db,
-            &task_id,
-            online_download::OnlineDownloadState::Running,
-            now_timestamp(),
-        )
-        .map_err(|error| error.to_string())?;
-        online_download::task(&db, &task_id)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "download task was not found".to_owned())?
-    };
+    let (task, cancellation) = prepare_online_download_task_start(state.inner(), &task_id)?;
     emit_online_download_task(&app, &task);
     std::thread::spawn(move || run_online_download_task(app, task_id, cancellation));
     Ok(task)
+}
+
+fn prepare_online_download_task_start(
+    state: &AppState,
+    task_id: &str,
+) -> CommandResult<(
+    online_download::OnlineDownloadTask,
+    source_runtime::SourceCancellationToken,
+)> {
+    let cancellation = source_runtime::SourceCancellationToken::default();
+    let mut active = state
+        .online_download_requests
+        .lock()
+        .map_err(|_| "download request lock was poisoned".to_owned())?;
+    if active.contains_key(task_id) {
+        return Err("download task is already running".to_owned());
+    }
+    active.insert(task_id.to_owned(), cancellation.clone());
+
+    let result = state
+        .db
+        .lock()
+        .map_err(|_| "database lock was poisoned".to_owned())
+        .and_then(|db| {
+            online_download::prepare_task_start(&db, task_id, now_timestamp())
+                .map_err(|error| error.to_string())
+        });
+    match result {
+        Ok(task) => Ok((task, cancellation)),
+        Err(error) => {
+            active.remove(task_id);
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
@@ -5618,6 +5625,26 @@ mod tests {
             Duration::from_secs(1),
             Instant::now() + Duration::from_secs(2),
         ));
+    }
+
+    #[test]
+    fn failed_download_start_should_release_the_active_registration() {
+        let directory = tempfile::tempdir().expect("temporary directory should open");
+        let state = AppState::new(&directory.path().join("library.sqlite3"))
+            .expect("test app state should initialize");
+
+        for _ in 0..2 {
+            let error = match prepare_online_download_task_start(&state, "missing-task") {
+                Ok(_) => panic!("missing download task should not start"),
+                Err(error) => error,
+            };
+            assert!(error.contains("download task missing-task was not found"));
+            assert!(!state
+                .online_download_requests
+                .lock()
+                .expect("download request registry should not be poisoned")
+                .contains_key("missing-task"));
+        }
     }
 
     #[test]

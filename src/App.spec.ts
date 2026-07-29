@@ -435,6 +435,55 @@ describe("application shell", () => {
     wrapper.unmount();
   });
 
+  it("keeps the newest local track when media source requests resolve out of order", async () => {
+    const firstTrack = createLocalTrack({ id: 1, title: "First" });
+    const secondTrack = createLocalTrack({ id: 2, title: "Second" });
+    let resolveFirstSource!: (source: { filePath: string }) => void;
+    const firstSource = new Promise<{ filePath: string }>((resolve) => {
+      resolveFirstSource = resolve;
+    });
+    const defaultInvoke = tauriMocks.invoke.getMockImplementation();
+    tauriMocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "local_track_media_source") {
+        return args?.trackId === firstTrack.id
+          ? firstSource
+          : Promise.resolve({ filePath: "/music/second.mp3" });
+      }
+      if (command === "local_track_playback_details") {
+        return Promise.resolve({ coverDataUrl: null, lyrics: null, lyricsError: null });
+      }
+      return defaultInvoke?.(command, args);
+    });
+    const wrapper = mount(App);
+    await flushPromises();
+    const browser = wrapper.getComponent({ name: "LibraryBrowser" });
+
+    browser.vm.$emit("playbackQueue", {
+      queueId: "first-queue",
+      total: 1,
+      currentIndex: 0,
+      track: firstTrack,
+    }, true);
+    await wrapper.vm.$nextTick();
+    browser.vm.$emit("playbackQueue", {
+      queueId: "second-queue",
+      total: 1,
+      currentIndex: 0,
+      track: secondTrack,
+    }, true);
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="playback-track-info"]').text()).toContain("Second");
+    expect(wrapper.get("audio").element.getAttribute("src")).toBe("/music/second.mp3");
+
+    resolveFirstSource({ filePath: "/music/first.mp3" });
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="playback-track-info"]').text()).toContain("Second");
+    expect(wrapper.get("audio").element.getAttribute("src")).toBe("/music/second.mp3");
+    wrapper.unmount();
+  });
+
   it("opens New Collection from the Local Music context menu", async () => {
     const wrapper = mount(App);
     await flushPromises();

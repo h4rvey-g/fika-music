@@ -1630,6 +1630,7 @@ describe("Online Music workspace", () => {
     await flushPromises();
     await wrapper.findAll('[role="tab"]')[1].trigger("click");
 
+    expect(wrapper.find('button[aria-label="Resume download task"]').exists()).toBe(false);
     expect(wrapper.find('button[aria-label="Retry Song 1"]').exists()).toBe(true);
     await wrapper.get('button[aria-label="Refresh candidates for Song 1"]').trigger("click");
     await flushPromises();
