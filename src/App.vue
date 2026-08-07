@@ -50,10 +50,12 @@ import NeteaseSource from "./components/NeteaseSource.vue";
 import NowPlayingPanel from "./components/NowPlayingPanel.vue";
 import NowPlayingLyricsSettings from "./components/NowPlayingLyricsSettings.vue";
 import DesktopLyricsSettings from "./components/DesktopLyricsSettings.vue";
+import AppUpdateSettings from "./components/AppUpdateSettings.vue";
 import OnlineMusic from "./components/OnlineMusic.vue";
 import OnlineMusicSettingsPanel from "./components/OnlineMusicSettings.vue";
 import fikaLogoUrl from "../src-tauri/icons/fika.svg";
 import { useLibraryScan } from "./composables/use-library-scan";
+import { useAppUpdater } from "./composables/use-app-updater";
 import { useOnlineMusicConfig } from "./composables/use-online-music-config";
 import { NETEASE_PLUGIN_ID } from "./lib/netease-api";
 import { KUGOU_PLUGIN_ID } from "./lib/kugou-api";
@@ -247,6 +249,7 @@ const appError = ref<string | null>(null);
 const libraryScan = useLibraryScan((message) => {
   appError.value = message;
 });
+const appUpdater = useAppUpdater();
 const {
   scanStatus,
   selectedFolder,
@@ -579,6 +582,7 @@ onMounted(async () => {
   window.addEventListener("mousedown", suppressMouseNavigationDefault);
   window.addEventListener("mouseup", handleMouseNavigation);
   window.addEventListener("auxclick", suppressMouseNavigationDefault);
+  void appUpdater.initialize();
   await setupDesktopLyricsEvents();
   await setupCollectionEvents();
   await Promise.all([
@@ -613,6 +617,7 @@ onBeforeUnmount(() => {
   cancelOnlinePreload();
   for (const unlisten of desktopLyricsUnlisteners) unlisten();
   for (const unlisten of collectionUnlisteners) unlisten();
+  appUpdater.dispose();
   sampleListeningTime();
 });
 
@@ -645,6 +650,10 @@ function selectSection(section: AppSection) {
   if (resetOnlineHome) {
     void nextTick(() => onlineMusic.value?.showHome());
   }
+}
+
+function openAppUpdateSettings() {
+  selectSection(settingsSection.id);
 }
 
 async function openNowPlayingLyricsSettings() {
@@ -2661,6 +2670,22 @@ function trackSubtitle(track: LocalTrack) {
             </div>
           </section>
 
+          <AppUpdateSettings
+            :current-version="appUpdater.currentVersion.value"
+            :update="appUpdater.availableUpdate.value"
+            :is-checking="appUpdater.isChecking.value"
+            :is-installing="appUpdater.isInstalling.value"
+            :has-checked="appUpdater.hasChecked.value"
+            :restart-required="appUpdater.restartRequired.value"
+            :downloaded-bytes="appUpdater.downloadedBytes.value"
+            :total-bytes="appUpdater.totalBytes.value"
+            :download-percent="appUpdater.downloadPercent.value"
+            :error="appUpdater.error.value"
+            @check="appUpdater.checkForUpdates()"
+            @install="appUpdater.installUpdate()"
+            @restart="appUpdater.restartApp()"
+          />
+
           <NowPlayingLyricsSettings
             :preferences="nowPlayingLyricsPreferences"
             @update="updateNowPlayingLyricsPreferences"
@@ -2751,6 +2776,33 @@ function trackSubtitle(track: LocalTrack) {
           </section>
         </section>
       </main>
+
+      <div
+        v-if="appUpdater.notificationVisible.value && appUpdater.availableUpdate.value && activeSection !== 'settings'"
+        class="fixed bottom-28 left-4 right-4 z-50 sm:left-auto sm:w-96"
+      >
+        <div role="alert" class="alert alert-info alert-soft shadow-lg">
+          <Download class="shrink-0" :size="19" aria-hidden="true" />
+          <div class="min-w-0 flex-1">
+            <div class="text-sm font-semibold">{{ t("Software update") }}</div>
+            <div class="text-xs">
+              {{ t("Version {version} is available", { version: appUpdater.availableUpdate.value.version }) }}
+            </div>
+          </div>
+          <button class="btn btn-sm shrink-0" type="button" @click="openAppUpdateSettings">
+            {{ t("View update") }}
+          </button>
+          <button
+            class="btn btn-square btn-ghost btn-sm shrink-0"
+            type="button"
+            :aria-label="t('Dismiss update notification')"
+            :title="t('Dismiss update notification')"
+            @click="appUpdater.dismissNotification"
+          >
+            <X :size="16" aria-hidden="true" />
+          </button>
+        </div>
+      </div>
 
       <footer
         class="z-30 shrink-0 border-t border-base-300 bg-base-100/95 backdrop-blur"

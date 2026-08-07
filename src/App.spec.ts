@@ -62,6 +62,7 @@ let onlineMusicSettings = createOnlineMusicSettings();
 
 vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => path,
+  isTauri: () => false,
   invoke: tauriMocks.invoke,
 }));
 
@@ -300,6 +301,7 @@ describe("application shell", () => {
 
     expect(wrapper.get("h1").text()).toBe("Settings");
     expect(wrapper.find("#theme-preference").exists()).toBe(true);
+    expect(wrapper.find('[data-testid="app-update-settings"]').exists()).toBe(true);
     expect(wrapper.find("#layout-density").exists()).toBe(false);
     expect(wrapper.get('footer[aria-label="Playback bar"]').element).toBe(playbackBar.element);
     expect(settingsButton?.attributes("aria-current")).toBe("page");

@@ -50,8 +50,20 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
+    "macOS": {
+      "hardenedRuntime": true
+    },
     "resources": ["plugins"],
     "targets": "all",
     "icon": ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/h4rvey-g/fika-music/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIzRDQyQ0M4MjRDRERCOApSV1M0M1V5Q3pFSTlBaCt6bUk1OU1qaWs3R2cvNlVuWldWampmMzhEQStVamVCR24xVWlTWW5Jcgo="
+    }
   }
 }
