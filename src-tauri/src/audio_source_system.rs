@@ -2487,6 +2487,7 @@ fn source_too_large_error() -> AudioSourceSystemError {
 mod tests {
     use super::*;
     use crate::plugin_system::{PluginProviderEntrypoint, PLUGIN_COMPATIBILITY_TARGET};
+    use crate::source_runtime::{SourceQuality, LX_SOURCE_KG};
 
     fn database() -> Connection {
         let mut connection = Connection::open_in_memory().expect("database should open");
@@ -2497,6 +2498,11 @@ mod tests {
     fn reference_source() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/lx-js-sources/quantouya-aggregate-v4.1.js")
+    }
+
+    fn arithmetic_obfuscated_source() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/lx-js-sources/arithmetic-obfuscated-v1.0.0.js")
     }
 
     #[test]
@@ -2548,6 +2554,20 @@ mod tests {
             .expect("reviewed source should enable");
         assert_eq!(enabled.state, AudioSourceState::Enabled);
         assert!(enabled.enabled);
+    }
+
+    #[test]
+    fn arithmetic_obfuscated_source_import_should_accept_music_url_contract() {
+        let (manifest, _, _) = prepare_import(&arithmetic_obfuscated_source())
+            .expect("arithmetic-obfuscated source should prepare for import");
+        let source = manifest
+            .source_catalog
+            .get(LX_SOURCE_KG)
+            .expect("Kugou source should be imported");
+
+        assert_eq!(manifest.adapter, LxJsImportAdapter::QuickJs.as_str());
+        assert_eq!(source.actions, [SourceAction::MusicUrl]);
+        assert_eq!(source.qualities, [SourceQuality::K128]);
     }
 
     #[test]

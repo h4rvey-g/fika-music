@@ -1451,6 +1451,23 @@ mod tests {
     }
 
     #[test]
+    fn arithmetic_obfuscated_script_should_dispatch_music_url() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/lx-js-sources/arithmetic-obfuscated-v1.0.0.js"),
+        )
+        .expect("arithmetic-obfuscated source should be readable");
+        let runtime = SourceRuntime::with_granted_capabilities([SourceCapability::NetworkAny]);
+        let outcome = dispatch(&runtime, &provider(&source))
+            .expect("arithmetic-obfuscated source should dispatch in QuickJS");
+
+        assert_eq!(
+            outcome.response,
+            SourceResponse::MusicUrl("https://cdn.example.test/song.mp3".to_owned())
+        );
+    }
+
+    #[test]
     fn standalone_nianxin_and_changqing_scripts_should_use_their_own_kugou_endpoints() {
         let fixtures = [
             ("nianxin-v1.0.1.js", "mcp.nianxinxz.com/share/ceshi/kg.php"),

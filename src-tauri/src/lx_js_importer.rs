@@ -9,8 +9,8 @@ use crate::source_runtime::{
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArrayExpression, Expression, Function, ObjectExpression, TemplateLiteral,
-    VariableDeclarator,
+    Argument, ArrayExpression, BinaryExpression, Expression, Function, ObjectExpression,
+    TemplateLiteral, VariableDeclarator,
 };
 use oxc_ast::ast_kind::AstKind;
 use oxc_ast_visit::Visit;
@@ -1168,6 +1168,11 @@ impl<'a> Visit<'a> for JsAstCollector {
                     self.facts.numeric_literals.insert(value);
                 }
             }
+            AstKind::BinaryExpression(expression) => {
+                if constant_binary_number(expression).and_then(number_to_usize) == Some(256) {
+                    self.facts.numeric_literals.insert(256);
+                }
+            }
             AstKind::StaticMemberExpression(member) => {
                 if let Some(path) =
                     static_member_path(&member.object, member.property.name.as_str())
@@ -1219,14 +1224,17 @@ impl<'a> Visit<'a> for DecoderFunctionInspector {
                     self.numeric_literals.insert(value);
                 }
             }
-            AstKind::BinaryExpression(expression)
-                if expression.operator == oxc_ast::ast::BinaryOperator::Subtraction =>
-            {
-                if matches!(expression.left, Expression::Identifier(_)) {
-                    if let Expression::NumericLiteral(value) = &expression.right {
-                        if let Some(value) = number_to_usize(value.value) {
-                            self.offsets.push(value);
-                        }
+            AstKind::BinaryExpression(expression) => {
+                if let Some(value) = constant_binary_number(expression).and_then(number_to_usize) {
+                    self.numeric_literals.insert(value);
+                }
+                if expression.operator == oxc_ast::ast::BinaryOperator::Subtraction
+                    && matches!(expression.left, Expression::Identifier(_))
+                {
+                    if let Some(value) =
+                        constant_number(&expression.right).and_then(number_to_usize)
+                    {
+                        self.offsets.push(value);
                     }
                 }
             }
@@ -1287,10 +1295,45 @@ fn ast_value_from_expression(expression: &Expression<'_>) -> AstValue {
         Expression::NumericLiteral(literal) => number_to_usize(literal.value)
             .map(AstValue::Number)
             .unwrap_or(AstValue::Other),
-        _ => expression_path(expression)
-            .map(AstValue::Path)
+        _ => constant_number(expression)
+            .and_then(number_to_usize)
+            .map(AstValue::Number)
+            .or_else(|| expression_path(expression).map(AstValue::Path))
             .unwrap_or(AstValue::Other),
     }
+}
+
+fn constant_number(expression: &Expression<'_>) -> Option<f64> {
+    let value = match expression {
+        Expression::NumericLiteral(literal) => literal.value,
+        Expression::UnaryExpression(expression) => {
+            let argument = constant_number(&expression.argument)?;
+            match expression.operator {
+                oxc_ast::ast::UnaryOperator::UnaryPlus => argument,
+                oxc_ast::ast::UnaryOperator::UnaryNegation => -argument,
+                _ => return None,
+            }
+        }
+        Expression::BinaryExpression(expression) => constant_binary_number(expression)?,
+        Expression::ParenthesizedExpression(expression) => constant_number(&expression.expression)?,
+        _ => return None,
+    };
+    value.is_finite().then_some(value)
+}
+
+fn constant_binary_number(expression: &BinaryExpression<'_>) -> Option<f64> {
+    let left = constant_number(&expression.left)?;
+    let right = constant_number(&expression.right)?;
+    let value = match expression.operator {
+        oxc_ast::ast::BinaryOperator::Addition => left + right,
+        oxc_ast::ast::BinaryOperator::Subtraction => left - right,
+        oxc_ast::ast::BinaryOperator::Multiplication => left * right,
+        oxc_ast::ast::BinaryOperator::Division if right != 0.0 => left / right,
+        oxc_ast::ast::BinaryOperator::Remainder if right != 0.0 => left % right,
+        oxc_ast::ast::BinaryOperator::Exponential => left.powf(right),
+        _ => return None,
+    };
+    value.is_finite().then_some(value)
 }
 
 fn number_to_usize(value: f64) -> Option<usize> {
@@ -2078,9 +2121,7 @@ fn decoder_calls_from_ast(
         .iter()
         .filter_map(|call| {
             let decoder = aliases.get(&call.callee)?.clone();
-            let AstValue::Number(index) = call.arguments.first()? else {
-                return None;
-            };
+            let index = decoder_index(call.arguments.first()?)?;
             let key = call.arguments.get(1).and_then(|value| match value {
                 AstValue::String(value) => Some(value.clone()),
                 _ => None,
@@ -2090,11 +2131,41 @@ fn decoder_calls_from_ast(
             }
             Some(DecoderCall {
                 decoder,
-                index: *index,
+                index,
                 key,
             })
         })
         .collect()
+}
+
+fn decoder_index(value: &AstValue) -> Option<usize> {
+    match value {
+        AstValue::Number(value) => Some(*value),
+        AstValue::String(value) => parse_static_usize(value),
+        AstValue::Path(_) | AstValue::Other => None,
+    }
+}
+
+fn parse_static_usize(value: &str) -> Option<usize> {
+    let value = value.trim();
+    if let Some(value) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        usize::from_str_radix(value, 16).ok()
+    } else if let Some(value) = value
+        .strip_prefix("0o")
+        .or_else(|| value.strip_prefix("0O"))
+    {
+        usize::from_str_radix(value, 8).ok()
+    } else if let Some(value) = value
+        .strip_prefix("0b")
+        .or_else(|| value.strip_prefix("0B"))
+    {
+        usize::from_str_radix(value, 2).ok()
+    } else {
+        value.parse().ok()
+    }
 }
 
 fn infer_rotation(
@@ -2337,6 +2408,55 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/lx-js-sources")
             .join(file_name)
+    }
+
+    #[test]
+    fn arithmetic_obfuscated_decoder_should_fold_static_indices() {
+        let report = analyze_lx_js_file(fixture_path("arithmetic-obfuscated-v1.0.0.js"))
+            .expect("arithmetic-obfuscated source should analyze");
+        let core_strings = report
+            .deobfuscation
+            .decoded_strings
+            .iter()
+            .filter(|value| matches!(value.as_str(), "request" | "musicUrl" | "inited" | "128k"))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            (
+                report.deobfuscation.decoder_count,
+                report.deobfuscation.rotation,
+                core_strings,
+            ),
+            (
+                1,
+                Some(0),
+                vec![
+                    "request".to_owned(),
+                    "musicUrl".to_owned(),
+                    "inited".to_owned(),
+                    "128k".to_owned(),
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn arithmetic_obfuscated_source_should_expose_music_url_contract() {
+        let report = analyze_lx_js_file(fixture_path("arithmetic-obfuscated-v1.0.0.js"))
+            .expect("arithmetic-obfuscated source should analyze");
+        let source = report
+            .manifest
+            .sources
+            .get(LX_SOURCE_KG)
+            .expect("Kugou source should be inferred");
+
+        assert_eq!(
+            supported_import_adapter(&report),
+            Some(LxJsImportAdapter::QuickJs)
+        );
+        assert_eq!(source.actions, [SourceAction::MusicUrl]);
+        assert_eq!(source.qualities, [SourceQuality::K128]);
     }
 
     fn spawn_http_response(content_type: &str, body: &str) -> String {
