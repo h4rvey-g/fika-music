@@ -25,9 +25,11 @@ import {
   type AudioSourceDiagnostic,
   type AudioSourceRecord,
 } from "../lib/audio-source-api";
+import { CHKSZ_AUDIO_SOURCE_ID } from "../lib/chksz-audio-source-api";
 import type { SourceCapability } from "../generated/bindings";
 import { normalizeError } from "../lib/errors";
 import { currentLocale, t } from "../i18n";
+import ChkszAudioSourceSettings from "./ChkszAudioSourceSettings.vue";
 
 const emit = defineEmits<{
   sourcesChanged: [sources: AudioSourceRecord[]];
@@ -312,7 +314,7 @@ function formatTimestamp(timestamp: number) {
         <div class="min-w-0">
           <h2 class="text-base font-semibold">{{ t("Audio Sources") }}</h2>
           <p class="mt-0.5 text-xs text-muted">
-            {{ t(audioSources.length === 1 ? "{count} imported source" : "{count} imported sources", { count: audioSources.length }) }}
+            {{ t(audioSources.length === 1 ? "{count} audio source" : "{count} audio sources", { count: audioSources.length }) }}
           </p>
         </div>
       </div>
@@ -500,6 +502,10 @@ function formatTimestamp(timestamp: number) {
               <span class="truncate" :title="audioSource.path">{{ audioSource.path }}</span>
             </div>
 
+            <ChkszAudioSourceSettings
+              v-if="audioSource.id === CHKSZ_AUDIO_SOURCE_ID"
+            />
+
             <div v-if="audioSource.declaredCapabilities.length" class="space-y-2">
               <div class="flex items-center justify-between gap-3">
                 <h4 class="text-sm font-semibold">{{ t("Permissions") }}</h4>
@@ -535,7 +541,7 @@ function formatTimestamp(timestamp: number) {
               >
                 <AlertCircle :size="17" aria-hidden="true" />
                 <span class="text-sm">
-                  {{ t("Confirm before enabling. This imported JavaScript can contact any network host through Fika.") }}
+                  {{ t("Confirm before enabling. This Audio Source can contact any network host through Fika.") }}
                 </span>
                 <button
                   class="btn btn-sm"

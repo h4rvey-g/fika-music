@@ -23,6 +23,7 @@ mod account_commands;
 mod album_art;
 pub mod audio_source_system;
 pub mod bundled_plugins;
+mod chksz_playback;
 mod collections;
 mod database;
 mod download_source_router;
@@ -163,6 +164,9 @@ macro_rules! with_tauri_commands {
             remove_audio_source,
             clear_audio_source_diagnostics,
             dispatch_audio_source_request,
+            get_chksz_api_key_status,
+            set_chksz_api_key,
+            clear_chksz_api_key,
             list_plugins,
             select_plugin_package,
             refresh_plugins,
@@ -371,6 +375,7 @@ struct AppState {
     yt_dlp_sidecar: Arc<yt_dlp_sidecar::YtDlpSidecar>,
     audio_source_registry: Mutex<AudioSourceRegistry>,
     plugin_registry: Mutex<PluginRegistry>,
+    chksz_playback: Arc<chksz_playback::ChkszPlaybackService>,
     netease_bridge: Arc<netease::NeteaseServiceBridge>,
     kugou_bridge: Arc<kugou::KugouServiceBridge>,
 }
@@ -457,7 +462,14 @@ impl AppState {
             4 * 1024 * 1024,
         ));
         let runtime_host: Arc<dyn source_runtime::SourceHost> = source_host.clone();
-        let source_runtime = Arc::new(source_runtime::SourceRuntime::with_host(runtime_host, []));
+        let source_runtime = Arc::new(source_runtime::SourceRuntime::with_host(
+            Arc::clone(&runtime_host),
+            [],
+        ));
+        let chksz_playback = Arc::new(chksz_playback::ChkszPlaybackService::new(
+            Arc::clone(&db),
+            runtime_host,
+        ));
         let netease_bridge = Arc::new(netease::NeteaseServiceBridge::new(
             Arc::clone(&db),
             Arc::clone(&source_host),
@@ -490,6 +502,9 @@ impl AppState {
             AudioSourceRegistry::new(audio_sources_dir, Arc::clone(&source_runtime))
                 .with_bundled_source(youtube_music_playback::bundled_audio_source_registration(
                     Arc::clone(&yt_dlp_sidecar),
+                ))?
+                .with_bundled_source(chksz_playback::bundled_audio_source_registration(
+                    Arc::clone(&chksz_playback),
                 ))?;
         let provider_catalog =
             bundled_plugins::provider_catalog(provider_bridge, kugou_provider_bridge)?;
@@ -527,6 +542,7 @@ impl AppState {
             yt_dlp_sidecar,
             audio_source_registry: Mutex::new(audio_source_registry),
             plugin_registry: Mutex::new(plugin_registry),
+            chksz_playback,
             netease_bridge,
             kugou_bridge,
         })
@@ -3675,6 +3691,12 @@ fn audio_source_command_error(message: impl Into<String>) -> AudioSourceCommandE
     }
 }
 
+fn chksz_audio_source_command_error(
+    error: chksz_playback::ChkszPlaybackError,
+) -> AudioSourceCommandError {
+    audio_source_command_error(error.to_string())
+}
+
 fn parse_audio_source_capabilities(
     capabilities: &[String],
 ) -> Result<Vec<source_runtime::SourceCapability>, AudioSourceCommandError> {
@@ -3699,6 +3721,33 @@ fn list_audio_sources(
         .lock()
         .map_err(|_| audio_source_lock_error("registry"))?;
     Ok(registry.records())
+}
+
+#[tauri::command]
+fn get_chksz_api_key_status(state: State<'_, AppState>) -> Result<bool, AudioSourceCommandError> {
+    state
+        .chksz_playback
+        .api_key_configured()
+        .map_err(chksz_audio_source_command_error)
+}
+
+#[tauri::command]
+fn set_chksz_api_key(
+    state: State<'_, AppState>,
+    api_key: String,
+) -> Result<(), AudioSourceCommandError> {
+    state
+        .chksz_playback
+        .set_api_key(&api_key)
+        .map_err(chksz_audio_source_command_error)
+}
+
+#[tauri::command]
+fn clear_chksz_api_key(state: State<'_, AppState>) -> Result<(), AudioSourceCommandError> {
+    state
+        .chksz_playback
+        .clear_api_key()
+        .map_err(chksz_audio_source_command_error)
 }
 
 #[tauri::command]
