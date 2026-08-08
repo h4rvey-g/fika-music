@@ -14,11 +14,18 @@ The Audio Source Registry owns:
 - `audio-source.json` validation and source integrity checks;
 - permission review, enable/disable, removal, and diagnostics;
 - host registration of non-removable bundled Rust playback providers;
+- per-catalog-source playback availability checks, including a one-click check
+  for the full declared catalog;
 - routing typed `musicUrl` requests through the shared Source Runtime.
 
 The Audio Sources UI exposes only those configuration responsibilities. Music
 search, Track ID lookup, playback, lyrics, and artwork are application/content
 workflows and do not belong on that page.
+
+Availability checks issue one real `musicUrl` request per selected catalog source
+using bounded built-in probe metadata. A successful check means the source
+returned a valid playback URL for that probe; it does not download or play the
+media.
 
 ## Managed package
 

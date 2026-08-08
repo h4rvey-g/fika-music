@@ -1,3 +1,4 @@
+pub use audio_source_system::AudioSourceAvailability;
 use audio_source_system::{
     AudioSourceCommandError, AudioSourceRecord, AudioSourceRegistry, AudioSourceSystemError,
 };
@@ -164,6 +165,7 @@ macro_rules! with_tauri_commands {
             remove_audio_source,
             clear_audio_source_diagnostics,
             dispatch_audio_source_request,
+            check_audio_source_availability,
             get_chksz_api_key_status,
             set_chksz_api_key,
             clear_chksz_api_key,
@@ -3965,6 +3967,177 @@ fn dispatch_audio_source_request_inner(
 }
 
 #[tauri::command]
+async fn check_audio_source_availability(
+    app: AppHandle,
+    audio_source_id: String,
+    source_id: Option<String>,
+) -> Result<Vec<AudioSourceAvailability>, AudioSourceCommandError> {
+    let audio_source_id = audio_source_id.trim().to_owned();
+    if audio_source_id.is_empty() {
+        return Err(audio_source_command_error(
+            "audio source id must not be empty",
+        ));
+    }
+    let source_id = source_id.map(|value| value.trim().to_owned());
+    if source_id.as_deref().is_some_and(str::is_empty) {
+        return Err(audio_source_command_error("source id must not be empty"));
+    }
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        check_audio_source_availability_inner(&state, &audio_source_id, source_id.as_deref())
+    })
+    .await;
+
+    match result {
+        Ok(result) => result,
+        Err(error) => Err(audio_source_command_error(format!(
+            "audio source availability task failed: {error}"
+        ))),
+    }
+}
+
+fn check_audio_source_availability_inner(
+    state: &AppState,
+    audio_source_id: &str,
+    requested_source_id: Option<&str>,
+) -> Result<Vec<AudioSourceAvailability>, AudioSourceCommandError> {
+    let probes = {
+        let registry = state
+            .audio_source_registry
+            .lock()
+            .map_err(|_| audio_source_lock_error("registry"))?;
+        let Some(record) = registry.record(audio_source_id) else {
+            return Err(audio_source_command_error(format!(
+                "audio source {audio_source_id} was not found"
+            )));
+        };
+        if !record.enabled {
+            return Err(audio_source_command_error(
+                "audio source must be enabled before availability checks",
+            ));
+        }
+
+        let probes = record
+            .sources
+            .into_iter()
+            .filter(|source| {
+                source
+                    .actions
+                    .contains(&source_runtime::SourceAction::MusicUrl)
+                    && requested_source_id.is_none_or(|id| source.id == id)
+            })
+            .map(|source| {
+                (
+                    source.id,
+                    source.name,
+                    source.qualities.first().copied().unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if probes.is_empty() {
+            return Err(audio_source_command_error(match requested_source_id {
+                Some(source_id) => {
+                    format!("audio source does not declare musicUrl for source {source_id}")
+                }
+                None => "audio source does not declare any musicUrl sources".to_owned(),
+            }));
+        }
+        probes
+    };
+
+    let probe_metadata = probes.clone();
+    let results = state
+        .online_executor
+        .map(probes, |(source_id, source_name, quality)| {
+            let started_at = Instant::now();
+            let request = audio_source_availability_request(&source_id, quality);
+            let (available, message) = match dispatch_audio_source_request_inner(
+                state,
+                audio_source_id,
+                request,
+                source_runtime::SourceCancellationToken::default(),
+            ) {
+                Ok(outcome) => match outcome.response {
+                    source_runtime::SourceResponse::MusicUrl(url) if !url.trim().is_empty() => {
+                        (true, None)
+                    }
+                    source_runtime::SourceResponse::MusicUrl(_) => (
+                        false,
+                        Some("provider returned an empty playback URL".to_owned()),
+                    ),
+                    _ => (
+                        false,
+                        Some("provider returned an unexpected response".to_owned()),
+                    ),
+                },
+                Err(error) => (false, Some(error.message)),
+            };
+
+            AudioSourceAvailability {
+                audio_source_id: audio_source_id.to_owned(),
+                source_id,
+                source_name,
+                quality,
+                available,
+                latency_ms: started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                message,
+            }
+        });
+
+    Ok(results
+        .into_iter()
+        .zip(probe_metadata)
+        .map(|(result, (source_id, source_name, quality))| {
+            result.unwrap_or_else(|message| AudioSourceAvailability {
+                audio_source_id: audio_source_id.to_owned(),
+                source_id,
+                source_name,
+                quality,
+                available: false,
+                latency_ms: 0,
+                message: Some(message),
+            })
+        })
+        .collect())
+}
+
+fn audio_source_availability_request(
+    source_id: &str,
+    quality: source_runtime::SourceQuality,
+) -> source_runtime::SourceRequest {
+    let (track_id, title, artist) = match source_id {
+        source_runtime::LX_SOURCE_KG => (
+            "4D766DEC7A90A011D730ED939D158131",
+            "Under My Skin",
+            "Andrew Cui",
+        ),
+        source_runtime::LX_SOURCE_WY => ("347230", "Test Track", "Test Artist"),
+        youtube_music::YOUTUBE_MUSIC_SOURCE_ID => ("ZrOKjDZOtkA", "Test Track", "Test Artist"),
+        _ => ("347230", "Test Track", "Test Artist"),
+    };
+    let mut music_info = JsonMap::new();
+    music_info.insert("id".to_owned(), JsonValue::String(track_id.to_owned()));
+    music_info.insert("title".to_owned(), JsonValue::String(title.to_owned()));
+    music_info.insert("name".to_owned(), JsonValue::String(title.to_owned()));
+    music_info.insert("artist".to_owned(), JsonValue::String(artist.to_owned()));
+    music_info.insert("singer".to_owned(), JsonValue::String(artist.to_owned()));
+    if source_id == source_runtime::LX_SOURCE_WY {
+        music_info.insert("songId".to_owned(), JsonValue::String(track_id.to_owned()));
+    }
+    if source_id == source_runtime::LX_SOURCE_KG {
+        music_info.insert("hash".to_owned(), JsonValue::String(track_id.to_owned()));
+    }
+    if source_id == youtube_music::YOUTUBE_MUSIC_SOURCE_ID {
+        music_info.insert("videoId".to_owned(), JsonValue::String(track_id.to_owned()));
+    }
+    source_runtime::SourceRequest::MusicUrl {
+        source: source_id.to_owned(),
+        music_info: JsonValue::Object(music_info),
+        quality,
+    }
+}
+
+#[tauri::command]
 fn list_plugins(state: State<'_, AppState>) -> Result<Vec<PluginRecord>, PluginCommandError> {
     let registry = state
         .plugin_registry
@@ -5648,6 +5821,45 @@ mod tests {
     use std::time::Duration;
 
     static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn availability_request_should_include_netease_track_aliases() {
+        let request = audio_source_availability_request(
+            source_runtime::LX_SOURCE_WY,
+            source_runtime::SourceQuality::K128,
+        );
+        let source_runtime::SourceRequest::MusicUrl { music_info, .. } = request else {
+            panic!("availability request should resolve music URLs");
+        };
+
+        assert_eq!(
+            music_info,
+            serde_json::json!({
+                "id": "347230",
+                "songId": "347230",
+                "title": "Test Track",
+                "name": "Test Track",
+                "artist": "Test Artist",
+                "singer": "Test Artist"
+            })
+        );
+    }
+
+    #[test]
+    fn availability_request_should_include_kugou_hash() {
+        let request = audio_source_availability_request(
+            source_runtime::LX_SOURCE_KG,
+            source_runtime::SourceQuality::K320,
+        );
+        let source_runtime::SourceRequest::MusicUrl { music_info, .. } = request else {
+            panic!("availability request should resolve music URLs");
+        };
+
+        assert_eq!(
+            music_info.get("hash"),
+            Some(&serde_json::json!("4D766DEC7A90A011D730ED939D158131"))
+        );
+    }
 
     #[test]
     fn failed_primary_bypasses_the_download_hedge_delay() {

@@ -6,7 +6,7 @@ use crate::registry_support::{
 };
 use crate::source_runtime::{
     self, DiagnosticLevel, SourceAction, SourceCapability, SourceInfo, SourceProvider,
-    SourceRequest, SourceRequestOutcome, SourceRuntime, SourceRuntimeApiVersion,
+    SourceQuality, SourceRequest, SourceRequestOutcome, SourceRuntime, SourceRuntimeApiVersion,
 };
 use percent_encoding::percent_decode_str;
 use reqwest::blocking::Client;
@@ -308,6 +308,19 @@ pub struct AudioSourceRecord {
 pub struct AudioSourceCommandError {
     pub message: String,
     pub diagnostics: Vec<AudioSourceDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct AudioSourceAvailability {
+    pub audio_source_id: String,
+    pub source_id: String,
+    pub source_name: String,
+    pub quality: SourceQuality,
+    pub available: bool,
+    pub latency_ms: u64,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]

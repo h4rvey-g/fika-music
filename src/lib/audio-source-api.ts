@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { TAURI_COMMANDS } from "../generated/bindings";
 import type {
+  AudioSourceAvailability,
   AudioSourceRecord,
   SourceCapability,
   SourceDiagnostic,
@@ -10,6 +11,7 @@ import type {
 } from "../generated/bindings";
 
 export type {
+  AudioSourceAvailability,
   AudioSourceDiagnostic,
   AudioSourceRecord,
   AudioSourceState,
@@ -82,6 +84,16 @@ export function removeAudioSource(audioSourceId: string) {
 export function clearAudioSourceDiagnostics(audioSourceId: string) {
   return invoke<AudioSourceRecord>(TAURI_COMMANDS.clearAudioSourceDiagnostics, {
     audioSourceId,
+  });
+}
+
+export function checkAudioSourceAvailability(
+  audioSourceId: string,
+  sourceId?: string,
+) {
+  return invoke<AudioSourceAvailability[]>(TAURI_COMMANDS.checkAudioSourceAvailability, {
+    audioSourceId,
+    sourceId: sourceId ?? null,
   });
 }
 

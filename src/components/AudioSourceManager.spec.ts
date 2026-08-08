@@ -5,6 +5,7 @@ import type { AudioSourceRecord } from "../lib/audio-source-api";
 import { createAudioSourceRecord } from "../test/fixtures";
 
 const apiMocks = vi.hoisted(() => ({
+  checkAudioSourceAvailability: vi.fn(),
   clearAudioSourceDiagnostics: vi.fn(),
   importAudioSource: vi.fn(),
   importAudioSourceUrl: vi.fn(),
@@ -68,6 +69,81 @@ describe("AudioSourceManager", () => {
     expect(wrapper.text()).toContain("New Source imported");
     const changes = wrapper.emitted("sourcesChanged") ?? [];
     expect(changes[changes.length - 1]).toEqual([[managerAudioSourceRecord(), imported]]);
+    wrapper.unmount();
+  });
+
+  it("checks an individual catalog source and renders its availability", async () => {
+    apiMocks.checkAudioSourceAvailability.mockResolvedValue([
+      {
+        audioSourceId: "imported-source",
+        sourceId: "wy",
+        sourceName: "NetEase",
+        quality: "128k",
+        available: true,
+        latencyMs: 42,
+        message: null,
+      },
+    ]);
+    const wrapper = mount(AudioSourceManager);
+    await flushPromises();
+
+    await wrapper.get('button[aria-label="Inspect Imported Source"]').trigger("click");
+    await wrapper.get('button[aria-label="Check NetEase"]').trigger("click");
+    await flushPromises();
+
+    expect(apiMocks.checkAudioSourceAvailability).toHaveBeenCalledWith(
+      "imported-source",
+      "wy",
+    );
+    expect(wrapper.text()).toContain("Available");
+    expect(wrapper.text()).toContain("42 ms");
+    wrapper.unmount();
+  });
+
+  it("checks every catalog source with one action and keeps failures visible", async () => {
+    const source = createAudioSourceRecord().sources[0];
+    apiMocks.listAudioSources.mockResolvedValue([
+      managerAudioSourceRecord({
+        sources: [source, { ...source, id: "kg", name: "Kugou" }],
+      }),
+    ]);
+    apiMocks.checkAudioSourceAvailability.mockResolvedValue([
+      {
+        audioSourceId: "imported-source",
+        sourceId: "wy",
+        sourceName: "NetEase",
+        quality: "128k",
+        available: true,
+        latencyMs: 42,
+        message: null,
+      },
+      {
+        audioSourceId: "imported-source",
+        sourceId: "kg",
+        sourceName: "Kugou",
+        quality: "128k",
+        available: false,
+        latencyMs: 1000,
+        message: "request timed out",
+      },
+    ]);
+    const wrapper = mount(AudioSourceManager);
+    await flushPromises();
+
+    await wrapper.get('button[aria-label="Inspect Imported Source"]').trigger("click");
+    const checkAll = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("Check all"));
+    await checkAll?.trigger("click");
+    await flushPromises();
+
+    expect(apiMocks.checkAudioSourceAvailability).toHaveBeenCalledWith(
+      "imported-source",
+      undefined,
+    );
+    expect(wrapper.text()).toContain("Available");
+    expect(wrapper.text()).toContain("Unavailable");
+    expect(wrapper.text()).toContain("request timed out");
     wrapper.unmount();
   });
 

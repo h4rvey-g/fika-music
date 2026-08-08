@@ -10,6 +10,8 @@ export type AlbumCoverResult = { groupId: string, status: AlbumCoverStatus, data
 
 export type AlbumCoverStatus = "embedded" | "downloaded" | "placeholder" | "authorizationRequired" | "needsReview" | "pending" | "failed";
 
+export type AudioSourceAvailability = { audioSourceId: string, sourceId: string, sourceName: string, quality: SourceQuality, available: boolean, latencyMs: number, message: string | null, };
+
 export type AudioSourceCommandError = { message: string, diagnostics: Array<AudioSourceDiagnostic>, };
 
 export type AudioSourceDiagnostic = { code: string, level: DiagnosticLevel, sourceId: string | null, message: string, timestamp: number, };
@@ -323,6 +325,7 @@ export const TAURI_COMMANDS = {
   removeAudioSource: "remove_audio_source",
   clearAudioSourceDiagnostics: "clear_audio_source_diagnostics",
   dispatchAudioSourceRequest: "dispatch_audio_source_request",
+  checkAudioSourceAvailability: "check_audio_source_availability",
   getChkszApiKeyStatus: "get_chksz_api_key_status",
   setChkszApiKey: "set_chksz_api_key",
   clearChkszApiKey: "clear_chksz_api_key",

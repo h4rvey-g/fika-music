@@ -5,6 +5,7 @@ import {
   AudioLines,
   ChevronDown,
   CircleCheck,
+  CircleX,
   Link,
   RefreshCw,
   ShieldCheck,
@@ -13,6 +14,7 @@ import {
   X,
 } from "@lucide/vue";
 import {
+  checkAudioSourceAvailability,
   clearAudioSourceDiagnostics,
   importAudioSource,
   importAudioSourceUrl,
@@ -22,6 +24,7 @@ import {
   selectAudioSourceFile,
   setAudioSourceCapabilities,
   setAudioSourceEnabled,
+  type AudioSourceAvailability,
   type AudioSourceDiagnostic,
   type AudioSourceRecord,
 } from "../lib/audio-source-api";
@@ -46,6 +49,8 @@ const sourceUrlInput = ref<HTMLInputElement | null>(null);
 const busySourceId = ref<string | null>(null);
 const sourceError = ref<string | null>(null);
 const sourceNotice = ref<string | null>(null);
+const availabilityResults = ref<Record<string, AudioSourceAvailability>>({});
+const availabilityCheck = ref<{ audioSourceId: string; sourceId: string | null } | null>(null);
 
 const hasAudioSources = computed(() => audioSources.value.length > 0);
 
@@ -228,6 +233,41 @@ async function clearDiagnostics(audioSource: AudioSourceRecord) {
   } finally {
     busySourceId.value = null;
   }
+}
+
+async function checkAvailability(audioSource: AudioSourceRecord, sourceId?: string) {
+  availabilityCheck.value = { audioSourceId: audioSource.id, sourceId: sourceId ?? null };
+  sourceError.value = null;
+  try {
+    const results = await checkAudioSourceAvailability(audioSource.id, sourceId);
+    const next = { ...availabilityResults.value };
+    for (const result of results) {
+      next[availabilityKey(result.audioSourceId, result.sourceId)] = result;
+    }
+    availabilityResults.value = next;
+  } catch (error) {
+    sourceError.value = normalizeError(error);
+  } finally {
+    availabilityCheck.value = null;
+  }
+}
+
+function availabilityKey(audioSourceId: string, sourceId: string) {
+  return `${audioSourceId}::${sourceId}`;
+}
+
+function availabilityFor(audioSourceId: string, sourceId: string) {
+  return availabilityResults.value[availabilityKey(audioSourceId, sourceId)] ?? null;
+}
+
+function availabilityClass(result: AudioSourceAvailability | null) {
+  if (!result) return "text-muted";
+  return result.available ? "text-success" : "text-error";
+}
+
+function isCheckingAvailability(audioSourceId: string, sourceId?: string) {
+  return availabilityCheck.value?.audioSourceId === audioSourceId
+    && (sourceId === undefined || availabilityCheck.value.sourceId === sourceId);
 }
 
 function replaceAudioSource(updated: AudioSourceRecord) {
@@ -556,16 +596,74 @@ function formatTimestamp(timestamp: number) {
             </div>
 
             <div class="space-y-2">
-              <h4 class="text-sm font-semibold">{{ t("Catalog") }}</h4>
-              <div class="flex flex-wrap gap-2">
-                <span
+              <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <h4 class="text-sm font-semibold">{{ t("Catalog") }}</h4>
+                <button
+                  class="btn btn-ghost btn-sm"
+                  type="button"
+                  :disabled="availabilityCheck !== null || busySourceId === audioSource.id"
+                  @click="checkAvailability(audioSource)"
+                >
+                  <RefreshCw
+                    :class="{ 'animate-spin': isCheckingAvailability(audioSource.id) }"
+                    :size="15"
+                    aria-hidden="true"
+                  />
+                  {{ t("Check all") }}
+                </button>
+              </div>
+              <ul class="divide-y divide-base-300 border border-base-300">
+                <li
                   v-for="source in audioSource.sources"
                   :key="source.id"
-                  class="badge badge-ghost"
+                  class="flex min-w-0 flex-col gap-2 px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
                 >
-                  {{ source.name }} / {{ source.id }}
-                </span>
-              </div>
+                  <div class="min-w-0">
+                    <div class="truncate text-sm">{{ source.name }} / {{ source.id }}</div>
+                    <div class="truncate text-xs text-muted">
+                      {{ source.qualities.length ? source.qualities.join(", ") : t("Default quality") }}
+                    </div>
+                    <div
+                      v-if="availabilityFor(audioSource.id, source.id)?.message"
+                      class="mt-1 break-words text-xs text-error"
+                    >
+                      {{ availabilityFor(audioSource.id, source.id)?.message }}
+                    </div>
+                  </div>
+                  <div class="flex shrink-0 items-center gap-3">
+                    <span
+                      v-if="availabilityFor(audioSource.id, source.id)"
+                      class="flex items-center gap-1 text-xs"
+                      :class="availabilityClass(availabilityFor(audioSource.id, source.id))"
+                    >
+                      <CircleCheck
+                        v-if="availabilityFor(audioSource.id, source.id)?.available"
+                        :size="14"
+                        aria-hidden="true"
+                      />
+                      <CircleX v-else :size="14" aria-hidden="true" />
+                      {{ t(availabilityFor(audioSource.id, source.id)?.available ? "Available" : "Unavailable") }}
+                    </span>
+                    <span v-if="availabilityFor(audioSource.id, source.id)" class="text-xs text-muted">
+                      {{ availabilityFor(audioSource.id, source.id)?.latencyMs }} ms
+                    </span>
+                    <button
+                      class="btn btn-ghost btn-sm"
+                      type="button"
+                      :disabled="availabilityCheck !== null || busySourceId === audioSource.id"
+                      :aria-label="t('Check {name}', { name: source.name })"
+                      @click="checkAvailability(audioSource, source.id)"
+                    >
+                      <RefreshCw
+                        :class="{ 'animate-spin': isCheckingAvailability(audioSource.id, source.id) }"
+                        :size="15"
+                        aria-hidden="true"
+                      />
+                      {{ t("Check") }}
+                    </button>
+                  </div>
+                </li>
+              </ul>
             </div>
 
             <div class="space-y-2">

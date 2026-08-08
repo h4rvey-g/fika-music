@@ -2,7 +2,9 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use fika_music_lib::audio_source_system::{AudioSourceCommandError, AudioSourceRecord};
+use fika_music_lib::audio_source_system::{
+    AudioSourceAvailability, AudioSourceCommandError, AudioSourceRecord,
+};
 use fika_music_lib::kugou::{KugouAccount, KugouQrLoginPoll, KugouQrLoginStart};
 use fika_music_lib::lyrics::{LocalTrackPlaybackDetails, TrackLyricsQuery};
 use fika_music_lib::netease::{
@@ -109,6 +111,7 @@ fn generate(output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     export_all::<LibraryChangedEvent>(&config)?;
     export_all::<PluginCommandError>(&config)?;
     export_all::<AudioSourceCommandError>(&config)?;
+    export_all::<AudioSourceAvailability>(&config)?;
     export_all::<NeteaseCommandError>(&config)?;
     export_all::<KugouCommandError>(&config)?;
     export_all::<PluginRecord>(&config)?;

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildAudioSourceOptions,
+  checkAudioSourceAvailability,
   importAudioSource,
   isAudioSourceId,
   listAudioSources,
@@ -32,6 +33,22 @@ describe("audio source API", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(1, "list_audio_sources");
     expect(invokeMock).toHaveBeenNthCalledWith(2, "import_audio_source", {
       sourcePath: "/downloads/source.js",
+    });
+  });
+
+  it("checks one source or the full catalog through the availability command", async () => {
+    invokeMock.mockResolvedValue([]);
+
+    await checkAudioSourceAvailability("imported-source", "wy");
+    await checkAudioSourceAvailability("imported-source");
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "check_audio_source_availability", {
+      audioSourceId: "imported-source",
+      sourceId: "wy",
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "check_audio_source_availability", {
+      audioSourceId: "imported-source",
+      sourceId: null,
     });
   });
 
