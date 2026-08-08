@@ -8,7 +8,7 @@ if [[ $# -ne 1 ]]; then
 fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "macOS is required to verify a DMG with Gatekeeper." >&2
+  echo "macOS is required to verify a DMG." >&2
   exit 2
 fi
 
@@ -44,8 +44,8 @@ app_path="${app_paths[0]}"
 codesign --verify --deep --strict --verbose=2 "$app_path"
 signature_info="$(codesign --display --verbose=4 "$app_path" 2>&1)"
 
-if ! grep -q '^Authority=Developer ID Application:' <<<"$signature_info"; then
-  echo "The app is not signed with a Developer ID Application certificate." >&2
+if ! grep -q '^Signature=adhoc$' <<<"$signature_info"; then
+  echo "The app is not signed with the configured ad-hoc identity." >&2
   exit 1
 fi
 
@@ -54,7 +54,4 @@ if ! grep -Eq '^CodeDirectory .*flags=.*\([^)]*runtime[^)]*\)' <<<"$signature_in
   exit 1
 fi
 
-xcrun stapler validate "$app_path"
-spctl --assess --type execute --verbose=4 "$app_path"
-
-echo "Verified signed and notarized app in $dmg_path"
+echo "Verified ad-hoc signed app in $dmg_path"

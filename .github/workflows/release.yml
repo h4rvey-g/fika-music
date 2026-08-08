@@ -224,37 +224,6 @@ jobs:
             exit 1
           fi
 
-      - name: Require macOS signing and notarization secrets
-        if: startsWith(matrix.platform, 'macos-')
-        shell: bash
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-
-          required=(
-            APPLE_CERTIFICATE
-            APPLE_CERTIFICATE_PASSWORD
-            APPLE_ID
-            APPLE_PASSWORD
-            APPLE_TEAM_ID
-          )
-          missing=()
-          for name in "${required[@]}"; do
-            if [[ -z "${!name:-}" ]]; then
-              missing+=("$name")
-            fi
-          done
-
-          if ((${#missing[@]} > 0)); then
-            echo "::error::Missing required macOS release secret(s): ${missing[*]}"
-            exit 1
-          fi
-
       - name: Install Linux dependencies
         if: startsWith(matrix.platform, 'ubuntu-')
         run: |
@@ -285,11 +254,6 @@ jobs:
       - name: Build and upload release bundles
         uses: tauri-apps/tauri-action@v1
         env:
-          APPLE_CERTIFICATE: ${{ startsWith(matrix.platform, 'macos-') && secrets.APPLE_CERTIFICATE || '' }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ startsWith(matrix.platform, 'macos-') && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
-          APPLE_ID: ${{ startsWith(matrix.platform, 'macos-') && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ startsWith(matrix.platform, 'macos-') && secrets.APPLE_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ startsWith(matrix.platform, 'macos-') && secrets.APPLE_TEAM_ID || '' }}
           GITHUB_TOKEN: ${{ github.token }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -301,7 +265,7 @@ jobs:
           retryAttempts: 2
           tagName: ${{ needs.version.outputs.tag }}
 
-      - name: Verify macOS release DMG
+      - name: Verify ad-hoc signed macOS release DMG
         if: startsWith(matrix.platform, 'macos-')
         shell: bash
         env:

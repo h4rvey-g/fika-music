@@ -95,37 +95,23 @@ The workflow publishes Windows and Linux x86_64 bundles plus Intel and Apple
 silicon macOS bundles after every build succeeds. It can also be started
 manually from GitHub Actions to retry an unpublished version.
 
-### macOS signing and notarization
+### macOS ad-hoc signing
 
-The release workflow refuses to publish unsigned macOS bundles. Configure these
-GitHub Actions repository secrets before releasing:
+The release workflow uses Tauri's ad-hoc signing identity for both macOS
+architectures. This does not require an Apple Developer membership or Apple
+credentials, and the workflow verifies the app's ad-hoc signature and hardened
+runtime after mounting each DMG.
 
-| Secret | Value |
-| --- | --- |
-| `APPLE_CERTIFICATE` | Base64-encoded `.p12` export of a **Developer ID Application** certificate and its private key |
-| `APPLE_CERTIFICATE_PASSWORD` | Password used when exporting the `.p12` file |
-| `APPLE_ID` | Apple Developer account email |
-| `APPLE_PASSWORD` | App-specific password for the Apple account |
-| `APPLE_TEAM_ID` | Apple Developer Team ID |
-
-Create the certificate for direct distribution outside the App Store, export it
-from Keychain Access, and encode it with:
-
-```bash
-openssl base64 -A -in DeveloperIDApplication.p12 -out certificate-base64.txt
-```
-
-Tauri uses these credentials to sign with hardened runtime, submit the app to
-Apple for notarization, and staple the ticket before creating the DMG. The
-workflow then mounts the DMG and verifies its Developer ID signature, stapled
-ticket, and Gatekeeper assessment. A built DMG can be checked locally with:
+Ad-hoc signatures are not Apple notarization. Gatekeeper can require users to
+manually approve the first launch of a downloaded app from an unidentified
+developer. A built DMG can be checked locally with:
 
 ```bash
 bash scripts/verify-macos-dmg.sh path/to/Fika.Music_version_arch.dmg
 ```
 
 See the [Tauri macOS signing guide](https://v2.tauri.app/distribute/sign/macos/)
-for certificate and app-specific password setup.
+for ad-hoc signing details.
 
 ### In-app updates
 
