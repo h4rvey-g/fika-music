@@ -432,18 +432,29 @@ impl ImportedLxJsProvider {
             )?;
             ctx.eval::<(), _>(LX_JS_BOOTSTRAP)
                 .map_err(|error| js_failure(&ctx, "install LX host", error))?;
-            ctx.eval::<Value<'_>, _>(self.source.as_bytes())
-                .map_err(|error| js_failure(&ctx, "evaluate source.js", error))?;
+            let source_error = match ctx.eval::<Value<'_>, _>(self.source.as_bytes()) {
+                Ok(_) => None,
+                Err(error) => {
+                    let is_script_exception = error.is_exception();
+                    let error = js_failure(&ctx, "evaluate source.js", error);
+                    if !is_script_exception {
+                        return Err(error);
+                    }
+                    Some(error)
+                }
+            };
+            if let Some(error) = source_error {
+                if !is_lx_source_ready(&ctx)? {
+                    return Err(error);
+                }
+                host_context.borrow_mut().warn(format!(
+                    "LX JavaScript reported an error after initialization: {}",
+                    error
+                ));
+            }
             drain_jobs(&ctx, self.limits, deadline)?;
 
-            let ready: Function<'_> = ctx
-                .globals()
-                .get("__fikaLxReady")
-                .map_err(|error| js_failure(&ctx, "read LX initialization state", error))?;
-            let is_ready = ready
-                .call::<_, bool>(())
-                .map_err(|error| js_failure(&ctx, "read LX initialization state", error))?;
-            if !is_ready {
+            if !is_lx_source_ready(&ctx)? {
                 return Err(LxJsFailure::Script(
                     "source.js did not complete the LX inited/request contract".to_owned(),
                 ));
@@ -878,6 +889,16 @@ fn drain_jobs(ctx: &Ctx<'_>, limits: LxJsLimits, deadline: Instant) -> Result<()
         }
     }
     Err(LxJsFailure::Limit)
+}
+
+fn is_lx_source_ready(ctx: &Ctx<'_>) -> Result<bool, LxJsFailure> {
+    let ready: Function<'_> = ctx
+        .globals()
+        .get("__fikaLxReady")
+        .map_err(|error| js_failure(ctx, "read LX initialization state", error))?;
+    ready
+        .call::<_, bool>(())
+        .map_err(|error| js_failure(ctx, "read LX initialization state", error))
 }
 
 fn finish_promise(
@@ -1448,6 +1469,24 @@ mod tests {
 
         assert!(matches!(error, SourceRuntimeError::Provider { .. }));
         assert!(error.to_string().contains("non-empty sources object"));
+    }
+
+    #[test]
+    fn imported_script_should_remain_usable_when_source_throws_after_inited_event() {
+        let source = r#"
+            const { EVENT_NAMES, on, send } = globalThis.lx;
+            on(EVENT_NAMES.request, () => Promise.resolve('https://cdn.example.test/song.mp3'));
+            send(EVENT_NAMES.inited, { sources: { kg: { type: 'music', actions: ['musicUrl'], qualitys: ['128k'] } } });
+            throw new Error('post-inited source error');
+        "#;
+        let runtime = SourceRuntime::with_granted_capabilities([SourceCapability::NetworkAny]);
+        let outcome = dispatch(&runtime, &provider(source))
+            .expect("an error after the inited event should not disable the LX source");
+
+        assert_eq!(
+            outcome.response,
+            SourceResponse::MusicUrl("https://cdn.example.test/song.mp3".to_owned())
+        );
     }
 
     #[test]
