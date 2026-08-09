@@ -29,7 +29,7 @@ import {
   AudioSourceRouter,
   playbackAttemptKey,
 } from "./audio-source-router";
-import { firstSuccessfulWithTimeout } from "./async-utils";
+import { AllPromisesRejectedError, firstSuccessfulWithTimeout } from "./async-utils";
 import { ExpiringCache } from "./expiring-cache";
 import { cancelSourceRequest } from "./plugin-api";
 
@@ -71,6 +71,22 @@ export type OnlinePlayback = {
   audioSourceId: string;
   quality: SourceQuality;
 };
+
+export type OnlinePlaybackSourceFailure = {
+  audioSourceId: string;
+  audioSourceName: string;
+  reason: string;
+};
+
+export class OnlinePlaybackResolutionError extends Error {
+  readonly failures: OnlinePlaybackSourceFailure[];
+
+  constructor(failures: OnlinePlaybackSourceFailure[]) {
+    super("Online playback failed after trying the available Audio Sources.");
+    this.name = "OnlinePlaybackResolutionError";
+    this.failures = failures;
+  }
+}
 
 export type ResolveOnlineTrackOptions = {
   track: OnlineTrack;
@@ -373,7 +389,7 @@ export async function resolveOnlineTrack(
 
   const deadline = Date.now() + options.settings.playbackTimeoutSeconds * 1_000;
   const probe = options.probe ?? probeMediaUrl;
-  const failures: unknown[] = [];
+  const failures: OnlinePlaybackSourceFailure[] = [];
   if (mode === "automatic") {
     for (let index = 0; index < sources.length; index += 2) {
       throwIfAborted(options.signal);
@@ -388,7 +404,13 @@ export async function resolveOnlineTrack(
         });
       } catch (error) {
         if (isAbortError(error)) throw error;
-        failures.push(error);
+        if (error instanceof AudioSourcePairError) {
+          failures.push(...error.failures);
+        } else {
+          for (const source of sources.slice(index, index + 2)) {
+            failures.push(audioSourceFailure(source, error));
+          }
+        }
       }
     }
   } else {
@@ -410,16 +432,55 @@ export async function resolveOnlineTrack(
         });
       } catch (error) {
         if (isAbortError(error)) throw error;
-        failures.push(error);
+        failures.push(audioSourceFailure(source, error));
       }
     }
   }
   throwIfAborted(options.signal);
-  throw new Error(
-    failures.length
-      ? "Playback is unavailable from the configured Audio Sources."
-      : "Playback timed out before a source became available.",
-  );
+  throw new OnlinePlaybackResolutionError(failures);
+}
+
+class AudioSourcePairError extends Error {
+  readonly failures: OnlinePlaybackSourceFailure[];
+
+  constructor(failures: OnlinePlaybackSourceFailure[]) {
+    super("The Audio Source pair failed.");
+    this.name = "AudioSourcePairError";
+    this.failures = failures;
+  }
+}
+
+function audioSourceFailure(
+  source: AudioSourceRecord,
+  error: unknown,
+): OnlinePlaybackSourceFailure {
+  return {
+    audioSourceId: source.id,
+    audioSourceName: source.name,
+    reason: playbackFailureReason(error),
+  };
+}
+
+function playbackFailureReason(error: unknown): string {
+  if (error instanceof AllPromisesRejectedError || error instanceof PlaybackQualityError) {
+    const reasons = error.errors
+      .map(playbackFailureReason)
+      .filter((reason, index, values) => reason && values.indexOf(reason) === index);
+    return reasons.length ? reasons.join("; ") : error.message;
+  }
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  return "Unknown playback failure.";
+}
+
+class PlaybackQualityError extends Error {
+  readonly errors: unknown[];
+
+  constructor(errors: unknown[], message: string) {
+    super(message);
+    this.name = "PlaybackQualityError";
+    this.errors = errors;
+  }
 }
 
 type SourcePairOptions = {
@@ -444,11 +505,13 @@ async function raceAudioSourcePair(options: SourcePairOptions): Promise<OnlinePl
   let secondaryStarted = false;
   let started = 0;
   let failed = 0;
+  const failures: OnlinePlaybackSourceFailure[] = [];
 
   const result = new Promise<OnlinePlayback>((resolve, reject) => {
-    const finishWithFailure = (error: unknown) => {
+    const finishWithFailure = (source: AudioSourceRecord, error: unknown) => {
       if (settled) return;
       failed += 1;
+      failures.push(audioSourceFailure(source, error));
       if (options.options.signal?.aborted) {
         settled = true;
         reject(abortError());
@@ -460,7 +523,7 @@ async function raceAudioSourcePair(options: SourcePairOptions): Promise<OnlinePl
       }
       if (failed === started) {
         settled = true;
-        reject(error);
+        reject(new AudioSourcePairError(failures));
       }
     };
 
@@ -469,7 +532,10 @@ async function raceAudioSourcePair(options: SourcePairOptions): Promise<OnlinePl
       started += 1;
       const remaining = options.deadline - Date.now();
       if (remaining <= 0) {
-        finishWithFailure(new Error("Playback timed out before a source became available."));
+        finishWithFailure(
+          source,
+          new Error("Playback timed out before this source became available."),
+        );
         return;
       }
       void resolveFromAudioSourceLayer({
@@ -493,7 +559,7 @@ async function raceAudioSourcePair(options: SourcePairOptions): Promise<OnlinePl
           if (controllerIndex !== index) controller.abort();
         });
         resolve(playback);
-      }).catch(finishWithFailure);
+      }).catch((error) => finishWithFailure(source, error));
     };
 
     const startSecondary = () => {
@@ -553,6 +619,7 @@ async function resolveFromAudioSourceLayer(options: LayerOptions): Promise<Onlin
     throw new Error("Audio Source does not support any candidate channel.");
   }
 
+  const failures: unknown[] = [];
   for (const [index, quality] of options.qualities.entries()) {
     throwIfAborted(options.signal);
     const qualityCandidates = supportedCandidates.filter((candidate) => {
@@ -568,9 +635,15 @@ async function resolveFromAudioSourceLayer(options: LayerOptions): Promise<Onlin
       return await raceCandidates(options, qualityCandidates, quality, qualityBudget);
     } catch (error) {
       if (isAbortError(error)) throw error;
+      failures.push(new Error(`${quality}: ${playbackFailureReason(error)}`));
     }
   }
-  throw new Error("Audio Source layer did not produce a playable URL.");
+  throw new PlaybackQualityError(
+    failures,
+    failures.length
+      ? "Audio Source layer did not produce a playable URL."
+      : "Audio Source does not support the requested qualities.",
+  );
 }
 
 async function raceCandidates(

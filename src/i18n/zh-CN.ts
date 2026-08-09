@@ -82,6 +82,7 @@ export const ZH_CN_MESSAGES: Readonly<Record<string, string>> = {
   "No folder selected": "未选择文件夹",
   "Nothing playing": "当前未播放",
   "Online Music": "在线音乐",
+  "Online playback failed. Tried music sources:": "在线音乐播放失败，已尝试以下音乐源：",
   "Open navigation": "打开导航",
   "Pause": "暂停",
   "Pause playback": "暂停播放",

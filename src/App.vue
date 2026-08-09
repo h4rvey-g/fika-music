@@ -83,6 +83,7 @@ import {
   playbackAttemptKey,
   reportOnlinePlaybackFailure,
   resolveOnlineTrack,
+  OnlinePlaybackResolutionError,
   type OnlinePlayback,
   type OnlineTrack,
 } from "./lib/online-music-api";
@@ -246,6 +247,16 @@ setLocale(savedUiPreferences.locale);
 const savedDesktopLyricsPreferences = loadDesktopLyricsPreferences();
 const savedNowPlayingLyricsPreferences = loadNowPlayingLyricsPreferences();
 const appError = ref<string | null>(null);
+
+function playbackErrorMessage(error: unknown) {
+  if (!(error instanceof OnlinePlaybackResolutionError) || !error.failures.length) {
+    return normalizeError(error);
+  }
+  const attempts = error.failures.map(
+    (failure) => `• ${failure.audioSourceName}: ${failure.reason}`,
+  );
+  return [t("Online playback failed. Tried music sources:"), ...attempts].join("\n");
+}
 const libraryScan = useLibraryScan((message) => {
   appError.value = message;
 });
@@ -1530,7 +1541,7 @@ async function playCollectionOnlineTrack(track: OnlineTrack) {
       ownsPlaybackRequest(generation)
       && !(error instanceof DOMException && error.name === "AbortError")
     ) {
-      appError.value = normalizeError(error);
+      appError.value = playbackErrorMessage(error);
     }
   } finally {
     if (ownsOnlinePlaybackRequest(generation, controller)) {
@@ -1564,7 +1575,7 @@ async function playOnlineQueueTrack(index: number) {
       }
     } catch (error) {
       if (ownsPlaybackRequest(generation)) {
-        appError.value = normalizeError(error);
+        appError.value = playbackErrorMessage(error);
       }
     } finally {
       if (ownsPlaybackRequest(generation)) {
@@ -1605,7 +1616,7 @@ async function playOnlineQueueTrack(index: number) {
       ownsPlaybackRequest(generation)
       && !(error instanceof DOMException && error.name === "AbortError")
     ) {
-      appError.value = normalizeError(error);
+      appError.value = playbackErrorMessage(error);
     }
   } finally {
     if (ownsOnlinePlaybackRequest(generation, controller)) {
@@ -1751,7 +1762,7 @@ async function playStandaloneOnlineTrack(track: OnlineTrack) {
       ownsPlaybackRequest(generation)
       && !(error instanceof DOMException && error.name === "AbortError")
     ) {
-      appError.value = normalizeError(error);
+      appError.value = playbackErrorMessage(error);
     }
   } finally {
     if (ownsOnlinePlaybackRequest(generation, controller)) {
@@ -2484,7 +2495,7 @@ function trackSubtitle(track: LocalTrack) {
         >
           <div v-if="appError" role="alert" class="alert alert-error py-2">
             <AlertCircle :size="17" aria-hidden="true" />
-            <span class="min-w-0 flex-1 text-sm">{{ appError }}</span>
+            <span class="min-w-0 flex-1 whitespace-pre-line text-sm">{{ appError }}</span>
             <button
               class="btn btn-square btn-ghost btn-sm"
               type="button"

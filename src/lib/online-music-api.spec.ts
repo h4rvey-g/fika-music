@@ -6,6 +6,7 @@ import {
   invalidateOnlinePlaybackCaches,
   onlineTracksMatch,
   onlinePlaylistDetailError,
+  OnlinePlaybackResolutionError,
   playbackAttemptKey,
   preloadMediaUrl,
   qualityFallback,
@@ -503,5 +504,38 @@ describe("online music playback routing", () => {
     expect(invoke.mock.calls.filter(([command]) => command === "dispatch_audio_source_request"))
       .toHaveLength(2);
     vi.useRealTimers();
+  });
+
+  it("reports every attempted Audio Source and its failure reason", async () => {
+    invoke.mockImplementation((command: string, payload: { audioSourceId?: string }) => {
+      if (command === "dispatch_audio_source_request") {
+        return Promise.reject(new Error(`${payload.audioSourceId} rejected the request`));
+      }
+      return Promise.resolve(true);
+    });
+
+    const error = await resolveOnlineTrack({
+      track,
+      audioSources: [audioSource("first", ["wy"]), audioSource("second", ["wy"])],
+      settings: {
+        ...settings,
+        audioSourceSelectionMode: "automatic",
+      },
+      probe: async () => undefined,
+    }).catch((failure: unknown) => failure);
+
+    expect(error).toBeInstanceOf(OnlinePlaybackResolutionError);
+    expect((error as OnlinePlaybackResolutionError).failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        audioSourceId: "second",
+        audioSourceName: "second",
+        reason: expect.stringContaining("second rejected the request"),
+      }),
+      expect.objectContaining({
+        audioSourceId: "first",
+        audioSourceName: "first",
+        reason: expect.stringContaining("first rejected the request"),
+      }),
+    ]));
   });
 });

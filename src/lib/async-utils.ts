@@ -1,3 +1,13 @@
+export class AllPromisesRejectedError extends Error {
+  readonly errors: unknown[];
+
+  constructor(errors: unknown[]) {
+    super("All playback candidates failed.");
+    this.name = "AllPromisesRejectedError";
+    this.errors = errors;
+  }
+}
+
 export async function firstSuccessfulWithTimeout<T>(
   promises: Promise<T>[],
   timeoutMs: number,
@@ -36,11 +46,13 @@ function firstSuccessful<T>(promises: Promise<T>[]): Promise<T> {
     }
 
     let failures = 0;
+    const errors: unknown[] = [];
     for (const promise of promises) {
-      promise.then(resolve).catch(() => {
+      promise.then(resolve).catch((error) => {
+        errors.push(error);
         failures += 1;
         if (failures === promises.length) {
-          reject(new Error("All playback candidates failed."));
+          reject(new AllPromisesRejectedError(errors));
         }
       });
     }
