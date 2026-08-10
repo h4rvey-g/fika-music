@@ -36,6 +36,7 @@ import {
   Shuffle,
   SkipBack,
   SkipForward,
+  Sparkles,
   Trash2,
   Volume2,
   X,
@@ -157,7 +158,17 @@ import {
   type MusicCollectionItem,
   type MusicCollectionMutation,
   type MusicCollectionSummary,
+  type SmartCollectionRule,
 } from "./lib/collection-api";
+import {
+  SMART_COLLECTION_FIELD_OPTIONS,
+  SMART_COLLECTION_OPERATOR_LABELS,
+  createDefaultSmartCollectionRule,
+  isNumericSmartCollectionField,
+  resetSmartCollectionRuleOperator,
+  smartCollectionOperators,
+  smartCollectionRulesAreComplete,
+} from "./lib/smart-collection-model";
 
 type LibraryBrowserInstance = {
   refresh: () => Promise<void>;
@@ -284,10 +295,24 @@ const selectedCollectionId = ref("");
 const collectionNameDialog = ref<CollectionNameDialog | null>(null);
 const collectionName = ref("");
 const collectionNameInput = ref<HTMLInputElement | null>(null);
+const collectionMode = ref<"manual" | "smart">("manual");
+const smartCollectionRules = ref<SmartCollectionRule[]>([
+  createDefaultSmartCollectionRule(),
+]);
 const collectionActionError = ref<string | null>(null);
 const collectionActionBusy = ref(false);
 const collectionDeleteTarget = ref<MusicCollectionSummary | null>(null);
 const collectionNotice = ref<string | null>(null);
+const creatingSmartCollection = computed(() =>
+  collectionNameDialog.value?.intent === "create"
+  && collectionNameDialog.value.seed.kind === "empty"
+  && collectionMode.value === "smart",
+);
+const canSubmitCollectionName = computed(() =>
+  collectionName.value.trim().length > 0
+  && (!creatingSmartCollection.value
+    || smartCollectionRulesAreComplete(smartCollectionRules.value)),
+);
 const sidebarOpen = ref(false);
 const activeTrack = ref<LocalTrack | null>(null);
 const activeRemoteTitle = ref<string | null>(null);
@@ -818,6 +843,8 @@ function openCreateCollection(seed: CollectionSeed = { kind: "empty" }) {
   collectionPickerSeed.value = null;
   collectionNameDialog.value = { intent: "create", seed };
   collectionName.value = "";
+  collectionMode.value = "manual";
+  smartCollectionRules.value = [createDefaultSmartCollectionRule()];
   collectionActionError.value = null;
   closeSidebarContextMenus();
   void nextTick(() => collectionNameInput.value?.focus());
@@ -835,9 +862,7 @@ function openRenameCollection(collection: MusicCollectionSummary) {
 }
 
 function openCollectionPicker(seed: Exclude<CollectionSeed, { kind: "empty" }>) {
-  const options = seed.kind === "collection"
-    ? musicCollections.value.filter((collection) => collection.id !== seed.sourceCollectionId)
-    : musicCollections.value;
+  const options = availableCollectionTargets(seed);
   if (!options.length) {
     openCreateCollection(seed);
     return;
@@ -849,9 +874,39 @@ function openCollectionPicker(seed: Exclude<CollectionSeed, { kind: "empty" }>) 
 
 function collectionPickerOptions() {
   const seed = collectionPickerSeed.value;
-  return seed?.kind === "collection"
-    ? musicCollections.value.filter((collection) => collection.id !== seed.sourceCollectionId)
-    : musicCollections.value;
+  return seed && seed.kind !== "empty" ? availableCollectionTargets(seed) : [];
+}
+
+function availableCollectionTargets(seed: Exclude<CollectionSeed, { kind: "empty" }>) {
+  return musicCollections.value.filter((collection) =>
+    !collection.smartRules
+    && (seed.kind !== "collection" || collection.id !== seed.sourceCollectionId),
+  );
+}
+
+function addSmartCollectionRule() {
+  smartCollectionRules.value = [
+    ...smartCollectionRules.value,
+    createDefaultSmartCollectionRule(),
+  ];
+}
+
+function removeSmartCollectionRule(index: number) {
+  if (smartCollectionRules.value.length === 1) return;
+  smartCollectionRules.value = smartCollectionRules.value.filter(
+    (_, ruleIndex) => ruleIndex !== index,
+  );
+}
+
+function updateSmartCollectionRuleField(rule: SmartCollectionRule) {
+  resetSmartCollectionRuleOperator(rule);
+}
+
+function smartCollectionValuePlaceholder(rule: SmartCollectionRule) {
+  if (rule.operator === "matchesRegex" || rule.operator === "doesNotMatchRegex") {
+    return t("Regular expression");
+  }
+  return isNumericSmartCollectionField(rule.field) ? "2000" : t("Value");
 }
 
 function addLocalSelectionToCollection(source: LocalCollectionSelection) {
@@ -907,7 +962,15 @@ async function submitCollectionName() {
       return;
     }
 
-    created = await createMusicCollection(collectionName.value);
+    const smartRules = creatingSmartCollection.value
+      ? {
+          rules: smartCollectionRules.value.map((rule) => ({
+            ...rule,
+            value: rule.value.trim(),
+          })),
+        }
+      : null;
+    created = await createMusicCollection(collectionName.value, smartRules);
     const mutation = await addCollectionSeed(created.id, dialog.seed);
     updateCollectionSummary(mutation?.collection ?? created);
     collectionsExpanded.value = true;
@@ -1079,6 +1142,9 @@ async function confirmCollectionDelete() {
 }
 
 function handleCollectionDragOver(event: DragEvent, collectionId: string) {
+  if (musicCollections.value.find((collection) => collection.id === collectionId)?.smartRules) {
+    return;
+  }
   const types = event.dataTransfer ? Array.from(event.dataTransfer.types) : [];
   if (!types.includes(COLLECTION_DRAG_TYPE)) return;
   event.preventDefault();
@@ -1101,6 +1167,9 @@ function handleCollectionDragLeave(event: DragEvent, collectionId: string) {
 async function handleCollectionDrop(event: DragEvent, collectionId: string) {
   event.preventDefault();
   collectionDropTargetId.value = null;
+  if (musicCollections.value.find((collection) => collection.id === collectionId)?.smartRules) {
+    return;
+  }
   const payload = readCollectionDragPayload(event.dataTransfer);
   if (!payload) return;
   try {
@@ -3207,7 +3276,9 @@ function trackSubtitle(track: LocalTrack) {
                       ]"
                       :aria-current="activeSection === 'collection' && activeCollectionId === collection.id ? 'page' : undefined"
                       :data-collection-id="collection.id"
-                      :title="t('{name} ({count} tracks)', { name: collection.name, count: collection.itemCount })"
+                      :title="collection.smartRules
+                        ? t('{name} (Smart Collection, {count} tracks)', { name: collection.name, count: collection.itemCount })
+                        : t('{name} ({count} tracks)', { name: collection.name, count: collection.itemCount })"
                       @click="selectCollection(collection.id)"
                       @dblclick="playCollectionFromSidebar(collection)"
                       @contextmenu="openCollectionContextMenu($event, collection.id)"
@@ -3215,7 +3286,8 @@ function trackSubtitle(track: LocalTrack) {
                       @dragleave="handleCollectionDragLeave($event, collection.id)"
                       @drop="handleCollectionDrop($event, collection.id)"
                     >
-                      <ListMusic class="shrink-0" :size="16" aria-hidden="true" />
+                      <Sparkles v-if="collection.smartRules" class="shrink-0" :size="16" aria-hidden="true" />
+                      <ListMusic v-else class="shrink-0" :size="16" aria-hidden="true" />
                       <span class="min-w-0 flex-1 truncate text-left">{{ collection.name }}</span>
                       <span class="shrink-0 text-xs tabular-nums opacity-60">
                         {{ collection.itemCount }}
@@ -3344,7 +3416,11 @@ function trackSubtitle(track: LocalTrack) {
         aria-labelledby="collection-name-dialog-title"
         @cancel.prevent="closeCollectionDialogs"
       >
-        <form class="modal-box max-w-md rounded" @submit.prevent="submitCollectionName">
+        <form
+          class="modal-box rounded"
+          :class="creatingSmartCollection ? 'max-w-3xl' : 'max-w-md'"
+          @submit.prevent="submitCollectionName"
+        >
           <div class="flex items-start gap-3">
             <div class="min-w-0 flex-1">
               <h2 id="collection-name-dialog-title" class="text-base font-semibold">
@@ -3394,6 +3470,107 @@ function trackSubtitle(track: LocalTrack) {
             />
           </label>
 
+          <div
+            v-if="collectionNameDialog.intent === 'create' && collectionNameDialog.seed.kind === 'empty'"
+            class="mt-4"
+          >
+            <div class="join grid w-full grid-cols-2" :aria-label="t('Collection type')">
+              <button
+                class="btn btn-sm join-item"
+                :class="collectionMode === 'manual' ? 'btn-neutral' : 'btn-ghost'"
+                type="button"
+                :aria-pressed="collectionMode === 'manual'"
+                @click="collectionMode = 'manual'"
+              >
+                <ListMusic :size="16" aria-hidden="true" />
+                {{ t("Regular Collection") }}
+              </button>
+              <button
+                class="btn btn-sm join-item"
+                :class="collectionMode === 'smart' ? 'btn-neutral' : 'btn-ghost'"
+                type="button"
+                :aria-pressed="collectionMode === 'smart'"
+                @click="collectionMode = 'smart'"
+              >
+                <Sparkles :size="16" aria-hidden="true" />
+                {{ t("Smart Collection") }}
+              </button>
+            </div>
+          </div>
+
+          <div v-if="creatingSmartCollection" class="mt-5 border-t border-base-300 pt-4">
+            <h3 class="mb-2 text-sm font-medium">{{ t("Match all of the following rules") }}</h3>
+
+            <div class="space-y-2">
+              <div
+                v-for="(rule, index) in smartCollectionRules"
+                :key="index"
+                class="flex items-start gap-2"
+              >
+                <div class="grid min-w-0 flex-1 gap-2 sm:grid-cols-[1fr_1fr_1.2fr]">
+                  <select
+                    v-model="rule.field"
+                    class="select select-sm w-full"
+                    :aria-label="t('Rule {index} field', { index: index + 1 })"
+                    @change="updateSmartCollectionRuleField(rule)"
+                  >
+                    <option
+                      v-for="field in SMART_COLLECTION_FIELD_OPTIONS"
+                      :key="field.value"
+                      :value="field.value"
+                    >
+                      {{ t(field.label) }}
+                    </option>
+                  </select>
+
+                  <select
+                    v-model="rule.operator"
+                    class="select select-sm w-full"
+                    :aria-label="t('Rule {index} operator', { index: index + 1 })"
+                  >
+                    <option
+                      v-for="operator in smartCollectionOperators(rule.field)"
+                      :key="operator"
+                      :value="operator"
+                    >
+                      {{ t(SMART_COLLECTION_OPERATOR_LABELS[operator]) }}
+                    </option>
+                  </select>
+
+                  <input
+                    v-model="rule.value"
+                    class="input input-sm w-full"
+                    :type="isNumericSmartCollectionField(rule.field) ? 'number' : 'text'"
+                    :step="isNumericSmartCollectionField(rule.field) ? 1 : undefined"
+                    maxlength="512"
+                    autocomplete="off"
+                    :placeholder="smartCollectionValuePlaceholder(rule)"
+                    :aria-label="t('Rule {index} value', { index: index + 1 })"
+                  />
+                </div>
+                <button
+                  class="btn btn-square btn-ghost btn-sm shrink-0"
+                  type="button"
+                  :disabled="smartCollectionRules.length === 1"
+                  :aria-label="t('Remove rule {index}', { index: index + 1 })"
+                  :title="t('Remove rule')"
+                  @click="removeSmartCollectionRule(index)"
+                >
+                  <Trash2 :size="16" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+
+            <button
+              class="btn btn-ghost btn-sm mt-3"
+              type="button"
+              @click="addSmartCollectionRule"
+            >
+              <Plus :size="16" aria-hidden="true" />
+              {{ t("Add rule") }}
+            </button>
+          </div>
+
           <div class="modal-action">
             <button
               class="btn btn-ghost btn-sm"
@@ -3406,7 +3583,7 @@ function trackSubtitle(track: LocalTrack) {
             <button
               class="btn btn-neutral btn-sm"
               type="submit"
-              :disabled="!collectionName.trim() || collectionActionBusy"
+              :disabled="!canSubmitCollectionName || collectionActionBusy"
             >
               <RefreshCw
                 v-if="collectionActionBusy"
@@ -3414,6 +3591,7 @@ function trackSubtitle(track: LocalTrack) {
                 :size="16"
                 aria-hidden="true"
               />
+              <Sparkles v-else-if="creatingSmartCollection" :size="16" aria-hidden="true" />
               <FolderPlus v-else :size="16" aria-hidden="true" />
               {{ collectionNameDialog.intent === "rename" ? t("Save") : t("Create") }}
             </button>

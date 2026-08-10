@@ -33,6 +33,7 @@ const collection = {
   onlineCount: 1,
   createdAt: 1,
   updatedAt: 1,
+  smartRules: null,
 };
 
 const detail: MusicCollectionDetail = {
@@ -178,6 +179,33 @@ describe("CollectionBrowser", () => {
     expect(wrapper.emitted("changed")?.[0]).toEqual([
       expect.objectContaining({ itemCount: 1, localCount: 0 }),
     ]);
+  });
+
+  it("does not offer manual member removal for a Smart Collection", async () => {
+    const smartDetail: MusicCollectionDetail = {
+      ...detail,
+      collection: {
+        ...detail.collection,
+        smartRules: {
+          rules: [{ field: "artist", operator: "equals", value: "Artist" }],
+        },
+      },
+    };
+    const defaultInvoke = tauriMocks.invoke.getMockImplementation();
+    tauriMocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_music_collection") return Promise.resolve(smartDetail);
+      return defaultInvoke?.(command, args);
+    });
+    const wrapper = mountCollection();
+    await flushPromises();
+
+    await wrapper.get('[data-collection-item-id="item-local"]').trigger("contextmenu", {
+      clientX: 20,
+      clientY: 20,
+    });
+
+    expect(wrapper.get('[aria-label="Collection track actions"]').text())
+      .not.toContain("Remove selection from Collection");
   });
 
   it("supports additive multi-selection and queues the selected tracks", async () => {

@@ -7,6 +7,7 @@ import type {
   MusicCollectionMutation,
   MusicCollectionSummary,
   OnlineTrack,
+  SmartCollectionRules,
 } from "../generated/bindings";
 
 export type {
@@ -15,6 +16,10 @@ export type {
   MusicCollectionItemKind,
   MusicCollectionMutation,
   MusicCollectionSummary,
+  SmartCollectionField,
+  SmartCollectionOperator,
+  SmartCollectionRule,
+  SmartCollectionRules,
 } from "../generated/bindings";
 
 export const COLLECTION_DRAG_TYPE = "application/x-fika-music-collection-items";
@@ -41,8 +46,11 @@ export function listMusicCollections() {
   return invoke<MusicCollectionSummary[]>(TAURI_COMMANDS.listMusicCollections);
 }
 
-export function createMusicCollection(name: string) {
-  return invoke<MusicCollectionSummary>(TAURI_COMMANDS.createMusicCollection, { name });
+export function createMusicCollection(name: string, smartRules: SmartCollectionRules | null = null) {
+  return invoke<MusicCollectionSummary>(TAURI_COMMANDS.createMusicCollection, {
+    name,
+    smartRules,
+  });
 }
 
 export function renameMusicCollection(collectionId: string, name: string) {

@@ -3,7 +3,7 @@ use rusqlite_migration::{Migrations, M};
 use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
-const CURRENT_SCHEMA_VERSION: i64 = 11;
+const CURRENT_SCHEMA_VERSION: i64 = 12;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CredentialStoreError {
@@ -359,6 +359,10 @@ fn migrations() -> Migrations<'static> {
                 ON music_collection_items(collection_id, position);
             ",
         ),
+        M::up_with_hook("", |transaction| {
+            add_column_if_missing(transaction, "music_collections", "smart_rules_json", "TEXT")?;
+            Ok(())
+        }),
     ])
 }
 
@@ -455,6 +459,11 @@ mod tests {
         assert!(has_table(&connection, "account_credentials"));
         assert!(has_table(&connection, "music_collections"));
         assert!(has_table(&connection, "music_collection_items"));
+        assert!(has_column(
+            &connection,
+            "music_collections",
+            "smart_rules_json"
+        ));
         assert!(has_column(
             &connection,
             "album_art_lookups",
@@ -621,6 +630,24 @@ mod tests {
                 has_table(&connection, "music_collection_items"),
             ),
             (CURRENT_SCHEMA_VERSION, true, true),
+        );
+    }
+
+    #[test]
+    fn initialize_should_upgrade_version_eleven_with_smart_collection_rules() {
+        let mut connection = Connection::open_in_memory().expect("database should open");
+        migrations()
+            .to_version(&mut connection, 11)
+            .expect("version eleven should initialize");
+
+        initialize(&mut connection).expect("latest migration should run");
+
+        assert_eq!(
+            (
+                user_version(&connection),
+                has_column(&connection, "music_collections", "smart_rules_json"),
+            ),
+            (CURRENT_SCHEMA_VERSION, true),
         );
     }
 

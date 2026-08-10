@@ -63,7 +63,8 @@ pub use album_art::{
 };
 pub use collections::{
     MusicCollectionDetail, MusicCollectionItem, MusicCollectionItemKind, MusicCollectionMutation,
-    MusicCollectionSummary,
+    MusicCollectionSummary, SmartCollectionField, SmartCollectionOperator, SmartCollectionRule,
+    SmartCollectionRules,
 };
 pub use library::{
     LibraryAlbumGroup, LibraryGroupToggleResult, LibraryPlaybackQueue, LibraryQueryPage,
@@ -4501,12 +4502,13 @@ fn list_music_collections(
 fn create_music_collection(
     state: State<'_, AppState>,
     name: String,
+    smart_rules: Option<SmartCollectionRules>,
 ) -> CommandResult<MusicCollectionSummary> {
     let mut db = state
         .db
         .lock()
         .map_err(|_| AppError::StatePoisoned("db").to_string())?;
-    collections::create_collection(&mut db, &name).map_err(|error| error.to_string())
+    collections::create_collection(&mut db, &name, smart_rules).map_err(|error| error.to_string())
 }
 
 #[tauri::command]

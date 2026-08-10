@@ -216,6 +216,7 @@ describe("application shell", () => {
           onlineCount: 0,
           createdAt: 1,
           updatedAt: 1,
+          smartRules: (args?.smartRules as MusicCollectionSummary["smartRules"]) ?? null,
         };
         listedCollections = [...listedCollections, collection];
         return Promise.resolve(collection);
@@ -362,6 +363,7 @@ describe("application shell", () => {
       onlineCount: 1,
       createdAt: 1,
       updatedAt: 1,
+      smartRules: null,
     }];
     const wrapper = mount(App);
     await flushPromises();
@@ -385,10 +387,67 @@ describe("application shell", () => {
 
     expect(tauriMocks.invoke).toHaveBeenCalledWith("create_music_collection", {
       name: "Road Trip",
+      smartRules: null,
     });
     expect(wrapper.get("h1").text()).toBe("Road Trip");
     expect(wrapper.find('[data-testid="collection-browser"]').exists()).toBe(true);
     expect(navigation.find('[data-collection-id="collection-2"]').exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("creates a Smart Collection with text and numeric rules", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.get('button[aria-label="New Collection"]').trigger("click");
+    const dialog = new DOMWrapper(
+      document.body.querySelector('[aria-labelledby="collection-name-dialog-title"]')!,
+    );
+    await dialog.get('input[aria-label="Collection name"]').setValue("孙燕姿 2000+");
+    const smartMode = dialog.findAll("button").find((button) =>
+      button.text().includes("Smart Collection"));
+    await smartMode!.trigger("click");
+    await dialog.get('input[aria-label="Rule 1 value"]').setValue("孙燕姿");
+    const addRule = dialog.findAll("button").find((button) => button.text().includes("Add rule"));
+    await addRule!.trigger("click");
+    await dialog.get('select[aria-label="Rule 2 field"]').setValue("year");
+    await dialog.get('select[aria-label="Rule 2 operator"]').setValue("greaterThan");
+    await dialog.get('input[aria-label="Rule 2 value"]').setValue("2000");
+    const create = dialog.findAll("button").find((button) => button.text() === "Create");
+    await create!.trigger("click");
+    await flushPromises();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("create_music_collection", {
+      name: "孙燕姿 2000+",
+      smartRules: {
+        rules: [
+          { field: "artist", operator: "equals", value: "孙燕姿" },
+          { field: "year", operator: "greaterThan", value: "2000" },
+        ],
+      },
+    });
+    expect(wrapper.find('[data-collection-id="collection-1"] svg').exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("does not limit a Smart Collection to 32 rules", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.get('button[aria-label="New Collection"]').trigger("click");
+    const dialog = new DOMWrapper(
+      document.body.querySelector('[aria-labelledby="collection-name-dialog-title"]')!,
+    );
+    const smartMode = dialog.findAll("button").find((button) =>
+      button.text().includes("Smart Collection"));
+    await smartMode!.trigger("click");
+    const addRule = dialog.findAll("button").find((button) => button.text().includes("Add rule"));
+    for (let index = 0; index < 32; index += 1) {
+      await addRule!.trigger("click");
+    }
+
+    expect(dialog.findAll('select[aria-label$=" field"]')).toHaveLength(33);
+    expect(addRule!.attributes("disabled")).toBeUndefined();
     wrapper.unmount();
   });
 
@@ -401,6 +460,7 @@ describe("application shell", () => {
       onlineCount: 0,
       createdAt: 1,
       updatedAt: 1,
+      smartRules: null,
     };
     listedCollections = [collection];
     const track = createLocalTrack({ id: 7, title: "First Song" });
@@ -513,6 +573,7 @@ describe("application shell", () => {
       onlineCount: 0,
       createdAt: 1,
       updatedAt: 1,
+      smartRules: null,
     }];
     const track = createOnlineTrack({ key: "drop-track" });
     const dataTransfer = {
@@ -549,6 +610,7 @@ describe("application shell", () => {
         onlineCount: 1,
         createdAt: 1,
         updatedAt: 1,
+        smartRules: null,
       },
       {
         id: "target",
@@ -558,6 +620,7 @@ describe("application shell", () => {
         onlineCount: 0,
         createdAt: 2,
         updatedAt: 2,
+        smartRules: null,
       },
     ];
     const wrapper = mount(App);
@@ -599,6 +662,7 @@ describe("application shell", () => {
       onlineCount: 0,
       createdAt: 1,
       updatedAt: 1,
+      smartRules: null,
     }];
     const track = createLocalTrack({ id: 7, title: "Queued Song" });
     const item: MusicCollectionItem = {

@@ -94,7 +94,7 @@ export type MusicCollectionItemKind = "local" | "online";
 
 export type MusicCollectionMutation = { collection: MusicCollectionSummary, added: number, skipped: number, removed: number, };
 
-export type MusicCollectionSummary = { id: string, name: string, itemCount: number, localCount: number, onlineCount: number, createdAt: number, updatedAt: number, };
+export type MusicCollectionSummary = { id: string, name: string, itemCount: number, localCount: number, onlineCount: number, createdAt: number, updatedAt: number, smartRules: SmartCollectionRules | null, };
 
 export type MusicRecommendationKind = "daily" | "roaming" | "radar";
 
@@ -191,6 +191,14 @@ export type ResolvedLyrics = { source: LyricsSource, provider: string | null, is
 export type ScanProgressEvent = { status: ScanStatus, message: string | null, };
 
 export type ScanStatus = { isRunning: boolean, folderPath: string | null, discoveredFiles: number, scannedFiles: number, indexedTracks: number, skippedFiles: number, errorCount: number, lastError: string | null, startedAt: number | null, finishedAt: number | null, };
+
+export type SmartCollectionField = "title" | "artist" | "album" | "albumArtist" | "genre" | "year" | "codec" | "bitrateKbps" | "sampleRateHz" | "durationSeconds" | "trackNumber" | "discNumber" | "fileName" | "filePath" | "fileSizeBytes" | "modifiedAt" | "indexedAt" | "playCount";
+
+export type SmartCollectionOperator = "equals" | "notEquals" | "contains" | "doesNotContain" | "greaterThan" | "greaterThanOrEqual" | "lessThan" | "lessThanOrEqual" | "matchesRegex" | "doesNotMatchRegex";
+
+export type SmartCollectionRule = { field: SmartCollectionField, operator: SmartCollectionOperator, value: string, };
+
+export type SmartCollectionRules = { rules: Array<SmartCollectionRule>, };
 
 export type SourceAction = "musicSearch" | "artistSearch" | "albumSearch" | "playlistSearch" | "searchSuggestions" | "artistTopTracks" | "artistAlbums" | "artistBiography" | "albumRead" | "playlistReadPublic" | "musicUrl" | "lyric" | "pic" | "musicComments" | "musicRecommendations" | "playlistList" | "playlistRead" | "playlistAddTrack" | "playlistRemoveTrack";
 

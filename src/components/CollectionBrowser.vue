@@ -222,6 +222,7 @@ const activeSortLabel = computed(() => {
 });
 const albumTaskPercent = computed(() => taskPercent(albumArtTask.value));
 const metadataTaskPercent = computed(() => taskPercent(metadataTask.value));
+const isSmartCollection = computed(() => Boolean(detail.value?.collection.smartRules));
 
 watch(
   () => [props.collectionId, props.refreshKey] as const,
@@ -1490,8 +1491,8 @@ defineExpose({
     <li v-if="rowMenu.track.item.localTrack"><button type="button" @click="revealContextTrack"><FolderSearch :size="16" aria-hidden="true" />{{ t("Show in file manager") }}</button></li>
     <li v-if="rowMenu.track.item.localTrack"><button type="button" @click="copyContextPath"><Clipboard :size="16" aria-hidden="true" />{{ t("Copy file path") }}</button></li>
     <li v-if="rowMenu.track.item.localTrack"><button type="button" @click="showProperties"><Info :size="16" aria-hidden="true" />{{ t("Properties") }}</button></li>
-    <li class="my-1 h-px bg-base-300"></li>
-    <li><button class="text-error" type="button" :disabled="removing" @click="removeSelection"><Trash2 :size="16" aria-hidden="true" />{{ t("Remove selection from Collection") }}</button></li>
+    <li v-if="!isSmartCollection" class="my-1 h-px bg-base-300"></li>
+    <li v-if="!isSmartCollection"><button class="text-error" type="button" :disabled="removing" @click="removeSelection"><Trash2 :size="16" aria-hidden="true" />{{ t("Remove selection from Collection") }}</button></li>
   </ul>
 
   <ul
@@ -1509,7 +1510,7 @@ defineExpose({
     <li v-if="coverResult(groupMenu.group)?.status === 'needsReview'"><button type="button" @click="reviewGroupCover(groupMenu.group)"><Info :size="16" aria-hidden="true" />{{ t("Review cover matches") }}</button></li>
     <li class="my-1 h-px bg-base-300"></li>
     <li><button type="button" @click="toggleGroup(groupMenu.group)"><ChevronRight :class="{ 'rotate-90': !collapsedGroupIds.has(groupMenu.group.id) }" :size="16" aria-hidden="true" />{{ collapsedGroupIds.has(groupMenu.group.id) ? t("Expand album") : t("Collapse album") }}</button></li>
-    <li><button class="text-error" type="button" :disabled="removing" @click="removeSelection"><Trash2 :size="16" aria-hidden="true" />{{ t("Remove album from Collection") }}</button></li>
+    <li v-if="!isSmartCollection"><button class="text-error" type="button" :disabled="removing" @click="removeSelection"><Trash2 :size="16" aria-hidden="true" />{{ t("Remove album from Collection") }}</button></li>
   </ul>
 
   <div

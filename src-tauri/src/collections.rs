@@ -1,13 +1,15 @@
 use std::collections::HashSet;
 
+use regex::{Regex, RegexBuilder};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::online_music::OnlineTrack;
 use crate::{library, local_track_from_row, now_timestamp, LocalTrack};
 
 const MAX_COLLECTION_NAME_CHARS: usize = 80;
+const MAX_SMART_RULE_VALUE_CHARS: usize = 512;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CollectionError {
@@ -23,10 +25,70 @@ pub enum CollectionError {
     NotFound(String),
     #[error("collection item is invalid: {0}")]
     InvalidItem(String),
+    #[error("smart collection rules are invalid: {0}")]
+    InvalidSmartRules(String),
+    #[error("smart collection members are managed by its rules")]
+    SmartCollectionImmutable,
     #[error(transparent)]
     Database(#[from] rusqlite::Error),
     #[error(transparent)]
     Serialization(#[from] serde_json::Error),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub enum SmartCollectionField {
+    Title,
+    Artist,
+    Album,
+    AlbumArtist,
+    Genre,
+    Year,
+    Codec,
+    BitrateKbps,
+    SampleRateHz,
+    DurationSeconds,
+    TrackNumber,
+    DiscNumber,
+    FileName,
+    FilePath,
+    FileSizeBytes,
+    ModifiedAt,
+    IndexedAt,
+    PlayCount,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub enum SmartCollectionOperator {
+    Equals,
+    NotEquals,
+    Contains,
+    DoesNotContain,
+    GreaterThan,
+    GreaterThanOrEqual,
+    LessThan,
+    LessThanOrEqual,
+    MatchesRegex,
+    DoesNotMatchRegex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct SmartCollectionRule {
+    pub field: SmartCollectionField,
+    pub operator: SmartCollectionOperator,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct SmartCollectionRules {
+    pub rules: Vec<SmartCollectionRule>,
 }
 
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
@@ -40,6 +102,7 @@ pub struct MusicCollectionSummary {
     pub online_count: i64,
     pub created_at: i64,
     pub updated_at: i64,
+    pub smart_rules: Option<SmartCollectionRules>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, ts_rs::TS)]
@@ -91,6 +154,50 @@ struct StoredCollectionItem {
     added_at: i64,
 }
 
+#[derive(Debug)]
+struct StoredCollectionSummary {
+    id: String,
+    name: String,
+    item_count: i64,
+    local_count: i64,
+    online_count: i64,
+    created_at: i64,
+    updated_at: i64,
+    smart_rules_json: Option<String>,
+}
+
+#[derive(Debug)]
+struct ResolvedCollection {
+    id: String,
+    name: String,
+    item_count: i64,
+    local_count: i64,
+    online_count: i64,
+    created_at: i64,
+    updated_at: i64,
+    smart_rules: Option<SmartCollectionRules>,
+}
+
+#[derive(Debug)]
+struct PreparedSmartRule {
+    field: SmartCollectionField,
+    matcher: SmartRuleMatcher,
+}
+
+#[derive(Debug)]
+enum SmartRuleMatcher {
+    EqualsText(String),
+    NotEqualsText(String),
+    ContainsText(String),
+    DoesNotContainText(String),
+    Number {
+        operator: SmartCollectionOperator,
+        value: i64,
+    },
+    MatchesRegex(Regex),
+    DoesNotMatchRegex(Regex),
+}
+
 const COLLECTION_SUMMARY_SQL: &str = "
     SELECT
         collection.id,
@@ -99,7 +206,8 @@ const COLLECTION_SUMMARY_SQL: &str = "
         COALESCE(SUM(CASE WHEN item.item_kind = 'local' THEN 1 ELSE 0 END), 0) AS local_count,
         COALESCE(SUM(CASE WHEN item.item_kind = 'online' THEN 1 ELSE 0 END), 0) AS online_count,
         collection.created_at,
-        collection.updated_at
+        collection.updated_at,
+        collection.smart_rules_json
     FROM music_collections collection
     LEFT JOIN music_collection_items item ON item.collection_id = collection.id
 ";
@@ -138,26 +246,48 @@ pub fn list_collections(
          ORDER BY collection.created_at, collection.rowid"
     );
     let mut statement = connection.prepare(&sql)?;
-    let collections = statement
-        .query_map([], collection_summary_from_row)?
+    let stored = statement
+        .query_map([], stored_collection_summary_from_row)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(CollectionError::from)?;
-    Ok(collections)
+    drop(statement);
+    let collections = stored
+        .into_iter()
+        .map(ResolvedCollection::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let tracks = collections
+        .iter()
+        .any(|collection| collection.smart_rules.is_some())
+        .then(|| crate::list_tracks(connection))
+        .transpose()?;
+    collections
+        .into_iter()
+        .map(|collection| collection.into_summary(tracks.as_deref()))
+        .collect()
 }
 
 pub fn create_collection(
     connection: &mut Connection,
     name: &str,
+    smart_rules: Option<SmartCollectionRules>,
 ) -> Result<MusicCollectionSummary, CollectionError> {
     let name = normalize_name(name)?;
+    if let Some(rules) = smart_rules.as_ref() {
+        prepare_smart_rules(rules)?;
+    }
     let transaction = connection.transaction()?;
     ensure_name_available(&transaction, &name, None)?;
     let id = Uuid::new_v4().to_string();
     let timestamp = now_timestamp();
+    let smart_rules_json = smart_rules
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     transaction.execute(
-        "INSERT INTO music_collections (id, name, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?3)",
-        params![id, name, timestamp],
+        "INSERT INTO music_collections (
+            id, name, created_at, updated_at, smart_rules_json
+         ) VALUES (?1, ?2, ?3, ?3, ?4)",
+        params![id, name, timestamp, smart_rules_json],
     )?;
     let collection = collection_summary(&transaction, &id)?;
     transaction.commit()?;
@@ -200,7 +330,34 @@ pub fn collection_detail(
     connection: &Connection,
     collection_id: &str,
 ) -> Result<MusicCollectionDetail, CollectionError> {
-    let collection = collection_summary(connection, collection_id)?;
+    let resolved = resolved_collection(connection, collection_id)?;
+    if let Some(rules) = resolved.smart_rules.as_ref() {
+        let prepared = prepare_smart_rules(rules)?;
+        let collection_created_at = resolved.created_at;
+        let tracks = crate::list_tracks(connection)?;
+        let matching_tracks = tracks
+            .into_iter()
+            .filter(|track| smart_rules_match(&prepared, track))
+            .collect::<Vec<_>>();
+        let item_count = i64::try_from(matching_tracks.len()).unwrap_or(i64::MAX);
+        let collection = resolved.into_summary_with_count(item_count);
+        let items = matching_tracks
+            .into_iter()
+            .enumerate()
+            .map(|(position, track)| MusicCollectionItem {
+                id: format!("smart:{collection_id}:{}", track.id),
+                position: i64::try_from(position).unwrap_or(i64::MAX),
+                kind: MusicCollectionItemKind::Local,
+                local_album_group_id: Some(library::album_group_id(&track)),
+                local_track: Some(track),
+                online_track: None,
+                added_at: collection_created_at,
+            })
+            .collect();
+        return Ok(MusicCollectionDetail { collection, items });
+    }
+
+    let collection = resolved.into_summary_with_count_from_storage();
     let mut item_statement = connection.prepare(
         "SELECT id, position, item_kind, local_track_id, online_track_json, added_at
          FROM music_collection_items
@@ -286,7 +443,7 @@ pub fn add_local_tracks(
     track_ids: &[i64],
 ) -> Result<MusicCollectionMutation, CollectionError> {
     let transaction = connection.transaction()?;
-    ensure_collection_exists(&transaction, collection_id)?;
+    ensure_manual_collection(&transaction, collection_id)?;
     let mut position = next_position(&transaction, collection_id)?;
     let mut added = 0_i64;
     for track_id in track_ids {
@@ -324,7 +481,7 @@ pub fn add_online_tracks(
     tracks: &[OnlineTrack],
 ) -> Result<MusicCollectionMutation, CollectionError> {
     let transaction = connection.transaction()?;
-    ensure_collection_exists(&transaction, collection_id)?;
+    ensure_manual_collection(&transaction, collection_id)?;
     let mut position = next_position(&transaction, collection_id)?;
     let mut added = 0_i64;
     for track in tracks {
@@ -367,30 +524,59 @@ pub fn copy_items(
     source_collection_id: &str,
     item_ids: &[String],
 ) -> Result<MusicCollectionMutation, CollectionError> {
+    let source = collection_detail(connection, source_collection_id)?;
+    let selected = item_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let source_items = source
+        .items
+        .into_iter()
+        .filter(|item| selected.contains(item.id.as_str()))
+        .collect::<Vec<_>>();
     let transaction = connection.transaction()?;
-    ensure_collection_exists(&transaction, target_collection_id)?;
-    ensure_collection_exists(&transaction, source_collection_id)?;
+    ensure_manual_collection(&transaction, target_collection_id)?;
     let mut position = next_position(&transaction, target_collection_id)?;
     let mut added = 0_i64;
     let timestamp = now_timestamp();
 
-    for item_id in item_ids {
+    for item in source_items {
+        let (kind, entry_key, local_track_id, online_track_json) = match item.kind {
+            MusicCollectionItemKind::Local => {
+                let track_id = item.local_track.map(|track| track.id).ok_or_else(|| {
+                    CollectionError::InvalidItem(format!(
+                        "local item {} has no track snapshot",
+                        item.id
+                    ))
+                })?;
+                ("local", format!("local:{track_id}"), Some(track_id), None)
+            }
+            MusicCollectionItemKind::Online => {
+                let track = item.online_track.ok_or_else(|| {
+                    CollectionError::InvalidItem(format!(
+                        "online item {} has no track snapshot",
+                        item.id
+                    ))
+                })?;
+                (
+                    "online",
+                    format!("online:{}", track.key),
+                    None,
+                    Some(serde_json::to_string(&track)?),
+                )
+            }
+        };
         let inserted = transaction.execute(
             "INSERT OR IGNORE INTO music_collection_items (
                 id, collection_id, position, item_kind, entry_key,
                 local_track_id, online_track_json, added_at
-             )
-             SELECT ?1, ?2, ?3, item_kind, entry_key,
-                    local_track_id, online_track_json, ?4
-             FROM music_collection_items
-             WHERE collection_id = ?5 AND id = ?6",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 Uuid::new_v4().to_string(),
                 target_collection_id,
                 position,
+                kind,
+                entry_key,
+                local_track_id,
+                online_track_json,
                 timestamp,
-                source_collection_id,
-                item_id,
             ],
         )?;
         if inserted > 0 {
@@ -413,47 +599,13 @@ pub fn local_tracks_for_items(
     collection_id: &str,
     item_ids: &[String],
 ) -> Result<Vec<LocalTrack>, CollectionError> {
-    ensure_collection_exists(connection, collection_id)?;
     let selected = item_ids.iter().map(String::as_str).collect::<HashSet<_>>();
-    let mut statement = connection.prepare(
-        "SELECT
-            track.id,
-            track.file_path,
-            track.file_name,
-            track.title,
-            track.artist,
-            track.album,
-            track.album_artist,
-            track.genre,
-            track.year,
-            track.codec,
-            track.bitrate_kbps,
-            track.sample_rate_hz,
-            track.duration_seconds,
-            track.track_number,
-            track.disc_number,
-            track.file_size_bytes,
-            track.modified_at,
-            track.indexed_at,
-            track.play_count,
-            item.id
-         FROM music_collection_items item
-         JOIN local_tracks track ON track.id = item.local_track_id
-         WHERE item.collection_id = ?1
-           AND item.item_kind = 'local'
-         ORDER BY item.position, item.added_at, item.id",
-    )?;
-    let tracks = statement
-        .query_map([collection_id], |row| {
-            let item_id = row.get::<_, String>(19)?;
-            selected
-                .contains(item_id.as_str())
-                .then(|| local_track_from_row(row))
-                .transpose()
-        })?
-        .filter_map(Result::transpose)
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(tracks)
+    Ok(collection_detail(connection, collection_id)?
+        .items
+        .into_iter()
+        .filter(|item| selected.contains(item.id.as_str()))
+        .filter_map(|item| item.local_track)
+        .collect())
 }
 
 pub fn remove_items(
@@ -462,7 +614,7 @@ pub fn remove_items(
     item_ids: &[String],
 ) -> Result<MusicCollectionMutation, CollectionError> {
     let transaction = connection.transaction()?;
-    ensure_collection_exists(&transaction, collection_id)?;
+    ensure_manual_collection(&transaction, collection_id)?;
     let mut removed = 0_i64;
     for item_id in item_ids {
         removed += transaction.execute(
@@ -500,21 +652,35 @@ fn collection_summary(
     connection: &Connection,
     collection_id: &str,
 ) -> Result<MusicCollectionSummary, CollectionError> {
+    let resolved = resolved_collection(connection, collection_id)?;
+    let tracks = resolved
+        .smart_rules
+        .is_some()
+        .then(|| crate::list_tracks(connection))
+        .transpose()?;
+    resolved.into_summary(tracks.as_deref())
+}
+
+fn resolved_collection(
+    connection: &Connection,
+    collection_id: &str,
+) -> Result<ResolvedCollection, CollectionError> {
     let sql = format!(
         "{COLLECTION_SUMMARY_SQL}
          WHERE collection.id = ?1
          GROUP BY collection.id"
     );
     connection
-        .query_row(&sql, [collection_id], collection_summary_from_row)
+        .query_row(&sql, [collection_id], stored_collection_summary_from_row)
         .optional()?
         .ok_or_else(|| CollectionError::NotFound(collection_id.to_owned()))
+        .and_then(ResolvedCollection::try_from)
 }
 
-fn collection_summary_from_row(
+fn stored_collection_summary_from_row(
     row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<MusicCollectionSummary> {
-    Ok(MusicCollectionSummary {
+) -> rusqlite::Result<StoredCollectionSummary> {
+    Ok(StoredCollectionSummary {
         id: row.get(0)?,
         name: row.get(1)?,
         item_count: row.get(2)?,
@@ -522,7 +688,76 @@ fn collection_summary_from_row(
         online_count: row.get(4)?,
         created_at: row.get(5)?,
         updated_at: row.get(6)?,
+        smart_rules_json: row.get(7)?,
     })
+}
+
+impl ResolvedCollection {
+    fn try_from(stored: StoredCollectionSummary) -> Result<Self, CollectionError> {
+        let smart_rules = stored
+            .smart_rules_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?;
+        Ok(Self {
+            id: stored.id,
+            name: stored.name,
+            item_count: stored.item_count,
+            local_count: stored.local_count,
+            online_count: stored.online_count,
+            created_at: stored.created_at,
+            updated_at: stored.updated_at,
+            smart_rules,
+        })
+    }
+
+    fn into_summary(
+        self,
+        tracks: Option<&[LocalTrack]>,
+    ) -> Result<MusicCollectionSummary, CollectionError> {
+        let item_count = match (self.smart_rules.as_ref(), tracks) {
+            (Some(rules), Some(tracks)) => {
+                let prepared = prepare_smart_rules(rules)?;
+                i64::try_from(
+                    tracks
+                        .iter()
+                        .filter(|track| smart_rules_match(&prepared, track))
+                        .count(),
+                )
+                .unwrap_or(i64::MAX)
+            }
+            (Some(_), None) => {
+                return Err(CollectionError::InvalidSmartRules(
+                    "the local library could not be loaded".to_owned(),
+                ));
+            }
+            (None, _) => self.item_count,
+        };
+        Ok(self.into_summary_with_count(item_count))
+    }
+
+    fn into_summary_with_count_from_storage(self) -> MusicCollectionSummary {
+        let item_count = self.item_count;
+        self.into_summary_with_count(item_count)
+    }
+
+    fn into_summary_with_count(self, item_count: i64) -> MusicCollectionSummary {
+        let is_smart = self.smart_rules.is_some();
+        MusicCollectionSummary {
+            id: self.id,
+            name: self.name,
+            item_count,
+            local_count: if is_smart {
+                item_count
+            } else {
+                self.local_count
+            },
+            online_count: if is_smart { 0 } else { self.online_count },
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            smart_rules: self.smart_rules,
+        }
+    }
 }
 
 fn ensure_collection_exists(
@@ -538,6 +773,24 @@ fn ensure_collection_exists(
         return Err(CollectionError::NotFound(collection_id.to_owned()));
     }
     Ok(())
+}
+
+fn ensure_manual_collection(
+    connection: &Connection,
+    collection_id: &str,
+) -> Result<(), CollectionError> {
+    let smart_rules_json = connection
+        .query_row(
+            "SELECT smart_rules_json FROM music_collections WHERE id = ?1",
+            [collection_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?;
+    match smart_rules_json {
+        None => Err(CollectionError::NotFound(collection_id.to_owned())),
+        Some(Some(_)) => Err(CollectionError::SmartCollectionImmutable),
+        Some(None) => Ok(()),
+    }
 }
 
 fn ensure_name_available(
@@ -566,6 +819,215 @@ fn next_position(connection: &Connection, collection_id: &str) -> rusqlite::Resu
         [collection_id],
         |row| row.get(0),
     )
+}
+
+fn prepare_smart_rules(
+    rules: &SmartCollectionRules,
+) -> Result<Vec<PreparedSmartRule>, CollectionError> {
+    if rules.rules.is_empty() {
+        return Err(CollectionError::InvalidSmartRules(
+            "at least one rule is required".to_owned(),
+        ));
+    }
+    rules
+        .rules
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| prepare_smart_rule(index, rule))
+        .collect()
+}
+
+fn prepare_smart_rule(
+    index: usize,
+    rule: &SmartCollectionRule,
+) -> Result<PreparedSmartRule, CollectionError> {
+    let value = rule.value.trim();
+    if value.is_empty() {
+        return Err(CollectionError::InvalidSmartRules(format!(
+            "rule {} requires a value",
+            index + 1
+        )));
+    }
+    if value.chars().count() > MAX_SMART_RULE_VALUE_CHARS {
+        return Err(CollectionError::InvalidSmartRules(format!(
+            "rule {} value cannot exceed {MAX_SMART_RULE_VALUE_CHARS} characters",
+            index + 1
+        )));
+    }
+
+    let matcher = if rule.field.is_numeric() {
+        if !rule.operator.supports_numbers() {
+            return Err(CollectionError::InvalidSmartRules(format!(
+                "rule {} uses a text operator on a numeric field",
+                index + 1
+            )));
+        }
+        let number = value.parse::<i64>().map_err(|_| {
+            CollectionError::InvalidSmartRules(format!(
+                "rule {} value must be a whole number",
+                index + 1
+            ))
+        })?;
+        SmartRuleMatcher::Number {
+            operator: rule.operator,
+            value: number,
+        }
+    } else {
+        match rule.operator {
+            SmartCollectionOperator::Equals => {
+                SmartRuleMatcher::EqualsText(library::normalize_text(value))
+            }
+            SmartCollectionOperator::NotEquals => {
+                SmartRuleMatcher::NotEqualsText(library::normalize_text(value))
+            }
+            SmartCollectionOperator::Contains => {
+                SmartRuleMatcher::ContainsText(library::normalize_text(value))
+            }
+            SmartCollectionOperator::DoesNotContain => {
+                SmartRuleMatcher::DoesNotContainText(library::normalize_text(value))
+            }
+            SmartCollectionOperator::MatchesRegex | SmartCollectionOperator::DoesNotMatchRegex => {
+                let regex = RegexBuilder::new(value)
+                    .case_insensitive(true)
+                    .unicode(true)
+                    .build()
+                    .map_err(|error| {
+                        CollectionError::InvalidSmartRules(format!(
+                            "rule {} has an invalid regular expression: {error}",
+                            index + 1
+                        ))
+                    })?;
+                if rule.operator == SmartCollectionOperator::MatchesRegex {
+                    SmartRuleMatcher::MatchesRegex(regex)
+                } else {
+                    SmartRuleMatcher::DoesNotMatchRegex(regex)
+                }
+            }
+            _ => {
+                return Err(CollectionError::InvalidSmartRules(format!(
+                    "rule {} uses a numeric operator on a text field",
+                    index + 1
+                )));
+            }
+        }
+    };
+    Ok(PreparedSmartRule {
+        field: rule.field,
+        matcher,
+    })
+}
+
+fn smart_rules_match(rules: &[PreparedSmartRule], track: &LocalTrack) -> bool {
+    rules.iter().all(|rule| rule.matches(track))
+}
+
+impl PreparedSmartRule {
+    fn matches(&self, track: &LocalTrack) -> bool {
+        match &self.matcher {
+            SmartRuleMatcher::EqualsText(expected) => self
+                .field
+                .text_value(track)
+                .is_some_and(|value| library::normalize_text(value) == *expected),
+            SmartRuleMatcher::NotEqualsText(expected) => self
+                .field
+                .text_value(track)
+                .is_some_and(|value| library::normalize_text(value) != *expected),
+            SmartRuleMatcher::ContainsText(expected) => self
+                .field
+                .text_value(track)
+                .is_some_and(|value| library::normalize_text(value).contains(expected)),
+            SmartRuleMatcher::DoesNotContainText(expected) => self
+                .field
+                .text_value(track)
+                .is_some_and(|value| !library::normalize_text(value).contains(expected)),
+            SmartRuleMatcher::Number { operator, value } => self
+                .field
+                .number_value(track)
+                .is_some_and(|actual| operator.compare_numbers(actual, *value)),
+            SmartRuleMatcher::MatchesRegex(regex) => self
+                .field
+                .text_value(track)
+                .is_some_and(|value| regex.is_match(value)),
+            SmartRuleMatcher::DoesNotMatchRegex(regex) => self
+                .field
+                .text_value(track)
+                .is_some_and(|value| !regex.is_match(value)),
+        }
+    }
+}
+
+impl SmartCollectionField {
+    fn is_numeric(self) -> bool {
+        matches!(
+            self,
+            Self::Year
+                | Self::BitrateKbps
+                | Self::SampleRateHz
+                | Self::DurationSeconds
+                | Self::TrackNumber
+                | Self::DiscNumber
+                | Self::FileSizeBytes
+                | Self::ModifiedAt
+                | Self::IndexedAt
+                | Self::PlayCount
+        )
+    }
+
+    fn text_value(self, track: &LocalTrack) -> Option<&str> {
+        match self {
+            Self::Title => Some(&track.title),
+            Self::Artist => track.artist.as_deref(),
+            Self::Album => track.album.as_deref(),
+            Self::AlbumArtist => track.album_artist.as_deref(),
+            Self::Genre => track.genre.as_deref(),
+            Self::Codec => track.codec.as_deref(),
+            Self::FileName => Some(&track.file_name),
+            Self::FilePath => Some(&track.file_path),
+            _ => None,
+        }
+    }
+
+    fn number_value(self, track: &LocalTrack) -> Option<i64> {
+        match self {
+            Self::Year => track.year,
+            Self::BitrateKbps => track.bitrate_kbps,
+            Self::SampleRateHz => track.sample_rate_hz,
+            Self::DurationSeconds => track.duration_seconds,
+            Self::TrackNumber => track.track_number,
+            Self::DiscNumber => track.disc_number,
+            Self::FileSizeBytes => Some(track.file_size_bytes),
+            Self::ModifiedAt => track.modified_at,
+            Self::IndexedAt => Some(track.indexed_at),
+            Self::PlayCount => Some(track.play_count),
+            _ => None,
+        }
+    }
+}
+
+impl SmartCollectionOperator {
+    fn supports_numbers(self) -> bool {
+        matches!(
+            self,
+            Self::Equals
+                | Self::NotEquals
+                | Self::GreaterThan
+                | Self::GreaterThanOrEqual
+                | Self::LessThan
+                | Self::LessThanOrEqual
+        )
+    }
+
+    fn compare_numbers(self, actual: i64, expected: i64) -> bool {
+        match self {
+            Self::Equals => actual == expected,
+            Self::NotEquals => actual != expected,
+            Self::GreaterThan => actual > expected,
+            Self::GreaterThanOrEqual => actual >= expected,
+            Self::LessThan => actual < expected,
+            Self::LessThanOrEqual => actual <= expected,
+            _ => false,
+        }
+    }
 }
 
 fn normalize_name(name: &str) -> Result<String, CollectionError> {
@@ -605,6 +1067,34 @@ mod tests {
         connection.last_insert_rowid()
     }
 
+    fn insert_tagged_track(
+        connection: &Connection,
+        file_name: &str,
+        title: &str,
+        artist: &str,
+        year: i64,
+    ) -> i64 {
+        connection
+            .execute(
+                "INSERT INTO local_tracks (
+                    file_path, file_name, title, artist, year, file_size_bytes, indexed_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 1024, 1)",
+                params![
+                    format!("/music/{file_name}"),
+                    file_name,
+                    title,
+                    artist,
+                    year
+                ],
+            )
+            .expect("tagged track should insert");
+        connection.last_insert_rowid()
+    }
+
+    fn smart_rules(rules: Vec<SmartCollectionRule>) -> SmartCollectionRules {
+        SmartCollectionRules { rules }
+    }
+
     fn online_track() -> OnlineTrack {
         OnlineTrack {
             key: "online-one".to_owned(),
@@ -623,10 +1113,10 @@ mod tests {
     fn create_collection_should_trim_name_and_reject_case_insensitive_duplicate() {
         let mut connection = test_connection();
 
-        let collection = create_collection(&mut connection, "  Road Trip  ")
+        let collection = create_collection(&mut connection, "  Road Trip  ", None)
             .expect("collection should be created");
-        let error =
-            create_collection(&mut connection, "road trip").expect_err("duplicate should fail");
+        let error = create_collection(&mut connection, "road trip", None)
+            .expect_err("duplicate should fail");
 
         assert_eq!(
             (collection.name.as_str(), error.to_string().as_str()),
@@ -638,8 +1128,8 @@ mod tests {
     fn add_tracks_should_persist_local_and_online_items_without_duplicates() {
         let mut connection = test_connection();
         let track_id = insert_local_track(&connection);
-        let collection =
-            create_collection(&mut connection, "Mixed").expect("collection should be created");
+        let collection = create_collection(&mut connection, "Mixed", None)
+            .expect("collection should be created");
 
         add_local_tracks(&mut connection, &collection.id, &[track_id, track_id])
             .expect("local tracks should be added");
@@ -666,8 +1156,8 @@ mod tests {
     #[test]
     fn remove_items_should_update_summary_and_delete_collection_cascade() {
         let mut connection = test_connection();
-        let collection =
-            create_collection(&mut connection, "Temporary").expect("collection should be created");
+        let collection = create_collection(&mut connection, "Temporary", None)
+            .expect("collection should be created");
         add_online_tracks(&mut connection, &collection.id, &[online_track()])
             .expect("online track should be added");
         let item_id = collection_detail(&connection, &collection.id)
@@ -688,9 +1178,9 @@ mod tests {
         let mut connection = test_connection();
         let track_id = insert_local_track(&connection);
         let source =
-            create_collection(&mut connection, "Source").expect("source should be created");
+            create_collection(&mut connection, "Source", None).expect("source should be created");
         let target =
-            create_collection(&mut connection, "Target").expect("target should be created");
+            create_collection(&mut connection, "Target", None).expect("target should be created");
         add_local_tracks(&mut connection, &source.id, &[track_id])
             .expect("local track should be added");
         add_online_tracks(&mut connection, &source.id, &[online_track()])
@@ -723,8 +1213,8 @@ mod tests {
     fn local_tracks_for_items_should_ignore_online_items() {
         let mut connection = test_connection();
         let track_id = insert_local_track(&connection);
-        let collection =
-            create_collection(&mut connection, "Lookup").expect("collection should be created");
+        let collection = create_collection(&mut connection, "Lookup", None)
+            .expect("collection should be created");
         add_local_tracks(&mut connection, &collection.id, &[track_id])
             .expect("local track should be added");
         add_online_tracks(&mut connection, &collection.id, &[online_track()])
@@ -742,6 +1232,182 @@ mod tests {
         assert_eq!(
             tracks.iter().map(|track| track.id).collect::<Vec<_>>(),
             [track_id]
+        );
+    }
+
+    #[test]
+    fn smart_collection_should_match_all_text_and_numeric_rules() {
+        let mut connection = test_connection();
+        let matching =
+            insert_tagged_track(&connection, "sun-2003.flac", "The Moment", "孙燕姿", 2003);
+        insert_tagged_track(&connection, "sun-2000.flac", "Cloudy Day", "孙燕姿", 2000);
+        let collection = create_collection(
+            &mut connection,
+            "孙燕姿 2000+",
+            Some(smart_rules(vec![
+                SmartCollectionRule {
+                    field: SmartCollectionField::Artist,
+                    operator: SmartCollectionOperator::Equals,
+                    value: "孙燕姿".to_owned(),
+                },
+                SmartCollectionRule {
+                    field: SmartCollectionField::Year,
+                    operator: SmartCollectionOperator::GreaterThan,
+                    value: "2000".to_owned(),
+                },
+            ])),
+        )
+        .expect("smart collection should be created");
+
+        let detail = collection_detail(&connection, &collection.id)
+            .expect("smart collection should resolve");
+
+        assert_eq!(
+            (
+                detail.collection.item_count,
+                detail.collection.local_count,
+                detail.items[0].local_track.as_ref().map(|track| track.id),
+            ),
+            (1, 1, Some(matching)),
+        );
+    }
+
+    #[test]
+    fn smart_collection_should_reflect_library_changes_without_member_mutations() {
+        let mut connection = test_connection();
+        let collection = create_collection(
+            &mut connection,
+            "Live regex",
+            Some(smart_rules(vec![SmartCollectionRule {
+                field: SmartCollectionField::Title,
+                operator: SmartCollectionOperator::MatchesRegex,
+                value: "^live\\s+.+".to_owned(),
+            }])),
+        )
+        .expect("smart collection should be created");
+        let before = collection_detail(&connection, &collection.id)
+            .expect("empty smart collection should resolve");
+
+        insert_tagged_track(&connection, "live.flac", "LIVE FOREVER", "Artist", 2024);
+        let after = collection_detail(&connection, &collection.id)
+            .expect("updated smart collection should resolve");
+        let listed =
+            list_collections(&connection).expect("updated smart collection summary should resolve");
+
+        assert_eq!(
+            (
+                before.collection.item_count,
+                after.collection.item_count,
+                listed[0].item_count,
+            ),
+            (0, 1, 1),
+        );
+    }
+
+    #[test]
+    fn copy_items_should_snapshot_matches_from_a_smart_collection() {
+        let mut connection = test_connection();
+        let track_id =
+            insert_tagged_track(&connection, "smart-source.flac", "Matched", "Artist", 2024);
+        let source = create_collection(
+            &mut connection,
+            "Smart source",
+            Some(smart_rules(vec![SmartCollectionRule {
+                field: SmartCollectionField::Title,
+                operator: SmartCollectionOperator::Equals,
+                value: "Matched".to_owned(),
+            }])),
+        )
+        .expect("smart collection should be created");
+        let target = create_collection(&mut connection, "Manual target", None)
+            .expect("manual collection should be created");
+        let source_item_id = collection_detail(&connection, &source.id)
+            .expect("smart collection should resolve")
+            .items[0]
+            .id
+            .clone();
+
+        let mutation = copy_items(&mut connection, &target.id, &source.id, &[source_item_id])
+            .expect("smart collection match should copy");
+        let target_detail =
+            collection_detail(&connection, &target.id).expect("manual collection should resolve");
+
+        assert_eq!(
+            (
+                mutation.added,
+                target_detail.items[0]
+                    .local_track
+                    .as_ref()
+                    .map(|track| track.id),
+            ),
+            (1, Some(track_id)),
+        );
+    }
+
+    #[test]
+    fn create_smart_collection_should_reject_invalid_regular_expression() {
+        let mut connection = test_connection();
+
+        let error = create_collection(
+            &mut connection,
+            "Broken regex",
+            Some(smart_rules(vec![SmartCollectionRule {
+                field: SmartCollectionField::Artist,
+                operator: SmartCollectionOperator::MatchesRegex,
+                value: "[".to_owned(),
+            }])),
+        )
+        .expect_err("invalid regex should fail");
+
+        assert!(error.to_string().contains("invalid regular expression"));
+    }
+
+    #[test]
+    fn create_smart_collection_should_not_limit_the_number_of_rules() {
+        let mut connection = test_connection();
+        let rules = (0..33)
+            .map(|index| SmartCollectionRule {
+                field: SmartCollectionField::Title,
+                operator: SmartCollectionOperator::DoesNotContain,
+                value: format!("excluded-{index}"),
+            })
+            .collect();
+
+        let collection =
+            create_collection(&mut connection, "Unlimited rules", Some(smart_rules(rules)))
+                .expect("more than 32 rules should be accepted");
+
+        assert_eq!(
+            collection
+                .smart_rules
+                .expect("rules should persist")
+                .rules
+                .len(),
+            33,
+        );
+    }
+
+    #[test]
+    fn smart_collection_should_reject_manual_member_mutations() {
+        let mut connection = test_connection();
+        let track_id = insert_local_track(&connection);
+        let collection = create_collection(
+            &mut connection,
+            "Automatic",
+            Some(smart_rules(vec![SmartCollectionRule {
+                field: SmartCollectionField::Title,
+                operator: SmartCollectionOperator::Contains,
+                value: "One".to_owned(),
+            }])),
+        )
+        .expect("smart collection should be created");
+
+        let error = add_local_tracks(&mut connection, &collection.id, &[track_id])
+            .expect_err("manual add should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "smart collection members are managed by its rules"
         );
     }
 }
