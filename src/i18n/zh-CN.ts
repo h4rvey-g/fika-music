@@ -128,6 +128,7 @@ export const ZH_CN_MESSAGES: Readonly<Record<string, string>> = {
   "Select a local or remote track": "选择一首本地或在线歌曲",
   "Sequential": "顺序播放",
   "Settings": "设置",
+  "Settings categories": "设置分类",
   "Smart Collection": "智能收藏集",
   "Show desktop lyrics": "显示桌面歌词",
   "Hide desktop lyrics": "隐藏桌面歌词",

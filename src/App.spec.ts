@@ -323,12 +323,49 @@ describe("application shell", () => {
     await settingsButton?.trigger("click");
 
     expect(wrapper.get("h1").text()).toBe("Settings");
+    const settingsTabs = wrapper.get('[data-testid="settings-tabs"]');
+    expect(settingsTabs.findAll('[role="tab"]').map((tab) => tab.text())).toEqual([
+      "Appearance",
+      "Playback",
+      "Library",
+      "Online Music",
+      "Lyrics",
+      "Software update",
+    ]);
+    expect(settingsTabs.get('[data-settings-tab="appearance"]').attributes("aria-selected"))
+      .toBe("true");
+    expect(settingsTabs.get('[data-settings-tab="appearance"]').attributes("aria-controls"))
+      .toBe(wrapper.get('[role="tabpanel"]').attributes("id"));
     expect(wrapper.find("#theme-preference").exists()).toBe(true);
-    expect(wrapper.find('[data-testid="app-update-settings"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="app-update-settings"]').exists()).toBe(false);
     expect(wrapper.find("#layout-density").exists()).toBe(false);
     expect(wrapper.get('footer[aria-label="Playback bar"]').element).toBe(playbackBar.element);
     expect(settingsButton?.attributes("aria-current")).toBe("page");
     expect(drawerToggle.element.checked).toBe(false);
+
+    await settingsTabs.get('[data-settings-tab="playback"]').trigger("click");
+    expect(wrapper.find("#theme-preference").exists()).toBe(false);
+    expect(wrapper.find("#default-volume").exists()).toBe(true);
+
+    await settingsTabs.get('[data-settings-tab="library"]').trigger("click");
+    expect(wrapper.find("#default-volume").exists()).toBe(false);
+    expect(wrapper.findAll("button").some((button) => button.text() === "Change folder")).toBe(true);
+
+    await settingsTabs.get('[data-settings-tab="online"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="online-playback-quality"]').exists()).toBe(true);
+
+    await settingsTabs.get('[data-settings-tab="lyrics"]').trigger("click");
+    expect(wrapper.find(`#${NOW_PLAYING_LYRICS_SETTINGS_ID}`).exists()).toBe(true);
+
+    await settingsTabs.get('[data-settings-tab="updates"]').trigger("click");
+    expect(wrapper.find(`#${NOW_PLAYING_LYRICS_SETTINGS_ID}`).exists()).toBe(false);
+    expect(wrapper.find('[data-testid="app-update-settings"]').exists()).toBe(true);
+
+    await settingsTabs.get('[data-settings-tab="updates"]').trigger("keydown", { key: "ArrowLeft" });
+    expect(settingsTabs.get('[data-settings-tab="lyrics"]').attributes("aria-selected"))
+      .toBe("true");
+    expect(wrapper.find(`#${NOW_PLAYING_LYRICS_SETTINGS_ID}`).exists()).toBe(true);
 
     const onlineButton = navigation
       .findAll("button")

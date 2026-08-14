@@ -240,6 +240,16 @@ const settingsSection = {
   icon: Settings,
 } as const;
 
+const settingsTabs = [
+  { id: "appearance", label: "Appearance", icon: Palette },
+  { id: "playback", label: "Playback", icon: Headphones },
+  { id: "library", label: "Library", icon: FolderOpen },
+  { id: "online", label: "Online Music", icon: Radio },
+  { id: "lyrics", label: "Lyrics", icon: Captions },
+  { id: "updates", label: "Software update", icon: RefreshCw },
+] as const;
+const SETTINGS_PANEL_ID = "settings-panel";
+
 const STREAM_QUALITY_OPTIONS: ReadonlyArray<{ value: SourceQuality; label: string }> = [
   { value: "128k", label: "128 kbps" },
   { value: "320k", label: "320 kbps" },
@@ -250,6 +260,7 @@ const STREAM_QUALITY_OPTIONS: ReadonlyArray<{ value: SourceQuality; label: strin
 const sections = [...mainSections, settingsSection];
 type AppSection = (typeof sections)[number]["id"];
 type ActiveSection = AppSection | "plugin" | "collection";
+type SettingsTab = (typeof settingsTabs)[number]["id"];
 type AppLocation =
   | { section: AppSection; pluginId: null; collectionId: null }
   | { section: "plugin"; pluginId: string; collectionId: null }
@@ -290,6 +301,7 @@ const {
   chooseFolder,
 } = libraryScan;
 const activeSection = ref<ActiveSection>("local");
+const activeSettingsTab = ref<SettingsTab>("appearance");
 const activePluginId = ref<string | null>(null);
 const activeCollectionId = ref<string | null>(null);
 const pluginRecords = ref<PluginRecord[]>([]);
@@ -725,11 +737,48 @@ function selectSection(section: AppSection) {
   }
 }
 
+function settingsTabId(tab: SettingsTab) {
+  return `settings-tab-${tab}`;
+}
+
+function selectSettingsTab(tab: SettingsTab) {
+  activeSettingsTab.value = tab;
+}
+
+function handleSettingsTabKeydown(event: KeyboardEvent) {
+  const activeIndex = settingsTabs.findIndex((tab) => tab.id === activeSettingsTab.value);
+  let nextIndex = activeIndex;
+
+  switch (event.key) {
+    case "ArrowRight":
+      nextIndex = (activeIndex + 1) % settingsTabs.length;
+      break;
+    case "ArrowLeft":
+      nextIndex = (activeIndex - 1 + settingsTabs.length) % settingsTabs.length;
+      break;
+    case "Home":
+      nextIndex = 0;
+      break;
+    case "End":
+      nextIndex = settingsTabs.length - 1;
+      break;
+    default:
+      return;
+  }
+
+  event.preventDefault();
+  const nextTab = settingsTabs[nextIndex];
+  selectSettingsTab(nextTab.id);
+  void nextTick(() => document.getElementById(settingsTabId(nextTab.id))?.focus());
+}
+
 function openAppUpdateSettings() {
+  selectSettingsTab("updates");
   selectSection(settingsSection.id);
 }
 
 async function openNowPlayingLyricsSettings() {
+  selectSettingsTab("lyrics");
   selectSection(settingsSection.id);
   await nextTick();
   const settings = document.getElementById(NOW_PLAYING_LYRICS_SETTINGS_ID);
@@ -2729,170 +2778,217 @@ function trackSubtitle(track: LocalTrack) {
           v-if="activeSection === 'settings'"
           class="mx-auto flex w-full max-w-4xl flex-col gap-4 px-4 py-5 lg:px-6"
         >
-          <section class="overflow-hidden rounded border border-base-300 bg-base-100">
-            <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
-              <Palette :size="18" aria-hidden="true" />
-              <h2 class="text-base font-semibold">{{ t("Appearance") }}</h2>
-            </div>
-            <div class="divide-y divide-base-300">
-              <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-                <label for="theme-preference" class="min-w-0">
-                  <span class="block text-sm font-medium">{{ t("Theme") }}</span>
-                  <span class="block text-xs text-muted">{{ t("Follow the device, current cover, or a fixed theme") }}</span>
-                  <span
-                    v-if="themePreference === 'dynamic'"
-                    class="mt-1 flex items-center gap-1.5 text-xs text-muted"
-                    role="status"
-                  >
-                    <span
-                      class="status status-xs"
-                      :class="{
-                        'status-primary': dynamicThemeStatus === 'active',
-                        'status-info': dynamicThemeStatus === 'loading',
-                        'status-warning': dynamicThemeStatus === 'unavailable',
-                        'status-neutral': dynamicThemeStatus === 'waiting',
-                      }"
-                      aria-hidden="true"
-                    ></span>
-                    <span v-if="dynamicThemeStatus === 'active'">{{ t("Cover colors active") }}</span>
-                    <span v-else-if="dynamicThemeStatus === 'loading'">{{ t("Reading cover colors") }}</span>
-                    <span v-else-if="dynamicThemeStatus === 'unavailable'">{{ t("Cover colors unavailable") }}</span>
-                    <span v-else>{{ t("Waiting for cover art") }}</span>
-                  </span>
-                </label>
-                <select
-                  id="theme-preference"
-                  v-model="themePreference"
-                  class="select select-sm w-full sm:w-48"
-                >
-                  <option
-                    v-for="theme in THEME_MODE_OPTIONS"
-                    :key="theme.value"
-                    :value="theme.value"
-                  >
-                    {{ t(theme.label) }}
-                  </option>
-                  <optgroup
-                    v-for="group in THEME_GROUPS"
-                    :key="group.value"
-                    :label="t(group.label)"
-                  >
-                    <option v-for="theme in group.options" :key="theme.value" :value="theme.value">
-                      {{ t(theme.label) }}
-                    </option>
-                  </optgroup>
-                </select>
-              </div>
-
-              <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-                <label for="language-preference" class="flex min-w-0 items-start gap-3">
-                  <Languages class="mt-0.5 shrink-0 text-muted" :size="17" aria-hidden="true" />
-                  <span>
-                    <span class="block text-sm font-medium">{{ t("Language") }}</span>
-                    <span class="block text-xs text-muted">{{ t("Choose the language used throughout Fika Music") }}</span>
-                  </span>
-                </label>
-                <select
-                  id="language-preference"
-                  v-model="languagePreference"
-                  class="select select-sm w-full sm:w-44"
-                >
-                  <option v-for="option in LOCALE_OPTIONS" :key="option.value" :value="option.value">
-                    {{ option.label }}
-                  </option>
-                </select>
-              </div>
-
-            </div>
-          </section>
-
-          <AppUpdateSettings
-            :current-version="appUpdater.currentVersion.value"
-            :update="appUpdater.availableUpdate.value"
-            :is-checking="appUpdater.isChecking.value"
-            :is-installing="appUpdater.isInstalling.value"
-            :has-checked="appUpdater.hasChecked.value"
-            :restart-required="appUpdater.restartRequired.value"
-            :downloaded-bytes="appUpdater.downloadedBytes.value"
-            :total-bytes="appUpdater.totalBytes.value"
-            :download-percent="appUpdater.downloadPercent.value"
-            :error="appUpdater.error.value"
-            @check="appUpdater.checkForUpdates()"
-            @install="appUpdater.installUpdate()"
-            @restart="appUpdater.restartApp()"
-          />
-
-          <NowPlayingLyricsSettings
-            :preferences="nowPlayingLyricsPreferences"
-            @update="updateNowPlayingLyricsPreferences"
-            @reset="resetNowPlayingLyricsPreferences"
-          />
-
-          <DesktopLyricsSettings
-            :preferences="desktopLyricsPreferences"
-            @update="updateDesktopLyricsPreferences"
-            @reset="resetDesktopLyricsPreferences"
-          />
-
-      <OnlineMusicSettingsPanel
-        :audio-sources="audioSourceRecords"
-        @settings-changed="handleOnlineMusicSettingsChanged"
-          />
-
-          <section class="overflow-hidden rounded border border-base-300 bg-base-100">
-            <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
-              <Headphones :size="18" aria-hidden="true" />
-              <h2 class="text-base font-semibold">{{ t("Playback") }}</h2>
-            </div>
-            <div class="divide-y divide-base-300">
-              <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-                <label for="default-volume" class="min-w-0">
-                  <span class="block text-sm font-medium">{{ t("Volume") }}</span>
-                  <span class="block text-xs text-muted">{{ t("Applied to the current and next track") }}</span>
-                </label>
-                <div class="flex w-full items-center gap-3 sm:w-64">
-                  <Volume2 :size="17" aria-hidden="true" />
-                  <input
-                    id="default-volume"
-                    v-model.number="volume"
-                    class="range range-sm min-h-6 min-w-0 flex-1"
-                    type="range"
-                    min="0"
-                    max="1"
-                    step="0.01"
-                    @input="updateVolume"
-                  />
-                  <output class="w-10 text-right text-xs tabular-nums text-muted">
-                    {{ volumePercent }}%
-                  </output>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section class="overflow-hidden rounded border border-base-300 bg-base-100">
-            <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
-              <FolderOpen :size="18" aria-hidden="true" />
-              <h2 class="text-base font-semibold">{{ t("Library") }}</h2>
-            </div>
-            <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-              <div class="min-w-0">
-                <div class="text-sm font-medium">{{ t("Music folder") }}</div>
-                <div class="truncate text-xs text-muted" :title="selectedFolder || undefined">
-                  {{ selectedFolder || t("No folder selected") }}
-                </div>
-              </div>
+          <div class="border-b border-base-300">
+            <div
+              role="tablist"
+              :aria-label="t('Settings categories')"
+              data-testid="settings-tabs"
+              class="tabs tabs-border flex w-full flex-nowrap overflow-x-auto"
+              @keydown="handleSettingsTabKeydown"
+            >
               <button
-                class="btn btn-sm shrink-0"
+                v-for="tab in settingsTabs"
+                :id="settingsTabId(tab.id)"
+                :key="tab.id"
+                :data-settings-tab="tab.id"
+                :class="{ 'tab-active': activeSettingsTab === tab.id }"
+                :aria-controls="SETTINGS_PANEL_ID"
+                :aria-selected="activeSettingsTab === tab.id"
+                :tabindex="activeSettingsTab === tab.id ? 0 : -1"
+                class="tab shrink-0 gap-2 px-3 text-sm"
+                role="tab"
                 type="button"
-                :disabled="isChoosingFolder || scanStatus.isRunning"
-                @click="chooseFolder"
+                @click="selectSettingsTab(tab.id)"
               >
-                <FolderOpen :size="16" aria-hidden="true" />
-                {{ t("Change folder") }}
+                <component :is="tab.icon" :size="16" aria-hidden="true" />
+                <span>{{ t(tab.label) }}</span>
               </button>
             </div>
-          </section>
+          </div>
+
+          <div
+            :id="SETTINGS_PANEL_ID"
+            :aria-labelledby="settingsTabId(activeSettingsTab)"
+            class="flex min-w-0 flex-col gap-4"
+            role="tabpanel"
+          >
+            <section
+              v-if="activeSettingsTab === 'appearance'"
+              class="overflow-hidden rounded border border-base-300 bg-base-100"
+            >
+              <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
+                <Palette :size="18" aria-hidden="true" />
+                <h2 class="text-base font-semibold">{{ t("Appearance") }}</h2>
+              </div>
+              <div class="divide-y divide-base-300">
+                <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                  <label for="theme-preference" class="min-w-0">
+                    <span class="block text-sm font-medium">{{ t("Theme") }}</span>
+                    <span class="block text-xs text-muted">{{ t("Follow the device, current cover, or a fixed theme") }}</span>
+                    <span
+                      v-if="themePreference === 'dynamic'"
+                      class="mt-1 flex items-center gap-1.5 text-xs text-muted"
+                      role="status"
+                    >
+                      <span
+                        class="status status-xs"
+                        :class="{
+                          'status-primary': dynamicThemeStatus === 'active',
+                          'status-info': dynamicThemeStatus === 'loading',
+                          'status-warning': dynamicThemeStatus === 'unavailable',
+                          'status-neutral': dynamicThemeStatus === 'waiting',
+                        }"
+                        aria-hidden="true"
+                      ></span>
+                      <span v-if="dynamicThemeStatus === 'active'">{{ t("Cover colors active") }}</span>
+                      <span v-else-if="dynamicThemeStatus === 'loading'">{{ t("Reading cover colors") }}</span>
+                      <span v-else-if="dynamicThemeStatus === 'unavailable'">{{ t("Cover colors unavailable") }}</span>
+                      <span v-else>{{ t("Waiting for cover art") }}</span>
+                    </span>
+                  </label>
+                  <select
+                    id="theme-preference"
+                    v-model="themePreference"
+                    class="select select-sm w-full sm:w-48"
+                  >
+                    <option
+                      v-for="theme in THEME_MODE_OPTIONS"
+                      :key="theme.value"
+                      :value="theme.value"
+                    >
+                      {{ t(theme.label) }}
+                    </option>
+                    <optgroup
+                      v-for="group in THEME_GROUPS"
+                      :key="group.value"
+                      :label="t(group.label)"
+                    >
+                      <option v-for="theme in group.options" :key="theme.value" :value="theme.value">
+                        {{ t(theme.label) }}
+                      </option>
+                    </optgroup>
+                  </select>
+                </div>
+
+                <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                  <label for="language-preference" class="flex min-w-0 items-start gap-3">
+                    <Languages class="mt-0.5 shrink-0 text-muted" :size="17" aria-hidden="true" />
+                    <span>
+                      <span class="block text-sm font-medium">{{ t("Language") }}</span>
+                      <span class="block text-xs text-muted">{{ t("Choose the language used throughout Fika Music") }}</span>
+                    </span>
+                  </label>
+                  <select
+                    id="language-preference"
+                    v-model="languagePreference"
+                    class="select select-sm w-full sm:w-44"
+                  >
+                    <option v-for="option in LOCALE_OPTIONS" :key="option.value" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                </div>
+              </div>
+            </section>
+
+            <section
+              v-if="activeSettingsTab === 'playback'"
+              class="overflow-hidden rounded border border-base-300 bg-base-100"
+            >
+              <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
+                <Headphones :size="18" aria-hidden="true" />
+                <h2 class="text-base font-semibold">{{ t("Playback") }}</h2>
+              </div>
+              <div class="divide-y divide-base-300">
+                <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                  <label for="default-volume" class="min-w-0">
+                    <span class="block text-sm font-medium">{{ t("Volume") }}</span>
+                    <span class="block text-xs text-muted">{{ t("Applied to the current and next track") }}</span>
+                  </label>
+                  <div class="flex w-full items-center gap-3 sm:w-64">
+                    <Volume2 :size="17" aria-hidden="true" />
+                    <input
+                      id="default-volume"
+                      v-model.number="volume"
+                      class="range range-sm min-h-6 min-w-0 flex-1"
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      @input="updateVolume"
+                    />
+                    <output class="w-10 text-right text-xs tabular-nums text-muted">
+                      {{ volumePercent }}%
+                    </output>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section
+              v-if="activeSettingsTab === 'library'"
+              class="overflow-hidden rounded border border-base-300 bg-base-100"
+            >
+              <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
+                <FolderOpen :size="18" aria-hidden="true" />
+                <h2 class="text-base font-semibold">{{ t("Library") }}</h2>
+              </div>
+              <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div class="min-w-0">
+                  <div class="text-sm font-medium">{{ t("Music folder") }}</div>
+                  <div class="truncate text-xs text-muted" :title="selectedFolder || undefined">
+                    {{ selectedFolder || t("No folder selected") }}
+                  </div>
+                </div>
+                <button
+                  class="btn btn-sm shrink-0"
+                  type="button"
+                  :disabled="isChoosingFolder || scanStatus.isRunning"
+                  @click="chooseFolder"
+                >
+                  <FolderOpen :size="16" aria-hidden="true" />
+                  {{ t("Change folder") }}
+                </button>
+              </div>
+            </section>
+
+            <OnlineMusicSettingsPanel
+              v-if="activeSettingsTab === 'online'"
+              :audio-sources="audioSourceRecords"
+              @settings-changed="handleOnlineMusicSettingsChanged"
+            />
+
+            <template v-if="activeSettingsTab === 'lyrics'">
+              <NowPlayingLyricsSettings
+                :preferences="nowPlayingLyricsPreferences"
+                @update="updateNowPlayingLyricsPreferences"
+                @reset="resetNowPlayingLyricsPreferences"
+              />
+
+              <DesktopLyricsSettings
+                :preferences="desktopLyricsPreferences"
+                @update="updateDesktopLyricsPreferences"
+                @reset="resetDesktopLyricsPreferences"
+              />
+            </template>
+
+            <AppUpdateSettings
+              v-if="activeSettingsTab === 'updates'"
+              :current-version="appUpdater.currentVersion.value"
+              :update="appUpdater.availableUpdate.value"
+              :is-checking="appUpdater.isChecking.value"
+              :is-installing="appUpdater.isInstalling.value"
+              :has-checked="appUpdater.hasChecked.value"
+              :restart-required="appUpdater.restartRequired.value"
+              :downloaded-bytes="appUpdater.downloadedBytes.value"
+              :total-bytes="appUpdater.totalBytes.value"
+              :download-percent="appUpdater.downloadPercent.value"
+              :error="appUpdater.error.value"
+              @check="appUpdater.checkForUpdates()"
+              @install="appUpdater.installUpdate()"
+              @restart="appUpdater.restartApp()"
+            />
+          </div>
         </section>
       </main>
 
