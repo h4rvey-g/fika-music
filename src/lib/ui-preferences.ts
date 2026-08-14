@@ -64,13 +64,11 @@ export const THEME_GROUPS: ReadonlyArray<{
   },
 ];
 
-export type StreamQuality = "128k" | "320k" | "flac" | "flac24bit";
 export type PlaybackMode = "sequential" | "shuffle" | "repeat";
 
 export type UiPreferences = {
   locale: SupportedLocale;
   theme: ThemePreference;
-  streamQuality: StreamQuality;
   audioSourceId: AudioSourceId;
   volume: number;
   playbackMode: PlaybackMode;
@@ -84,7 +82,6 @@ export const UI_PREFERENCES_STORAGE_KEY = "fika.ui-preferences";
 export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   locale: "en",
   theme: "system",
-  streamQuality: "128k",
   audioSourceId: "",
   volume: 0.8,
   playbackMode: "sequential",
@@ -130,9 +127,6 @@ export function parseUiPreferences(value: unknown): UiPreferences {
       ? candidate.locale
       : DEFAULT_UI_PREFERENCES.locale,
     theme: isThemePreference(candidate.theme) ? candidate.theme : DEFAULT_UI_PREFERENCES.theme,
-    streamQuality: isStreamQuality(candidate.streamQuality)
-      ? candidate.streamQuality
-      : DEFAULT_UI_PREFERENCES.streamQuality,
     audioSourceId: isAudioSourceId(storedAudioSourceId)
       ? storedAudioSourceId
       : DEFAULT_UI_PREFERENCES.audioSourceId,
@@ -160,10 +154,6 @@ function browserStorage(): Storage | null {
 
 function isThemePreference(value: unknown): value is ThemePreference {
   return THEME_OPTIONS.some((option) => option.value === value);
-}
-
-function isStreamQuality(value: unknown): value is StreamQuality {
-  return value === "128k" || value === "320k" || value === "flac" || value === "flac24bit";
 }
 
 function isPlaybackMode(value: unknown): value is PlaybackMode {

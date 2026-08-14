@@ -36,4 +36,23 @@ describe("OnlineMusicSettings", () => {
       expect.objectContaining({ audioSourceSelectionMode: "manual" }),
     );
   });
+
+  it("persists independent playback and download quality settings", async () => {
+    const wrapper = mount(OnlineMusicSettings, {
+      props: { audioSources: [createAudioSourceRecord()] },
+    });
+    await flushPromises();
+
+    await wrapper.get('[data-testid="online-playback-quality"]').setValue("flac");
+    await flushPromises();
+    expect(api.updateOnlineMusicSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({ playbackQuality: "flac", downloadQuality: "320k" }),
+    );
+
+    await wrapper.get('[data-testid="online-download-quality"]').setValue("128k");
+    await flushPromises();
+    expect(api.updateOnlineMusicSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({ playbackQuality: "flac", downloadQuality: "128k" }),
+    );
+  });
 });

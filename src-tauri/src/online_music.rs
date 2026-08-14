@@ -76,7 +76,10 @@ pub struct OnlineMusicSettings {
     pub audio_source_priority: Vec<String>,
     pub layer_timeout_seconds: u64,
     pub playback_timeout_seconds: u64,
-    pub preferred_quality: SourceQuality,
+    #[serde(default = "default_quality")]
+    pub playback_quality: SourceQuality,
+    #[serde(default = "default_quality")]
+    pub download_quality: SourceQuality,
     pub search_history_enabled: bool,
     pub download_directory: Option<String>,
     pub filename_template: String,
@@ -93,7 +96,8 @@ impl Default for OnlineMusicSettings {
             audio_source_priority: Vec::new(),
             layer_timeout_seconds: 8,
             playback_timeout_seconds: 20,
-            preferred_quality: SourceQuality::K320,
+            playback_quality: default_quality(),
+            download_quality: default_quality(),
             search_history_enabled: true,
             download_directory: None,
             filename_template: "{artist} - {title}[ \\[{album}\\]]".to_owned(),
@@ -101,6 +105,10 @@ impl Default for OnlineMusicSettings {
             batch_notifications: true,
         }
     }
+}
+
+fn default_quality() -> SourceQuality {
+    SourceQuality::K320
 }
 
 impl OnlineMusicSettings {
@@ -236,11 +244,26 @@ pub fn load_settings(connection: &Connection) -> Result<OnlineMusicSettings, Onl
         )
         .optional()?;
     let settings: OnlineMusicSettings = stored
-        .map(|value| serde_json::from_str(&value))
+        .map(|value| deserialize_settings(&value))
         .transpose()?
         .unwrap_or_default();
     settings.validate()?;
     Ok(settings)
+}
+
+fn deserialize_settings(value: &str) -> Result<OnlineMusicSettings, OnlineMusicError> {
+    let mut settings: JsonValue = serde_json::from_str(value)?;
+    if let JsonValue::Object(values) = &mut settings {
+        if let Some(preferred_quality) = values.remove("preferredQuality") {
+            values
+                .entry("playbackQuality".to_owned())
+                .or_insert_with(|| preferred_quality.clone());
+            values
+                .entry("downloadQuality".to_owned())
+                .or_insert(preferred_quality);
+        }
+    }
+    Ok(serde_json::from_value(settings)?)
 }
 
 pub fn save_settings(
@@ -1304,7 +1327,8 @@ mod tests {
             "audioSourcePriority": [],
             "layerTimeoutSeconds": 8,
             "playbackTimeoutSeconds": 20,
-            "preferredQuality": "320k",
+            "playbackQuality": "320k",
+            "downloadQuality": "320k",
             "searchHistoryEnabled": true,
             "downloadDirectory": null,
             "filenameTemplate": "{artist} - {title}",
@@ -1317,6 +1341,30 @@ mod tests {
         assert_eq!(
             settings.audio_source_selection_mode,
             AudioSourceSelectionMode::Automatic
+        );
+    }
+
+    #[test]
+    fn legacy_preferred_quality_should_populate_both_quality_settings() {
+        let value = serde_json::json!({
+            "excludedChannels": [],
+            "channelPriority": [],
+            "audioSourcePriority": [],
+            "layerTimeoutSeconds": 8,
+            "playbackTimeoutSeconds": 20,
+            "preferredQuality": "flac",
+            "searchHistoryEnabled": true,
+            "downloadDirectory": null,
+            "filenameTemplate": "{artist} - {title}",
+            "downloadConcurrency": 2,
+            "batchNotifications": true
+        });
+
+        let settings = deserialize_settings(&value.to_string()).unwrap();
+
+        assert_eq!(
+            (settings.playback_quality, settings.download_quality),
+            (SourceQuality::Flac, SourceQuality::Flac)
         );
     }
 

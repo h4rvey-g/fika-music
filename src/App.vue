@@ -84,6 +84,7 @@ import {
   playbackAttemptKey,
   reportOnlinePlaybackFailure,
   resolveOnlineTrack,
+  updateOnlineMusicSettings,
   OnlinePlaybackResolutionError,
   type OnlinePlayback,
   type OnlineTrack,
@@ -99,6 +100,7 @@ import type {
   MediaSource,
   OnlineMusicSettings,
   ResolvedLyrics,
+  SourceQuality,
   TrackLyricsQuery,
 } from "./generated/bindings";
 import {
@@ -108,7 +110,6 @@ import {
   loadUiPreferences,
   saveUiPreferences,
   type PlaybackMode,
-  type StreamQuality,
   type ThemePreference,
 } from "./lib/ui-preferences";
 import {
@@ -239,7 +240,7 @@ const settingsSection = {
   icon: Settings,
 } as const;
 
-const STREAM_QUALITY_OPTIONS: ReadonlyArray<{ value: StreamQuality; label: string }> = [
+const STREAM_QUALITY_OPTIONS: ReadonlyArray<{ value: SourceQuality; label: string }> = [
   { value: "128k", label: "128 kbps" },
   { value: "320k", label: "320 kbps" },
   { value: "flac", label: "FLAC" },
@@ -373,7 +374,7 @@ const collectionQueueIndex = ref(-1);
 const collectionQueueActive = ref(false);
 const resolvingOnlineTrackKey = ref<string | null>(null);
 const playbackAudioSourceId = ref(savedUiPreferences.audioSourceId);
-const remoteQuality = ref(savedUiPreferences.streamQuality);
+const playbackQuality = ref<SourceQuality>("320k");
 const audioSourceSelectionMode = ref<AudioSourceSelectionMode>("automatic");
 const onlineMusicConfig = useOnlineMusicConfig();
 
@@ -464,7 +465,7 @@ const automaticAudioSourceSelection = computed(
 const currentPlaybackQuality = computed(() =>
   activeOnlineTrack.value && activeRemoteQuality.value
     ? activeRemoteQuality.value
-    : remoteQuality.value,
+    : playbackQuality.value,
 );
 const canGoPrevious = computed(() => {
   if (collectionQueueActive.value && collectionQueueIndex.value >= 0) {
@@ -566,12 +567,11 @@ watch(playbackMode, (mode) => {
   cancelOnlinePreload();
   if (mode === "sequential") scheduleNextOnlinePreload();
 });
-watch([remoteQuality, playbackAudioSourceId], cancelOnlinePreload);
+watch([playbackQuality, playbackAudioSourceId], cancelOnlinePreload);
 watch(
   [
     themePreference,
     languagePreference,
-    remoteQuality,
     playbackAudioSourceId,
     volume,
     playbackMode,
@@ -580,7 +580,6 @@ watch(
     saveUiPreferences({
       locale: languagePreference.value,
       theme: themePreference.value,
-      streamQuality: remoteQuality.value,
       audioSourceId: playbackAudioSourceId.value,
       volume: volume.value,
       playbackMode: playbackMode.value,
@@ -641,6 +640,7 @@ onMounted(async () => {
   void onlineMusicConfig.load().then(({ settings }) => {
     if (modeGeneration === audioSourceSelectionModeGeneration) {
       audioSourceSelectionMode.value = settings.audioSourceSelectionMode;
+      playbackQuality.value = settings.playbackQuality;
     }
   }).catch(() => undefined);
   await syncDesktopLyricsWindow(desktopLyricsState.value);
@@ -1281,7 +1281,6 @@ async function applyTheme(theme: ThemePreference, coverUrl: string | null) {
 function resetUiPreferences() {
   languagePreference.value = DEFAULT_UI_PREFERENCES.locale;
   themePreference.value = DEFAULT_UI_PREFERENCES.theme;
-  remoteQuality.value = DEFAULT_UI_PREFERENCES.streamQuality;
   playbackAudioSourceId.value = DEFAULT_UI_PREFERENCES.audioSourceId;
   volume.value = DEFAULT_UI_PREFERENCES.volume;
   playbackMode.value = DEFAULT_UI_PREFERENCES.playbackMode;
@@ -1565,18 +1564,37 @@ function changePlaybackAudioSource(audioSourceId: string) {
   }
 }
 
-function changePlaybackQuality(quality: StreamQuality) {
+function changePlaybackQuality(quality: SourceQuality) {
+  const previousQuality = playbackQuality.value;
   const track = activeOnlineTrack.value;
   const shouldReload = Boolean(
     track && quality !== activeRemoteQuality.value,
   );
-  remoteQuality.value = quality;
+  playbackQuality.value = quality;
   cancelOnlinePreload();
   closePlaybackOptionsMenu();
+  if (quality !== previousQuality) {
+    void persistPlaybackQuality(quality, previousQuality);
+  }
   if (track && shouldReload) {
     clearFailedOnlinePlayback(track.key);
     clearOnlinePlaybackFailures(track.key);
     void reloadActiveOnlinePlayback(t("Changing audio quality"));
+  }
+}
+
+async function persistPlaybackQuality(
+  quality: SourceQuality,
+  previousQuality: SourceQuality,
+) {
+  try {
+    const { settings } = await onlineMusicConfig.load();
+    if (settings.playbackQuality === quality) return;
+    const updated = await updateOnlineMusicSettings({ ...settings, playbackQuality: quality });
+    handleOnlineMusicSettingsChanged(updated);
+  } catch (error) {
+    if (playbackQuality.value === quality) playbackQuality.value = previousQuality;
+    appError.value = normalizeError(error);
   }
 }
 
@@ -1756,7 +1774,7 @@ async function resolveConfiguredOnlinePlayback(
     audioSources: audioSourceRecords.value,
     settings,
     selectedAudioSourceId: playbackAudioSourceId.value,
-    quality: remoteQuality.value,
+    quality: playbackQuality.value,
     signal,
     excludedAttempts: activeFailedAttempts(track.key),
     excludedUrls: activeFailedUrls(track.key),
@@ -1771,6 +1789,7 @@ function handleOnlineMusicSettingsChanged(
 ) {
   audioSourceSelectionModeGeneration += 1;
   audioSourceSelectionMode.value = settings.audioSourceSelectionMode;
+  playbackQuality.value = settings.playbackQuality;
   cancelOnlinePreload();
   onlineMusicConfig.updateSettings(settings);
 }
@@ -2826,23 +2845,6 @@ function trackSubtitle(track: LocalTrack) {
               <h2 class="text-base font-semibold">{{ t("Playback") }}</h2>
             </div>
             <div class="divide-y divide-base-300">
-              <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-                <label for="stream-quality" class="min-w-0">
-                  <span class="block text-sm font-medium">{{ t("Default stream quality") }}</span>
-                  <span class="block text-xs text-muted">{{ t("Used when resolving tracks from Audio Sources") }}</span>
-                </label>
-                <select
-                  id="stream-quality"
-                  v-model="remoteQuality"
-                  class="select select-sm w-full sm:w-44"
-                >
-                  <option value="128k">128 kbps</option>
-                  <option value="320k">320 kbps</option>
-                  <option value="flac">FLAC</option>
-                  <option value="flac24bit">FLAC 24-bit</option>
-                </select>
-              </div>
-
               <div class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <label for="default-volume" class="min-w-0">
                   <span class="block text-sm font-medium">{{ t("Volume") }}</span>

@@ -167,7 +167,7 @@ describe("online music playback routing", () => {
         candidates: [createOnlineTrackCandidate({ sourceId: "yt" })],
       }),
       audioSources: [audioSource("youtube", ["yt"], ["128k"])],
-      settings: { ...settings, preferredQuality: "320k" },
+      settings: { ...settings, playbackQuality: "320k" },
       probe: async () => undefined,
     });
 
@@ -193,7 +193,7 @@ describe("online music playback routing", () => {
         candidates: [createOnlineTrackCandidate({ sourceId: "yt" })],
       }),
       audioSources: [audioSource("youtube", ["yt"], ["128k"])],
-      settings: { ...settings, preferredQuality: "128k" },
+      settings: { ...settings, playbackQuality: "128k" },
       probe,
     });
 
@@ -222,7 +222,7 @@ describe("online music playback routing", () => {
         candidates: [createOnlineTrackCandidate({ sourceId: "yt" })],
       }),
       audioSources: [audioSource("youtube", ["yt"], ["128k"])],
-      settings: { ...settings, preferredQuality: "128k" },
+      settings: { ...settings, playbackQuality: "128k" },
       probe,
     });
 
@@ -258,7 +258,7 @@ describe("online music playback routing", () => {
         candidates: [createOnlineTrackCandidate({ sourceId: "yt" })],
       }),
       audioSources: [audioSource("youtube", ["yt"], ["128k"])],
-      settings: { ...settings, preferredQuality: "128k" },
+      settings: { ...settings, playbackQuality: "128k" },
       probe,
     });
 
@@ -299,7 +299,7 @@ describe("online music playback routing", () => {
         ...settings,
         layerTimeoutSeconds: 0.08,
         playbackTimeoutSeconds: 1,
-        preferredQuality: "320k",
+        playbackQuality: "320k",
       },
       probe,
     });
@@ -338,7 +338,7 @@ describe("online music playback routing", () => {
           audioSourceSelectionMode: "automatic",
           layerTimeoutSeconds: 0.008,
           playbackTimeoutSeconds: 0.02,
-          preferredQuality: "128k",
+          playbackQuality: "128k",
         },
         probe: async () => undefined,
       });
@@ -491,7 +491,7 @@ describe("online music playback routing", () => {
       settings: {
         ...settings,
         audioSourceSelectionMode: "automatic",
-        preferredQuality: "320k",
+      playbackQuality: "320k",
       },
       probe: async () => undefined,
     });

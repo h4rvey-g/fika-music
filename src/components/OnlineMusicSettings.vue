@@ -33,6 +33,15 @@ const error = ref<string | null>(null);
 const saving = ref<string | null>(null);
 const draggedChannelId = ref<string | null>(null);
 const draggedAudioSourceId = ref<string | null>(null);
+const qualityOptions: ReadonlyArray<{
+  value: OnlineMusicSettings["playbackQuality"];
+  label: string;
+}> = [
+  { value: "128k", label: "128 kbps" },
+  { value: "320k", label: "320 kbps" },
+  { value: "flac", label: "FLAC" },
+  { value: "flac24bit", label: "FLAC 24-bit" },
+];
 
 const orderedChannels = computed(() => {
   if (!settings.value) return channels.value;
@@ -328,12 +337,14 @@ function previewTemplate(template: string, values: Record<string, string>) {
 
         <div class="grid gap-4 px-4 py-4 sm:grid-cols-3">
           <label class="form-control">
-            <span class="label-text text-sm">{{ t("Preferred quality") }}</span>
-            <select class="select select-sm mt-1" :value="settings.preferredQuality" @change="persist({ preferredQuality: ($event.currentTarget as HTMLSelectElement).value as OnlineMusicSettings['preferredQuality'] }, 'quality')">
-              <option value="128k">128 kbps</option>
-              <option value="320k">320 kbps</option>
-              <option value="flac">FLAC</option>
-              <option value="flac24bit">FLAC 24-bit</option>
+            <span class="label-text text-sm">{{ t("Playback quality") }}</span>
+            <select
+              data-testid="online-playback-quality"
+              class="select select-sm mt-1"
+              :value="settings.playbackQuality"
+              @change="persist({ playbackQuality: ($event.currentTarget as HTMLSelectElement).value as OnlineMusicSettings['playbackQuality'] }, 'playback-quality')"
+            >
+              <option v-for="quality in qualityOptions" :key="quality.value" :value="quality.value">{{ quality.label }}</option>
             </select>
           </label>
           <label class="form-control">
@@ -377,7 +388,18 @@ function previewTemplate(template: string, values: Record<string, string>) {
           </div>
           <div class="mt-1 truncate text-xs" :class="templateError ? 'text-error' : 'text-muted'">{{ templateError || templatePreview }}</div>
         </div>
-        <div class="grid gap-4 px-4 py-4 sm:grid-cols-2">
+        <div class="grid gap-4 px-4 py-4 sm:grid-cols-3">
+          <label class="form-control">
+            <span class="label-text text-sm">{{ t("Download quality") }}</span>
+            <select
+              data-testid="online-download-quality"
+              class="select select-sm mt-1"
+              :value="settings.downloadQuality"
+              @change="persist({ downloadQuality: ($event.currentTarget as HTMLSelectElement).value as OnlineMusicSettings['downloadQuality'] }, 'download-quality')"
+            >
+              <option v-for="quality in qualityOptions" :key="quality.value" :value="quality.value">{{ quality.label }}</option>
+            </select>
+          </label>
           <label class="form-control"><span class="label-text text-sm">{{ t("Concurrent songs") }}</span><input class="input input-sm mt-1" type="number" min="1" max="4" :value="settings.downloadConcurrency" @change="persist({ downloadConcurrency: Number(($event.currentTarget as HTMLInputElement).value) }, 'download-concurrency')" /></label>
         <label class="flex items-center justify-between gap-3 self-end py-2"><span class="text-sm">{{ t("Batch completion notifications") }}</span><input class="toggle toggle-md" type="checkbox" :checked="settings.batchNotifications" @change="persist({ batchNotifications: ($event.currentTarget as HTMLInputElement).checked }, 'notifications')" /></label>
         </div>

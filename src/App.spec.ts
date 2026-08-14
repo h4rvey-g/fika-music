@@ -271,6 +271,12 @@ describe("application shell", () => {
       if (command === "get_online_music_settings") {
         return Promise.resolve(onlineMusicSettings);
       }
+      if (command === "update_online_music_settings") {
+        if (args?.settings) {
+          onlineMusicSettings = args.settings as typeof onlineMusicSettings;
+        }
+        return Promise.resolve(onlineMusicSettings);
+      }
       if (command === "list_online_download_tasks") {
         return Promise.resolve([]);
       }
@@ -1000,7 +1006,10 @@ describe("application shell", () => {
   });
 
   it("changes the default audio source and quality from the playback options menu", async () => {
-    onlineMusicSettings = createOnlineMusicSettings({ audioSourceSelectionMode: "manual" });
+    onlineMusicSettings = createOnlineMusicSettings({
+      audioSourceSelectionMode: "manual",
+      playbackQuality: "128k",
+    });
     listedAudioSources = [
       createAudioSourceRecord({ id: "source-one", name: "Source One" }),
       createAudioSourceRecord({ id: "source-two", name: "Source Two" }),
@@ -1011,14 +1020,15 @@ describe("application shell", () => {
     const actions = wrapper.get('[data-testid="playback-actions"]');
     await actions.get('button[data-audio-source-id="source-two"]').trigger("click");
     await actions.get('button[data-stream-quality="320k"]').trigger("click");
-    await wrapper.vm.$nextTick();
+    await flushPromises();
 
     expect(actions.get('button[data-audio-source-id="source-two"]').attributes("aria-checked"))
       .toBe("true");
     expect(actions.get('button[data-stream-quality="320k"]').attributes("aria-checked"))
       .toBe("true");
     expect(JSON.parse(localStorage.getItem(UI_PREFERENCES_STORAGE_KEY) ?? "{}"))
-      .toEqual(expect.objectContaining({ audioSourceId: "source-two", streamQuality: "320k" }));
+      .toEqual(expect.objectContaining({ audioSourceId: "source-two" }));
+    expect(onlineMusicSettings.playbackQuality).toBe("320k");
     wrapper.unmount();
   });
 

@@ -25,7 +25,6 @@ describe("UI preferences", () => {
         locale: "zh-TW",
         theme: "sepia",
         density: "compact",
-        streamQuality: "lossless-plus",
         audioSourceId: "invalid source!",
         volume: 4,
         playbackMode: "repeat-one",
@@ -33,7 +32,6 @@ describe("UI preferences", () => {
     ).toEqual({
       locale: "en",
       theme: "system",
-      streamQuality: "128k",
       audioSourceId: "",
       volume: 1,
       playbackMode: "sequential",
@@ -80,7 +78,6 @@ describe("UI preferences", () => {
       {
         locale: "zh-CN",
         theme: "dark",
-        streamQuality: "flac",
         audioSourceId: "imported-lx-source",
         volume: -1,
         playbackMode: "shuffle",
@@ -93,7 +90,6 @@ describe("UI preferences", () => {
       JSON.stringify({
         locale: "zh-CN",
         theme: "dark",
-        streamQuality: "flac",
         audioSourceId: "imported-lx-source",
         volume: 0,
         playbackMode: "shuffle",

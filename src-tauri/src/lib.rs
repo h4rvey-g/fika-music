@@ -1185,7 +1185,7 @@ fn download_online_item(
             "No enabled search channel remains available for this track.".to_owned(),
         ));
     }
-    let qualities = quality_fallback(settings.preferred_quality);
+    let qualities = quality_fallback(settings.download_quality);
     let sources = {
         let state = app.state::<AppState>();
         let mut router = state.download_source_router.lock().map_err(|_| {

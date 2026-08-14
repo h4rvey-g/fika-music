@@ -372,7 +372,7 @@ export function onlinePlaylistDetailError(error: unknown): OnlinePlaylistDetailE
 export async function resolveOnlineTrack(
   options: ResolveOnlineTrackOptions,
 ): Promise<OnlinePlayback> {
-  const qualities = qualityFallback(options.quality ?? options.settings.preferredQuality);
+  const qualities = qualityFallback(options.quality ?? options.settings.playbackQuality);
   const router = options.router ?? defaultAudioSourceRouter;
   const mode = options.settings.audioSourceSelectionMode ?? "automatic";
   const sources = router.order({
