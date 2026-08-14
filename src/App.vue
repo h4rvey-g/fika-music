@@ -201,6 +201,15 @@ type PreloadedOnlinePlayback = {
   preparedAt: number;
 };
 
+type TrackNavigationMediaAction = "previoustrack" | "nexttrack";
+
+type MediaSessionWithTrackNavigation = {
+  setActionHandler: (
+    action: TrackNavigationMediaAction,
+    handler: (() => void) | null,
+  ) => void;
+};
+
 const mainSections = [
   {
     id: "local",
@@ -618,6 +627,7 @@ onMounted(async () => {
   window.addEventListener("mousedown", suppressMouseNavigationDefault);
   window.addEventListener("mouseup", handleMouseNavigation);
   window.addEventListener("auxclick", suppressMouseNavigationDefault);
+  setupMediaSessionActions();
   void appUpdater.initialize();
   await setupDesktopLyricsEvents();
   await setupCollectionEvents();
@@ -644,6 +654,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("mousedown", suppressMouseNavigationDefault);
   window.removeEventListener("mouseup", handleMouseNavigation);
   window.removeEventListener("auxclick", suppressMouseNavigationDefault);
+  clearMediaSessionActions();
   libraryScan.dispose();
   if (sourceChangeMessageTimer) clearTimeout(sourceChangeMessageTimer);
   if (collectionNoticeTimer) clearTimeout(collectionNoticeTimer);
@@ -656,6 +667,32 @@ onBeforeUnmount(() => {
   appUpdater.dispose();
   sampleListeningTime();
 });
+
+function setMediaSessionAction(
+  action: TrackNavigationMediaAction,
+  handler: (() => void) | null,
+) {
+  const mediaSession = (
+    navigator as Navigator & { mediaSession?: MediaSessionWithTrackNavigation }
+  ).mediaSession;
+  if (!mediaSession) return;
+
+  try {
+    mediaSession.setActionHandler(action, handler);
+  } catch {
+    // WebKit can expose MediaSession while rejecting an unsupported action.
+  }
+}
+
+function setupMediaSessionActions() {
+  setMediaSessionAction("previoustrack", () => void playPreviousTrack());
+  setMediaSessionAction("nexttrack", () => void playNextTrack());
+}
+
+function clearMediaSessionActions() {
+  setMediaSessionAction("previoustrack", null);
+  setMediaSessionAction("nexttrack", null);
+}
 
 async function setupDesktopLyricsEvents() {
   desktopLyricsUnlisteners.push(

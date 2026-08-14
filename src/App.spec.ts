@@ -46,6 +46,11 @@ const collectionBrowserMocks = vi.hoisted(() => ({
   startCollection: vi.fn(),
 }));
 
+const mediaSessionMocks = vi.hoisted(() => ({
+  handlers: new Map<string, (() => void) | null>(),
+  setActionHandler: vi.fn(),
+}));
+
 vi.mock("./lib/dynamic-theme", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./lib/dynamic-theme")>();
   return {
@@ -190,6 +195,16 @@ describe("application shell", () => {
     dynamicThemeMocks.extractCoverTheme.mockResolvedValue(null);
     vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
     vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
+    mediaSessionMocks.handlers.clear();
+    mediaSessionMocks.setActionHandler.mockImplementation(
+      (action: string, handler: (() => void) | null) => {
+        mediaSessionMocks.handlers.set(action, handler);
+      },
+    );
+    Object.defineProperty(navigator, "mediaSession", {
+      configurable: true,
+      value: { setActionHandler: mediaSessionMocks.setActionHandler },
+    });
     tauriMocks.listen.mockResolvedValue(vi.fn());
     tauriMocks.emitTo.mockResolvedValue(undefined);
     tauriMocks.getByLabel.mockResolvedValue(null);
@@ -270,6 +285,7 @@ describe("application shell", () => {
     document.documentElement.removeAttribute("data-theme");
     document.documentElement.removeAttribute("style");
     config.global.plugins = [];
+    Reflect.deleteProperty(navigator, "mediaSession");
     vi.restoreAllMocks();
   });
 
@@ -1730,5 +1746,60 @@ describe("application shell", () => {
     });
     expect(wrapper.get('button[aria-label="Previous track"]').attributes("disabled")).toBeUndefined();
     wrapper.unmount();
+  });
+
+  it("routes system previous and next media actions through the local queue", async () => {
+    tauriMocks.invoke.mockImplementation(
+      (command: string, payload?: { trackId?: number; index?: number }) => {
+        if (command === "get_scan_status") {
+          return Promise.resolve(createScanStatus({
+            folderPath: "/music",
+            discoveredFiles: 2,
+            scannedFiles: 2,
+            indexedTracks: 2,
+          }));
+        }
+        if (command === "local_track_media_source") {
+          return Promise.resolve({ filePath: `/music/${payload?.trackId ?? 1}.mp3` });
+        }
+        if (command === "local_library_queue_track") {
+          const index = payload?.index ?? 0;
+          return Promise.resolve({
+            index,
+            track: createLocalTrack({ id: index + 1, title: `Track ${index + 1}` }),
+          });
+        }
+        if (command === "local_track_playback_details") {
+          return Promise.resolve({ coverDataUrl: null, lyrics: null, lyricsError: null });
+        }
+        if (command === "list_plugins") return Promise.resolve(listedPlugins);
+        if (command === "list_audio_sources") return Promise.resolve(listedAudioSources);
+        if (command === "list_music_collections") return Promise.resolve(listedCollections);
+        return Promise.resolve(null);
+      },
+    );
+
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get('button[aria-label="Play Second"]').trigger("click");
+    await flushPromises();
+
+    mediaSessionMocks.handlers.get("previoustrack")?.();
+    await flushPromises();
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("local_library_queue_track", {
+      queueId: "library-queue",
+      index: 0,
+    });
+
+    mediaSessionMocks.handlers.get("nexttrack")?.();
+    await flushPromises();
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("local_library_queue_track", {
+      queueId: "library-queue",
+      index: 1,
+    });
+
+    wrapper.unmount();
+    expect(mediaSessionMocks.handlers.get("previoustrack")).toBeNull();
+    expect(mediaSessionMocks.handlers.get("nexttrack")).toBeNull();
   });
 });
