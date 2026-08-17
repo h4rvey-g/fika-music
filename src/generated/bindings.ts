@@ -302,6 +302,8 @@ export const TAURI_COMMANDS = {
   setMenuBarLyrics: "set_menu_bar_lyrics",
   getOnlineMusicSettings: "get_online_music_settings",
   updateOnlineMusicSettings: "update_online_music_settings",
+  getAudioSourcePreferences: "get_audio_source_preferences",
+  reportAudioSourceRouteSuccess: "report_audio_source_route_success",
   listOnlineMusicChannels: "list_online_music_channels",
   onlineMusicRecommendations: "online_music_recommendations",
   onlineMusicPlaylists: "online_music_playlists",

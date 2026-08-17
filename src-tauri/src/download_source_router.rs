@@ -10,6 +10,7 @@ const RECENT_SUCCESS: Duration = Duration::from_secs(10 * 60);
 const BASE_EJECTION: Duration = Duration::from_secs(30);
 const MAX_EJECTION: Duration = Duration::from_secs(5 * 60);
 const UNKNOWN_ROUTE_SCORE: f64 = 2_500.0;
+const SHARED_PREFERENCE_BONUS: f64 = 10_000.0;
 const EWMA_ALPHA: f64 = 0.25;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -69,6 +70,7 @@ pub(crate) struct DownloadSourceOrder<'a> {
     pub mode: AudioSourceSelectionMode,
     pub configured_priority: &'a [String],
     pub selected_audio_source_id: Option<&'a str>,
+    pub preferred_audio_sources: &'a BTreeMap<String, String>,
     pub now: Instant,
 }
 
@@ -102,15 +104,22 @@ impl DownloadSourceRouter {
         }
 
         compatible.sort_by(|left, right| {
-            self.source_score(left, order.candidates, order.qualities, order.now)
-                .partial_cmp(&self.source_score(
-                    right,
-                    order.candidates,
-                    order.qualities,
-                    order.now,
-                ))
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| left.name.cmp(&right.name))
+            self.source_score(
+                left,
+                order.candidates,
+                order.qualities,
+                order.preferred_audio_sources,
+                order.now,
+            )
+            .partial_cmp(&self.source_score(
+                right,
+                order.candidates,
+                order.qualities,
+                order.preferred_audio_sources,
+                order.now,
+            ))
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.name.cmp(&right.name))
         });
         compatible
     }
@@ -219,16 +228,26 @@ impl DownloadSourceRouter {
         source: &AudioSourceRecord,
         candidates: &[OnlineTrackCandidate],
         qualities: &[SourceQuality],
+        preferred_audio_sources: &BTreeMap<String, String>,
         now: Instant,
     ) -> f64 {
         source_routes(source, candidates, qualities)
             .into_iter()
             .map(|route| {
                 let bias = route.candidate_index as f64 * 25.0 + route.quality_index as f64 * 75.0;
+                let preference_bias = if preferred_audio_sources
+                    .get(&route.attempt.channel_id)
+                    .is_some_and(|preferred| preferred == &source.id)
+                {
+                    -SHARED_PREFERENCE_BONUS
+                } else {
+                    0.0
+                };
                 self.health
                     .get(&route.attempt)
                     .map_or(UNKNOWN_ROUTE_SCORE, |health| self.health_score(health, now))
                     + bias
+                    + preference_bias
             })
             .fold(f64::INFINITY, f64::min)
     }
@@ -408,11 +427,66 @@ mod tests {
                 mode: AudioSourceSelectionMode::Automatic,
                 configured_priority: &[],
                 selected_audio_source_id: None,
+                preferred_audio_sources: &BTreeMap::new(),
                 now,
             },
         );
 
         assert_eq!(ordered[0].id, "source-b");
+    }
+
+    #[test]
+    fn automatic_mode_prefers_the_shared_channel_source() {
+        let now = Instant::now();
+        let mut router = DownloadSourceRouter::default();
+        router.report_success(
+            DownloadAttemptKey::new("source-a", "plugin::wy", SourceQuality::K320),
+            Duration::from_millis(10),
+            now,
+        );
+        let preferred_audio_sources =
+            BTreeMap::from([("plugin::wy".to_owned(), "source-b".to_owned())]);
+
+        let ordered = router.order_sources(
+            vec![source("source-a"), source("source-b")],
+            DownloadSourceOrder {
+                candidates: &track().candidates,
+                qualities: &[SourceQuality::K320],
+                mode: AudioSourceSelectionMode::Automatic,
+                configured_priority: &[],
+                selected_audio_source_id: None,
+                preferred_audio_sources: &preferred_audio_sources,
+                now,
+            },
+        );
+
+        assert_eq!(ordered[0].id, "source-b");
+    }
+
+    #[test]
+    fn automatic_mode_keeps_an_ejected_shared_preference_behind_a_healthy_source() {
+        let now = Instant::now();
+        let mut router = DownloadSourceRouter::default();
+        let attempt = DownloadAttemptKey::new("source-b", "plugin::wy", SourceQuality::K320);
+        router.report_failure(attempt.clone(), now);
+        router.report_failure(attempt, now + Duration::from_millis(1));
+        let preferred_audio_sources =
+            BTreeMap::from([("plugin::wy".to_owned(), "source-b".to_owned())]);
+
+        let ordered = router.order_sources(
+            vec![source("source-a"), source("source-b")],
+            DownloadSourceOrder {
+                candidates: &track().candidates,
+                qualities: &[SourceQuality::K320],
+                mode: AudioSourceSelectionMode::Automatic,
+                configured_priority: &[],
+                selected_audio_source_id: None,
+                preferred_audio_sources: &preferred_audio_sources,
+                now: now + Duration::from_secs(1),
+            },
+        );
+
+        assert_eq!(ordered[0].id, "source-a");
     }
 
     #[test]
@@ -431,6 +505,7 @@ mod tests {
                 mode: AudioSourceSelectionMode::Automatic,
                 configured_priority: &[],
                 selected_audio_source_id: None,
+                preferred_audio_sources: &BTreeMap::new(),
                 now: now + Duration::from_secs(1),
             },
         );
@@ -455,6 +530,8 @@ mod tests {
             Duration::from_millis(10),
             now,
         );
+        let preferred_audio_sources =
+            BTreeMap::from([("plugin::wy".to_owned(), "source-b".to_owned())]);
 
         let ordered = router.order_sources(
             vec![source("source-a"), source("source-b")],
@@ -464,6 +541,7 @@ mod tests {
                 mode: AudioSourceSelectionMode::Manual,
                 configured_priority: &["source-b".to_owned()],
                 selected_audio_source_id: Some("source-a"),
+                preferred_audio_sources: &preferred_audio_sources,
                 now,
             },
         );
@@ -489,6 +567,7 @@ mod tests {
                 mode: AudioSourceSelectionMode::Automatic,
                 configured_priority: &[],
                 selected_audio_source_id: None,
+                preferred_audio_sources: &BTreeMap::new(),
                 now,
             },
         );
@@ -505,6 +584,7 @@ mod tests {
                 mode: AudioSourceSelectionMode::Automatic,
                 configured_priority: &[],
                 selected_audio_source_id: None,
+                preferred_audio_sources: &BTreeMap::new(),
                 now,
             },
         );

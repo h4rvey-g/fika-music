@@ -22,6 +22,7 @@ use walkdir::WalkDir;
 
 mod account_commands;
 mod album_art;
+mod audio_source_preference;
 pub mod audio_source_system;
 pub mod bundled_plugins;
 mod chksz_playback;
@@ -138,6 +139,8 @@ macro_rules! with_tauri_commands {
             set_menu_bar_lyrics,
             get_online_music_settings,
             update_online_music_settings,
+            get_audio_source_preferences,
+            report_audio_source_route_success,
             list_online_music_channels,
             online_music_recommendations,
             online_music_playlists,
@@ -375,6 +378,7 @@ struct AppState {
     library_watcher: Mutex<Option<LibraryWatcher>>,
     source_requests: source_request_registry::SourceRequestRegistry,
     online_download_requests: Mutex<BTreeMap<String, source_runtime::SourceCancellationToken>>,
+    audio_source_preferences: Mutex<audio_source_preference::ChannelAudioSourcePreferences>,
     download_source_router: Mutex<download_source_router::DownloadSourceRouter>,
     online_music_cache: Arc<online_music::OnlineMusicCache>,
     online_executor: Arc<online_execution::OnlineExecutor>,
@@ -540,6 +544,9 @@ impl AppState {
             library_watcher: Mutex::new(None),
             source_requests: source_request_registry::SourceRequestRegistry::default(),
             online_download_requests: Mutex::new(BTreeMap::new()),
+            audio_source_preferences: Mutex::new(
+                audio_source_preference::ChannelAudioSourcePreferences::default(),
+            ),
             download_source_router: Mutex::new(
                 download_source_router::DownloadSourceRouter::default(),
             ),
@@ -623,6 +630,50 @@ fn set_menu_bar_lyrics(
 ) -> CommandResult<()> {
     menu_bar_lyrics::update(&app, enabled, &line, &title, &subtitle, max_width)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_audio_source_preferences(
+    state: State<'_, AppState>,
+) -> CommandResult<BTreeMap<String, String>> {
+    let mut preferences = state
+        .audio_source_preferences
+        .lock()
+        .map_err(|_| "audio source preference lock was poisoned".to_owned())?;
+    Ok(preferences.snapshot(Instant::now()))
+}
+
+#[tauri::command]
+fn report_audio_source_route_success(
+    state: State<'_, AppState>,
+    channel_id: String,
+    audio_source_id: String,
+) -> CommandResult<()> {
+    let channel_id = validated_audio_route_id(channel_id, "channel id")?;
+    let audio_source_id = validated_audio_route_id(audio_source_id, "audio source id")?;
+    record_audio_source_route_success(state.inner(), &channel_id, &audio_source_id, Instant::now())
+}
+
+fn validated_audio_route_id(value: String, label: &str) -> CommandResult<String> {
+    let value = value.trim().to_owned();
+    if value.is_empty() || value.len() > 256 {
+        return Err(format!("{label} must contain between 1 and 256 bytes"));
+    }
+    Ok(value)
+}
+
+fn record_audio_source_route_success(
+    state: &AppState,
+    channel_id: &str,
+    audio_source_id: &str,
+    now: Instant,
+) -> CommandResult<()> {
+    let mut preferences = state
+        .audio_source_preferences
+        .lock()
+        .map_err(|_| "audio source preference lock was poisoned".to_owned())?;
+    preferences.report_success(channel_id, audio_source_id, now);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1189,6 +1240,14 @@ fn download_online_item(
         ));
     }
     let qualities = quality_fallback(settings.download_quality);
+    let routing_now = Instant::now();
+    let preferred_audio_sources = {
+        let state = app.state::<AppState>();
+        let mut preferences = state.audio_source_preferences.lock().map_err(|_| {
+            OnlineItemDownloadError::Message("audio source preference lock was poisoned".to_owned())
+        })?;
+        preferences.snapshot(routing_now)
+    };
     let sources = {
         let state = app.state::<AppState>();
         let mut router = state.download_source_router.lock().map_err(|_| {
@@ -1202,7 +1261,8 @@ fn download_online_item(
                 mode: settings.audio_source_selection_mode,
                 configured_priority: &settings.audio_source_priority,
                 selected_audio_source_id: task.selected_audio_source_id.as_deref(),
-                now: Instant::now(),
+                preferred_audio_sources: &preferred_audio_sources,
+                now: routing_now,
             },
         )
     };
@@ -1281,6 +1341,13 @@ fn download_online_item(
         .persist_noclobber(&target)
         .map_err(|error| OnlineItemDownloadError::Io(error.error))?;
     let final_bytes = fs::metadata(&target)?.len();
+    let state = app.state::<AppState>();
+    let _ = record_audio_source_route_success(
+        state.inner(),
+        &resolved.attempt.channel_id,
+        &resolved.attempt.audio_source_id,
+        Instant::now(),
+    );
     Ok((target, final_bytes, warning))
 }
 
@@ -1475,37 +1542,47 @@ fn resolve_online_download_url(
             "No enabled Audio Source can resolve this track.".to_owned(),
         ));
     }
-    let mut remaining_sources = sources;
-    if policy.selection_mode == online_music::AudioSourceSelectionMode::Automatic
-        && sources.len() > 1
-    {
-        let hedge_delay = {
-            let state = app.state::<AppState>();
-            let router = state.download_source_router.lock().map_err(|_| {
-                OnlineItemDownloadError::Message(
-                    "download source router lock was poisoned".to_owned(),
-                )
-            })?;
-            router.hedge_delay(&sources[0], candidates, policy.qualities)
-        };
-        if let Some(resolved) = race_download_source_layers(
-            app,
-            (&sources[0], &sources[1]),
-            candidates,
-            policy,
-            hedge_delay,
-            cancellation,
-        )? {
-            return Ok(resolved);
+    if policy.selection_mode == online_music::AudioSourceSelectionMode::Automatic {
+        for source_pair in sources.chunks(2) {
+            if source_pair.len() == 1 {
+                if let Some(resolved) = resolve_download_source_layer(
+                    app,
+                    &source_pair[0],
+                    candidates,
+                    policy,
+                    cancellation,
+                )? {
+                    return Ok(resolved);
+                }
+                continue;
+            }
+            let hedge_delay = {
+                let state = app.state::<AppState>();
+                let router = state.download_source_router.lock().map_err(|_| {
+                    OnlineItemDownloadError::Message(
+                        "download source router lock was poisoned".to_owned(),
+                    )
+                })?;
+                router.hedge_delay(&source_pair[0], candidates, policy.qualities)
+            };
+            if let Some(resolved) = race_download_source_layers(
+                app,
+                (&source_pair[0], &source_pair[1]),
+                candidates,
+                policy,
+                hedge_delay,
+                cancellation,
+            )? {
+                return Ok(resolved);
+            }
         }
-        remaining_sources = &sources[2..];
-    }
-
-    for source in remaining_sources {
-        if let Some(resolved) =
-            resolve_download_source_layer(app, source, candidates, policy, cancellation)?
-        {
-            return Ok(resolved);
+    } else {
+        for source in sources {
+            if let Some(resolved) =
+                resolve_download_source_layer(app, source, candidates, policy, cancellation)?
+            {
+                return Ok(resolved);
+            }
         }
     }
     Err(OnlineItemDownloadError::Message(
@@ -1917,8 +1994,23 @@ fn probe_download_url(
     if !response.status().is_success() || cancellation.is_cancelled() {
         return false;
     }
-    let mut byte = [0_u8; 1];
-    response.read(&mut byte).is_ok_and(|count| count == 1)
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let response_url = response.url().to_string();
+    let mut prefix = Vec::with_capacity(MEDIA_RESPONSE_PROBE_BYTES as usize);
+    if response
+        .by_ref()
+        .take(MEDIA_RESPONSE_PROBE_BYTES)
+        .read_to_end(&mut prefix)
+        .is_err()
+        || cancellation.is_cancelled()
+    {
+        return false;
+    }
+    probe_media_response_is_plausible_audio(content_type.as_deref(), &response_url, &prefix)
 }
 
 fn media_extension(content_type: Option<&str>, url: &str) -> Option<&'static str> {
@@ -1951,7 +2043,28 @@ fn media_extension(content_type: Option<&str>, url: &str) -> Option<&'static str
 fn media_response_is_plausible_audio(content_type: Option<&str>, prefix: &[u8]) -> bool {
     media_extension(content_type, "").is_some()
         || is_generic_media_type(content_type)
-        || prefix.starts_with(b"ID3")
+        || media_prefix_has_supported_audio_signature(prefix)
+}
+
+fn probe_media_response_is_plausible_audio(
+    content_type: Option<&str>,
+    response_url: &str,
+    prefix: &[u8],
+) -> bool {
+    if prefix.is_empty() {
+        return false;
+    }
+    if media_prefix_has_supported_audio_signature(prefix) {
+        return true;
+    }
+    if media_response_is_text(content_type, prefix) {
+        return false;
+    }
+    media_extension(content_type, response_url).is_some() || is_generic_media_type(content_type)
+}
+
+fn media_prefix_has_supported_audio_signature(prefix: &[u8]) -> bool {
+    prefix.starts_with(b"ID3")
         || matches!(
             FileType::from_buffer(prefix),
             Some(
@@ -1963,6 +2076,27 @@ fn media_response_is_plausible_audio(content_type: Option<&str>, prefix: &[u8]) 
                     | FileType::Vorbis
             )
         )
+}
+
+fn media_response_is_text(content_type: Option<&str>, prefix: &[u8]) -> bool {
+    let media_type = normalized_media_type(content_type);
+    if media_type.starts_with("text/")
+        || media_type.ends_with("+json")
+        || media_type.ends_with("+xml")
+        || matches!(
+            media_type.as_str(),
+            "application/json"
+                | "application/javascript"
+                | "application/xml"
+                | "application/x-www-form-urlencoded"
+        )
+    {
+        return true;
+    }
+    std::str::from_utf8(prefix).is_ok_and(|text| {
+        text.chars()
+            .all(|character| !character.is_control() || character.is_whitespace())
+    })
 }
 
 fn unsupported_media_response_message(
@@ -2015,23 +2149,7 @@ fn media_response_diagnostic(content_type: Option<&str>, prefix: &[u8]) -> Strin
         return "HTML document".to_owned();
     }
 
-    let media_type = normalized_media_type(content_type);
-    let valid_text = std::str::from_utf8(prefix).is_ok_and(|text| {
-        text.chars()
-            .all(|character| !character.is_control() || character.is_whitespace())
-    });
-    if media_type.starts_with("text/")
-        || media_type.ends_with("+json")
-        || media_type.ends_with("+xml")
-        || matches!(
-            media_type.as_str(),
-            "application/json"
-                | "application/javascript"
-                | "application/xml"
-                | "application/x-www-form-urlencoded"
-        )
-        || valid_text
-    {
+    if media_response_is_text(content_type, prefix) {
         return format!("text {:?}", diagnostic_text_preview(trimmed));
     }
 
@@ -6018,12 +6136,41 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
 
     static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn spawn_download_probe_response(
+        content_type: &str,
+        body: &[u8],
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test HTTP server should bind");
+        let address = listener
+            .local_addr()
+            .expect("test HTTP server should have an address");
+        let content_type = content_type.to_owned();
+        let body = body.to_vec();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test HTTP server should accept");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream
+                .write_all(headers.as_bytes())
+                .expect("test HTTP headers should write");
+            stream
+                .write_all(&body)
+                .expect("test HTTP body should write");
+        });
+        (format!("http://{address}/media"), handle)
+    }
 
     #[test]
     fn availability_request_should_include_netease_track_aliases() {
@@ -6180,6 +6327,60 @@ mod tests {
             Some("application/json"),
             br#"{"code":403,"message":"forbidden"}"#,
         ));
+    }
+
+    #[test]
+    fn download_url_probe_should_reject_http_200_json_error() {
+        let (url, server) =
+            spawn_download_probe_response("application/json", br#"{"code":201,"msg":"error"}"#);
+        let client = reqwest::blocking::Client::new();
+        let cancellation = source_runtime::SourceCancellationToken::default();
+
+        let accepted = probe_download_url(
+            &client,
+            &url,
+            Instant::now() + Duration::from_secs(2),
+            &cancellation,
+        );
+        server.join().expect("test HTTP server should finish");
+
+        assert!(!accepted);
+    }
+
+    #[test]
+    fn download_url_probe_should_reject_json_error_mislabeled_as_audio() {
+        let (url, server) =
+            spawn_download_probe_response("audio/mpeg", br#"{"code":201,"msg":"error"}"#);
+        let client = reqwest::blocking::Client::new();
+        let cancellation = source_runtime::SourceCancellationToken::default();
+
+        let accepted = probe_download_url(
+            &client,
+            &url,
+            Instant::now() + Duration::from_secs(2),
+            &cancellation,
+        );
+        server.join().expect("test HTTP server should finish");
+
+        assert!(!accepted);
+    }
+
+    #[test]
+    fn download_url_probe_should_accept_mislabeled_mp3_content() {
+        let (url, server) =
+            spawn_download_probe_response("application/force-download", &[0xff, 0xfb, 0x90, 0x64]);
+        let client = reqwest::blocking::Client::new();
+        let cancellation = source_runtime::SourceCancellationToken::default();
+
+        let accepted = probe_download_url(
+            &client,
+            &url,
+            Instant::now() + Duration::from_secs(2),
+            &cancellation,
+        );
+        server.join().expect("test HTTP server should finish");
+
+        assert!(accepted);
     }
 
     #[test]

@@ -49,6 +49,44 @@ describe("AudioSourceRouter", () => {
     expect(ordered.map((source) => source.id)).toEqual(["second", "first"]);
   });
 
+  it("prefers the shared source for the candidate channel", () => {
+    const router = new AudioSourceRouter(() => 1_000);
+    const first = audioSource("first");
+    const second = audioSource("second");
+    router.reportSuccess(playbackAttemptKey("first", "netease", "320k"), 100);
+
+    const ordered = router.order({
+      records: [first, second],
+      track,
+      qualities: ["320k"],
+      mode: "automatic",
+      configuredPriority: [],
+      preferredAudioSources: { netease: "second" },
+    });
+
+    expect(ordered.map((source) => source.id)).toEqual(["second", "first"]);
+  });
+
+  it("keeps an ejected shared preference behind an available source", () => {
+    const router = new AudioSourceRouter(() => 1_000);
+    const first = audioSource("first");
+    const second = audioSource("second");
+    const secondAttempt = playbackAttemptKey("second", "netease", "320k");
+    router.reportFailure(secondAttempt);
+    router.reportFailure(secondAttempt);
+
+    const ordered = router.order({
+      records: [first, second],
+      track,
+      qualities: ["320k"],
+      mode: "automatic",
+      configuredPriority: [],
+      preferredAudioSources: { netease: "second" },
+    });
+
+    expect(ordered.map((source) => source.id)).toEqual(["first", "second"]);
+  });
+
   it("temporarily deprioritizes a route after consecutive failures", () => {
     let now = 1_000;
     const router = new AudioSourceRouter(() => now);
@@ -89,6 +127,7 @@ describe("AudioSourceRouter", () => {
       mode: "manual",
       configuredPriority: ["second"],
       selectedAudioSourceId: "first",
+      preferredAudioSources: { netease: "second" },
     });
 
     expect(ordered.map((source) => source.id)).toEqual(["first", "second"]);

@@ -473,6 +473,40 @@ describe("online music playback routing", () => {
     expect(playback.candidate.channelName).toBe("KuGou");
   });
 
+  it("uses and refreshes the shared Audio Source preference for a channel", async () => {
+    invoke.mockImplementation((command: string, payload: { audioSourceId?: string }) => {
+      if (command === "get_audio_source_preferences") {
+        return Promise.resolve({ netease: "first" });
+      }
+      if (command === "dispatch_audio_source_request") {
+        return Promise.resolve({
+          response: {
+            action: "musicUrl",
+            data: `https://cdn.test/${payload.audioSourceId}.mp3`,
+          },
+          diagnostics: [],
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const playback = await resolveOnlineTrack({
+      track,
+      audioSources: [audioSource("first", ["wy"]), audioSource("second", ["wy"])],
+      settings: {
+        ...settings,
+        audioSourceSelectionMode: "automatic",
+      },
+      probe: async () => undefined,
+    });
+
+    expect(playback.audioSourceId).toBe("first");
+    expect(invoke).toHaveBeenCalledWith("report_audio_source_route_success", {
+      channelId: "netease",
+      audioSourceId: "first",
+    });
+  });
+
   it("starts one delayed fallback source when the automatic primary stalls", async () => {
     vi.useFakeTimers();
     invoke.mockImplementation((command: string, payload: { audioSourceId?: string }) => {

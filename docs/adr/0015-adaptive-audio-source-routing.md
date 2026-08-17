@@ -71,6 +71,13 @@ The playback router owns session-scoped health for each
 - User-maintained Audio Source priority is hidden and ignored. Session health
   is intentionally not persisted across application restarts because imported
   third-party endpoints and network conditions become stale quickly.
+- Playback and downloads share a process-scoped `channel -> Audio Source`
+  preference for the most recent successful route. It expires after ten
+  minutes and strongly biases both routers toward the same source for that
+  channel. Playback refreshes it after the media URL probe succeeds; downloads
+  refresh it only after the complete file has been persisted. Each router's
+  own circuit breaker remains authoritative and can skip an unhealthy shared
+  preference.
 
 ### Manual
 
@@ -102,7 +109,8 @@ playback recovery does not repeat the same URL.
   `Audio Source x channel x quality` key, EWMA latency, recent-success affinity,
   and exponential temporary ejection policy as playback. Browser playback and
   Rust download observations are not mixed because their probes, clients, and
-  cancellation lifecycles differ.
+  cancellation lifecycles differ. Only the channel-level successful-source
+  preference described above crosses that boundary.
 - Automatic downloads start the highest-ranked source immediately and at most
   one backup after a dynamic 400-1200 ms delay. A quick primary failure starts
   the backup immediately; the first success cancels the other source layer.
@@ -124,8 +132,9 @@ playback recovery does not repeat the same URL.
 ## Consequences
 
 - A recently successful source for a channel is normally selected first on the
-  next song, while repeated failures stop consuming the full timeout on every
-  track.
+  next playback or download, so both paths normally choose the same source.
+  Repeated failures remain path-specific and stop an unhealthy source from
+  consuming the full timeout on every track.
 - Delayed hedging reduces tail latency without issuing every request to every
   Audio Source at once.
 - Automatic mode is adaptive but not deterministic. The playback menu reports

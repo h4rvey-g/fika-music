@@ -22,6 +22,7 @@ type RoutingOptions = {
   mode: AudioSourceSelectionMode;
   configuredPriority: string[];
   selectedAudioSourceId?: string;
+  preferredAudioSources?: Readonly<Record<string, string>>;
 };
 
 const HEALTH_TTL_MS = 30 * 60_000;
@@ -29,6 +30,7 @@ const RECENT_SUCCESS_MS = 10 * 60_000;
 const BASE_EJECTION_MS = 30_000;
 const MAX_EJECTION_MS = 5 * 60_000;
 const UNKNOWN_ROUTE_SCORE = 2_500;
+const SHARED_PREFERENCE_BONUS = 10_000;
 const EWMA_ALPHA = 0.25;
 
 export class AudioSourceRouter {
@@ -53,8 +55,18 @@ export class AudioSourceRouter {
     }
 
     return [...compatible].sort((left, right) =>
-      this.sourceScore(left, options.track, options.qualities)
-        - this.sourceScore(right, options.track, options.qualities)
+      this.sourceScore(
+        left,
+        options.track,
+        options.qualities,
+        options.preferredAudioSources,
+      )
+        - this.sourceScore(
+          right,
+          options.track,
+          options.qualities,
+          options.preferredAudioSources,
+        )
         || left.name.localeCompare(right.name)
     );
   }
@@ -125,11 +137,17 @@ export class AudioSourceRouter {
     source: AudioSourceRecord,
     track: OnlineTrack,
     qualities: SourceQuality[],
+    preferredAudioSources?: Readonly<Record<string, string>>,
   ): number {
     return Math.min(...sourceRoutes(source, track, qualities).map((route) => {
       const health = this.health.get(route.attemptKey);
       const routeBias = route.candidateIndex * 25 + route.qualityIndex * 75;
-      return (health ? this.healthScore(health) : UNKNOWN_ROUTE_SCORE) + routeBias;
+      const preferenceBias = preferredAudioSources?.[route.channelId] === source.id
+        ? -SHARED_PREFERENCE_BONUS
+        : 0;
+      return (health ? this.healthScore(health) : UNKNOWN_ROUTE_SCORE)
+        + routeBias
+        + preferenceBias;
     }));
   }
 
@@ -177,6 +195,7 @@ function sourceRoutes(
     return qualities.flatMap((quality, qualityIndex) =>
       !sourceInfo.qualities.length || sourceInfo.qualities.includes(quality) ? [{
         attemptKey: playbackAttemptKey(source.id, candidate.channelId, quality),
+        channelId: candidate.channelId,
         candidateIndex,
         qualityIndex,
       }] : [],

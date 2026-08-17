@@ -375,6 +375,9 @@ export async function resolveOnlineTrack(
   const qualities = qualityFallback(options.quality ?? options.settings.playbackQuality);
   const router = options.router ?? defaultAudioSourceRouter;
   const mode = options.settings.audioSourceSelectionMode ?? "automatic";
+  const preferredAudioSources = mode === "automatic"
+    ? await loadAudioSourcePreferences()
+    : undefined;
   const sources = router.order({
     records: options.audioSources,
     track: options.track,
@@ -382,6 +385,7 @@ export async function resolveOnlineTrack(
     mode,
     configuredPriority: options.settings.audioSourcePriority,
     selectedAudioSourceId: options.selectedAudioSourceId,
+    preferredAudioSources,
   });
   if (!sources.length) {
     throw new Error("No enabled Audio Source can resolve this track.");
@@ -438,6 +442,31 @@ export async function resolveOnlineTrack(
   }
   throwIfAborted(options.signal);
   throw new OnlinePlaybackResolutionError(failures);
+}
+
+async function loadAudioSourcePreferences(): Promise<Record<string, string>> {
+  try {
+    const value = await invoke<unknown>(TAURI_COMMANDS.getAudioSourcePreferences);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return Object.fromEntries(
+      Object.entries(value).filter(([channelId, audioSourceId]) =>
+        channelId.length > 0 && typeof audioSourceId === "string" && audioSourceId.length > 0
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+async function reportAudioSourceRouteSuccess(channelId: string, audioSourceId: string) {
+  try {
+    await invoke<void>(TAURI_COMMANDS.reportAudioSourceRouteSuccess, {
+      channelId,
+      audioSourceId,
+    });
+  } catch {
+    // Shared affinity is an optimization; local playback health remains authoritative.
+  }
 }
 
 class AudioSourcePairError extends Error {
@@ -700,6 +729,7 @@ async function raceCandidates(
           });
           settledAttempts.add(attemptKey);
           options.router.reportSuccess(attemptKey, Date.now() - startedAt);
+          void reportAudioSourceRouteSuccess(candidate.channelId, options.audioSource.id);
           return { ...cached, track: options.track };
         }
         let mediaUrl: string | null = null;
@@ -767,6 +797,7 @@ async function raceCandidates(
         failedPlaybackCache.delete(failureKey);
         settledAttempts.add(attemptKey);
         options.router.reportSuccess(attemptKey, Date.now() - startedAt);
+        void reportAudioSourceRouteSuccess(candidate.channelId, options.audioSource.id);
         return playback;
       } catch (error) {
         resolvedPlaybackCache.delete(cacheKey);
