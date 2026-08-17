@@ -649,6 +649,7 @@ fn looks_like_lyric_text(text: &str) -> bool {
         || text.lines().any(|line| {
             parse_millisecond_line_header(line.trim_start()).is_some()
                 || !parse_lrc_timestamps(line, 0).0.is_empty()
+                || parse_eslyric_segments(line.trim(), 0).is_some_and(|segments| segments.len() > 1)
         })
 }
 
@@ -1587,6 +1588,12 @@ struct WordTimingMarker {
     range_end: usize,
 }
 
+#[derive(Debug)]
+struct EsLyricSegment<'a> {
+    text: &'a str,
+    end_ms: u64,
+}
+
 fn parse_timed_lyric_line(line: &str, offset_ms: i64) -> Vec<ParsedTimedLine> {
     let line = line.trim_start();
     if let Some((start_ms, duration_ms, content)) = parse_millisecond_line_header(line) {
@@ -1622,12 +1629,27 @@ fn parse_timed_lyric_line(line: &str, offset_ms: i64) -> Vec<ParsedTimedLine> {
 
     let (timestamps, content) = parse_lrc_timestamps(line, offset_ms);
     if timestamps.is_empty() {
-        return Vec::new();
+        let Some(segments) =
+            parse_eslyric_segments(line, offset_ms).filter(|segments| segments.len() > 1)
+        else {
+            return Vec::new();
+        };
+        let start_ms = segments[0].end_ms;
+        return parsed_eslyric_line(start_ms, &segments)
+            .into_iter()
+            .collect();
     }
-    let text = strip_word_timing(content, &[('<', '>')]).trim().to_owned();
+    let eslyric_segments = parse_eslyric_segments(content, offset_ms);
+    let fallback_text = strip_word_timing(content, &[('<', '>')]).trim().to_owned();
     timestamps
         .into_iter()
         .map(|start_ms| {
+            if let Some(parsed_line) = eslyric_segments
+                .as_deref()
+                .and_then(|segments| parsed_eslyric_line(start_ms, segments))
+            {
+                return parsed_line;
+            }
             let words = parse_marked_words(
                 content,
                 '<',
@@ -1640,11 +1662,67 @@ fn parse_timed_lyric_line(line: &str, offset_ms: i64) -> Vec<ParsedTimedLine> {
             ParsedTimedLine {
                 start_ms,
                 end_ms,
-                text: text.clone(),
+                text: fallback_text.clone(),
                 words,
             }
         })
         .collect()
+}
+
+fn parse_eslyric_segments(content: &str, offset_ms: i64) -> Option<Vec<EsLyricSegment<'_>>> {
+    let content = content.trim_end();
+    let mut segments = Vec::new();
+    let mut cursor = 0;
+
+    while cursor < content.len() {
+        let marker_start = cursor + content[cursor..].find('[')?;
+        if marker_start == cursor {
+            return None;
+        }
+        let timestamp_start = marker_start + 1;
+        let marker_end = timestamp_start + content[timestamp_start..].find(']')?;
+        let end_ms = parse_timestamp(&content[timestamp_start..marker_end])?
+            .saturating_add_signed(offset_ms);
+        segments.push(EsLyricSegment {
+            text: &content[cursor..marker_start],
+            end_ms,
+        });
+        cursor = marker_end + 1;
+    }
+
+    (!segments.is_empty()).then_some(segments)
+}
+
+fn parsed_eslyric_line(start_ms: u64, segments: &[EsLyricSegment<'_>]) -> Option<ParsedTimedLine> {
+    let mut word_start_ms = start_ms;
+    let mut words = Vec::with_capacity(segments.len());
+    for segment in segments {
+        if segment.end_ms < word_start_ms {
+            return None;
+        }
+        words.push(LyricWord {
+            start_ms: word_start_ms,
+            end_ms: segment.end_ms,
+            text: segment.text.to_owned(),
+        });
+        word_start_ms = segment.end_ms;
+    }
+
+    if let Some(first_word) = words.first_mut() {
+        first_word.text = first_word.text.trim_start().to_owned();
+    }
+    if let Some(last_word) = words.last_mut() {
+        last_word.text = last_word.text.trim_end().to_owned();
+    }
+    words.retain(|word| !word.text.is_empty());
+    let text = words.iter().map(|word| word.text.as_str()).collect();
+    let end_ms = segments.last().map(|segment| segment.end_ms);
+    Some(ParsedTimedLine {
+        start_ms,
+        end_ms,
+        text,
+        words,
+    })
 }
 
 fn parse_millisecond_line_header(line: &str) -> Option<(u64, u64, &str)> {
@@ -2174,6 +2252,58 @@ mod tests {
             ]
         );
         assert_eq!(lines[0].end_ms, Some(2_000));
+    }
+
+    #[test]
+    fn parse_lyrics_should_parse_eslyric_trailing_timestamps() {
+        let lines = parse_lyrics("[00:32.500]风[00:32.870]扬[00:33.170]");
+
+        assert_eq!(
+            lines,
+            vec![LyricLine {
+                start_ms: Some(32_500),
+                end_ms: Some(33_170),
+                text: "风扬".to_owned(),
+                words: vec![
+                    LyricWord {
+                        start_ms: 32_500,
+                        end_ms: 32_870,
+                        text: "风".to_owned(),
+                    },
+                    LyricWord {
+                        start_ms: 32_870,
+                        end_ms: 33_170,
+                        text: "扬".to_owned(),
+                    },
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_lyrics_should_parse_eslyric_without_a_line_start_timestamp() {
+        let lines = parse_lyrics("风[00:32.870]扬[00:33.170]");
+
+        assert_eq!(
+            lines,
+            vec![LyricLine {
+                start_ms: Some(32_870),
+                end_ms: Some(33_170),
+                text: "风扬".to_owned(),
+                words: vec![
+                    LyricWord {
+                        start_ms: 32_870,
+                        end_ms: 32_870,
+                        text: "风".to_owned(),
+                    },
+                    LyricWord {
+                        start_ms: 32_870,
+                        end_ms: 33_170,
+                        text: "扬".to_owned(),
+                    },
+                ],
+            }]
+        );
     }
 
     #[test]
