@@ -92,7 +92,9 @@ const ONLINE_DOWNLOAD_COMPLETED_EVENT: &str = "online-music:download-completed";
 const LIBRARY_METADATA_VERSION: i64 = 1;
 const LIBRARY_FOLDER_SETTING_KEY: &str = "local_music_folder";
 const MAX_ONLINE_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const MEDIA_SIGNATURE_PROBE_BYTES: u64 = 64;
+const MEDIA_RESPONSE_PROBE_BYTES: u64 = 512;
+const MEDIA_RESPONSE_TEXT_PREVIEW_CHARS: usize = 160;
+const MEDIA_RESPONSE_BINARY_PREVIEW_BYTES: usize = 16;
 const DEFAULT_DOWNLOAD_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(60);
 const YT_DLP_DOWNLOAD_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -1367,10 +1369,10 @@ fn download_online_item_with_http(
     }
     // Imported sources can mislabel direct audio responses, so inspect a small prefix before
     // rejecting an otherwise unsupported media type.
-    let mut prefix = Vec::with_capacity(MEDIA_SIGNATURE_PROBE_BYTES as usize);
+    let mut prefix = Vec::with_capacity(MEDIA_RESPONSE_PROBE_BYTES as usize);
     response
         .by_ref()
-        .take(MEDIA_SIGNATURE_PROBE_BYTES)
+        .take(MEDIA_RESPONSE_PROBE_BYTES)
         .read_to_end(&mut prefix)
         .map_err(|_| OnlineItemDownloadError::Message("media download stream failed".to_owned()))?;
     if prefix.is_empty() {
@@ -1380,7 +1382,13 @@ fn download_online_item_with_http(
     }
     if !media_response_is_plausible_audio(content_type.as_deref(), &prefix) {
         return Err(OnlineItemDownloadError::Message(
-            "media type is not a supported audio format".to_owned(),
+            unsupported_media_response_message(
+                response.status().as_u16(),
+                content_type.as_deref(),
+                total_bytes,
+                response.url().as_str(),
+                &prefix,
+            ),
         ));
     }
     if cancellation.is_cancelled() {
@@ -1955,6 +1963,169 @@ fn media_response_is_plausible_audio(content_type: Option<&str>, prefix: &[u8]) 
                     | FileType::Vorbis
             )
         )
+}
+
+fn unsupported_media_response_message(
+    status: u16,
+    content_type: Option<&str>,
+    content_length: Option<u64>,
+    response_url: &str,
+    prefix: &[u8],
+) -> String {
+    let media_type = normalized_media_type(content_type);
+    let media_type = if media_type.is_empty() {
+        "<missing>"
+    } else {
+        media_type.as_str()
+    };
+    let content_length = content_length
+        .map(|length| format!("{length} bytes"))
+        .unwrap_or_else(|| "unknown".to_owned());
+    let endpoint = diagnostic_http_url(response_url).unwrap_or_else(|| "<invalid URL>".to_owned());
+    let response = media_response_diagnostic(content_type, prefix);
+    format!(
+        "HTTP {status} {media_type}: {response}; not supported audio; content length: {content_length}; endpoint: {endpoint}"
+    )
+}
+
+fn media_response_diagnostic(content_type: Option<&str>, prefix: &[u8]) -> String {
+    if let Some(file_type) = FileType::from_buffer(prefix) {
+        return format!("detected file type {file_type:?}");
+    }
+
+    let text = String::from_utf8_lossy(prefix);
+    let trimmed = text.trim();
+    if let Some(url) = diagnostic_http_url(trimmed) {
+        return format!("URL {url}");
+    }
+
+    if let Ok(value) = serde_json::from_slice::<JsonValue>(prefix) {
+        return json_response_diagnostic(&value);
+    }
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return "JSON response (truncated or invalid)".to_owned();
+    }
+
+    let leading_text = trimmed
+        .chars()
+        .take(32)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if leading_text.starts_with("<!doctype html") || leading_text.starts_with("<html") {
+        return "HTML document".to_owned();
+    }
+
+    let media_type = normalized_media_type(content_type);
+    let valid_text = std::str::from_utf8(prefix).is_ok_and(|text| {
+        text.chars()
+            .all(|character| !character.is_control() || character.is_whitespace())
+    });
+    if media_type.starts_with("text/")
+        || media_type.ends_with("+json")
+        || media_type.ends_with("+xml")
+        || matches!(
+            media_type.as_str(),
+            "application/json"
+                | "application/javascript"
+                | "application/xml"
+                | "application/x-www-form-urlencoded"
+        )
+        || valid_text
+    {
+        return format!("text {:?}", diagnostic_text_preview(trimmed));
+    }
+
+    let bytes = prefix
+        .iter()
+        .take(MEDIA_RESPONSE_BINARY_PREVIEW_BYTES)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("unknown binary prefix {bytes}")
+}
+
+fn json_response_diagnostic(value: &JsonValue) -> String {
+    let code = ["code", "status", "statusCode"]
+        .iter()
+        .find_map(|key| value.get(*key))
+        .and_then(json_diagnostic_scalar)
+        .map(|value| diagnostic_text_preview(&value));
+    let message = [
+        "message",
+        "msg",
+        "detail",
+        "reason",
+        "error_description",
+        "error",
+    ]
+    .iter()
+    .find_map(|key| value.get(*key))
+    .and_then(json_diagnostic_scalar)
+    .map(|value| diagnostic_text_preview(&value));
+
+    match (code, message) {
+        (Some(code), Some(message)) => format!("JSON code {code}: {message}"),
+        (Some(code), None) => format!("JSON code {code}"),
+        (None, Some(message)) => format!("JSON error: {message}"),
+        (None, None) => "JSON response without code or message".to_owned(),
+    }
+}
+
+fn json_diagnostic_scalar(value: &JsonValue) -> Option<String> {
+    match value {
+        JsonValue::String(value) => Some(value.to_owned()),
+        JsonValue::Number(value) => Some(value.to_string()),
+        JsonValue::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn diagnostic_text_preview(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for (index, token) in value.split_whitespace().enumerate() {
+        if index > 0 {
+            output.push(' ');
+        }
+        let scheme_offset = token.find("https://").or_else(|| token.find("http://"));
+        let query_offset = scheme_offset.and_then(|scheme_offset| {
+            token[scheme_offset..]
+                .find('?')
+                .map(|query_offset| scheme_offset + query_offset)
+        });
+        if let Some(query_offset) = query_offset {
+            output.push_str(&token[..query_offset]);
+            output.push_str("?<redacted>");
+        } else {
+            output.push_str(token);
+        }
+    }
+
+    let mut characters = output.chars();
+    let mut preview = characters
+        .by_ref()
+        .take(MEDIA_RESPONSE_TEXT_PREVIEW_CHARS)
+        .collect::<String>();
+    if characters.next().is_some() {
+        preview.push_str("...");
+    }
+    preview
+}
+
+fn diagnostic_http_url(value: &str) -> Option<String> {
+    let mut parsed = reqwest::Url::parse(value.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let had_query = parsed.query().is_some();
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.set_password(None).ok()?;
+    parsed.set_username("").ok()?;
+    let mut output = parsed.to_string();
+    if had_query {
+        output.push_str("?<redacted>");
+    }
+    Some(output)
 }
 
 fn is_generic_media_type(content_type: Option<&str>) -> bool {
@@ -6009,6 +6180,38 @@ mod tests {
             Some("application/json"),
             br#"{"code":403,"message":"forbidden"}"#,
         ));
+    }
+
+    #[test]
+    fn unsupported_media_response_error_should_include_safe_json_diagnostics() {
+        let message = unsupported_media_response_message(
+            200,
+            Some("application/json; charset=utf-8"),
+            Some(58),
+            "https://media.example/api/download?token=url-secret#fragment",
+            br#"{"code":403,"message":"forbidden","token":"body-secret"}"#,
+        );
+
+        assert_eq!(
+            message,
+            "HTTP 200 application/json: JSON code 403: forbidden; not supported audio; content length: 58 bytes; endpoint: https://media.example/api/download?<redacted>"
+        );
+    }
+
+    #[test]
+    fn unsupported_media_response_error_should_identify_a_body_url_without_leaking_its_query() {
+        let message = unsupported_media_response_message(
+            200,
+            Some("text/plain"),
+            None,
+            "https://media.example/download",
+            b"https://cdn.example/song.mp3?token=body-secret",
+        );
+
+        assert_eq!(
+            message,
+            "HTTP 200 text/plain: URL https://cdn.example/song.mp3?<redacted>; not supported audio; content length: unknown; endpoint: https://media.example/download"
+        );
     }
 
     #[test]
