@@ -144,6 +144,17 @@ type PlaylistSelectionTarget = {
   candidates: OnlineTrack["candidates"];
 };
 
+type DownloadFlightOrigin = {
+  artwork: HTMLElement;
+  bounds: Pick<DOMRect, "height" | "left" | "top" | "width">;
+  trackKey: string;
+};
+
+type DownloadFlightAnimation = {
+  animation: Animation;
+  artwork: HTMLElement;
+};
+
 const FAVORITE_TRACK_PAGE_SIZE = 200;
 const MAX_FAVORITE_TRACK_PAGES = 100;
 const SEARCH_SUMMARY_SIZE = 5;
@@ -209,6 +220,7 @@ const query = ref("");
 const workspaceRoot = ref<HTMLElement | null>(null);
 const searchArea = ref<HTMLElement | null>(null);
 const mainScrollViewport = ref<HTMLElement | null>(null);
+const downloadsTab = ref<HTMLButtonElement | null>(null);
 const submittedQuery = ref("");
 const expandedSection = ref<OnlineSearchSection | null>(null);
 const activeTab = ref<"search" | "downloads">("search");
@@ -303,6 +315,7 @@ const pendingRecommendationLoads = new Map<
   MusicRecommendationKind,
   Promise<OnlineRecommendationsResult | null>
 >();
+const downloadFlightAnimations = new Set<DownloadFlightAnimation>();
 
 const hasSubmittedSearch = computed(() => Boolean(submittedQuery.value));
 const visibleSections = computed(() =>
@@ -501,6 +514,11 @@ onBeforeUnmount(() => {
   if (suggestionTimer !== null) window.clearTimeout(suggestionTimer);
   if (suggestionRequestId) void cancelSourceRequest(suggestionRequestId);
   if (detailRequestId) void cancelSourceRequest(detailRequestId);
+  for (const flight of downloadFlightAnimations) {
+    flight.animation.cancel();
+    flight.artwork.remove();
+  }
+  downloadFlightAnimations.clear();
   cancelTrackEntityResolution();
   cancelArtistDetailRequests();
   cancelRecommendationLoads();
@@ -1836,8 +1854,13 @@ async function downloadAllRecommendation() {
   );
 }
 
-async function downloadTrack(track: OnlineTrack) {
-  await createDownload("track", track.title, [track]);
+async function downloadTrack(track: OnlineTrack, artwork: HTMLElement | null = null) {
+  await createDownload(
+    "track",
+    track.title,
+    [track],
+    captureDownloadFlightOrigin(track, artwork),
+  );
 }
 
 async function downloadTracks(tracks: OnlineTrack[]) {
@@ -1873,7 +1896,12 @@ async function downloadAll() {
   await createDownload(detail.value.kind, visibleDetailTitle.value, tracks);
 }
 
-async function createDownload(kind: string, title: string, tracks: OnlineTrack[]) {
+async function createDownload(
+  kind: string,
+  title: string,
+  tracks: OnlineTrack[],
+  flightOrigin: DownloadFlightOrigin | null = null,
+) {
   if (settings.value && !settings.value.downloadDirectory) {
     try {
       const directory = await selectOnlineDownloadDirectory(props.localMusicFolder);
@@ -1887,7 +1915,6 @@ async function createDownload(kind: string, title: string, tracks: OnlineTrack[]
       return;
     }
   }
-  activeTab.value = "downloads";
   downloadActionId.value = "create";
   try {
     const task = await createOnlineDownloadTask(
@@ -1898,12 +1925,118 @@ async function createDownload(kind: string, title: string, tracks: OnlineTrack[]
       props.localMusicFolder,
     );
     upsertDownloadTask(task);
+    playDownloadFlight(flightOrigin);
     upsertDownloadTask(await startOnlineDownloadTask(task.taskId));
   } catch (error) {
     globalError.value = normalizeError(error);
   } finally {
     downloadActionId.value = null;
   }
+}
+
+function captureDownloadFlightOrigin(
+  track: OnlineTrack,
+  artwork: HTMLElement | null,
+): DownloadFlightOrigin | null {
+  if (!artwork) return null;
+  const bounds = artwork.getBoundingClientRect();
+  if (bounds.width <= 0 || bounds.height <= 0) return null;
+  return {
+    artwork: artwork.cloneNode(true) as HTMLElement,
+    bounds: {
+      height: bounds.height,
+      left: bounds.left,
+      top: bounds.top,
+      width: bounds.width,
+    },
+    trackKey: track.key,
+  };
+}
+
+function playDownloadFlight(origin: DownloadFlightOrigin | null) {
+  const target = downloadsTab.value;
+  if (!origin || !target || prefersReducedMotion()) return;
+  const targetBounds = target.getBoundingClientRect();
+  if (targetBounds.width <= 0 || targetBounds.height <= 0) return;
+
+  const artwork = origin.artwork;
+  artwork.dataset.onlineDownloadFlight = origin.trackKey;
+  artwork.setAttribute("aria-hidden", "true");
+  Object.assign(artwork.style, {
+    borderRadius: "0.25rem",
+    height: `${origin.bounds.height}px`,
+    left: `${origin.bounds.left}px`,
+    margin: "0",
+    overflow: "hidden",
+    pointerEvents: "none",
+    position: "fixed",
+    top: `${origin.bounds.top}px`,
+    transformOrigin: "center",
+    width: `${origin.bounds.width}px`,
+    willChange: "transform, opacity, filter",
+    zIndex: "100",
+  });
+  document.body.append(artwork);
+
+  if (typeof artwork.animate !== "function") {
+    artwork.remove();
+    return;
+  }
+
+  const destinationX = targetBounds.left + targetBounds.width / 2
+    - origin.bounds.left - origin.bounds.width / 2;
+  const destinationY = targetBounds.top + targetBounds.height / 2
+    - origin.bounds.top - origin.bounds.height / 2;
+  const arcHeight = Math.min(56, Math.max(24, Math.abs(destinationX) * 0.08));
+  const destinationScale = Math.min(
+    0.5,
+    Math.max(0.28, (targetBounds.height / origin.bounds.height) * 0.42),
+  );
+
+  let animation: Animation;
+  try {
+    animation = artwork.animate(
+      [
+        {
+          filter: "drop-shadow(0 5px 10px color-mix(in oklab, var(--color-base-content) 24%, transparent))",
+          opacity: 1,
+          transform: "translate3d(0, 0, 0) scale(1) rotate(0deg)",
+        },
+        {
+          filter: "drop-shadow(0 8px 14px color-mix(in oklab, var(--color-base-content) 18%, transparent))",
+          offset: 0.55,
+          opacity: 0.92,
+          transform: `translate3d(${destinationX * 0.58}px, ${destinationY * 0.46 - arcHeight}px, 0) scale(0.72) rotate(5deg)`,
+        },
+        {
+          filter: "drop-shadow(0 0 0 transparent)",
+          opacity: 0.08,
+          transform: `translate3d(${destinationX}px, ${destinationY}px, 0) scale(${destinationScale}) rotate(0deg)`,
+        },
+      ],
+      {
+        duration: 680,
+        easing: "cubic-bezier(0.22, 0.72, 0.18, 1)",
+        fill: "forwards",
+      },
+    );
+  } catch {
+    artwork.remove();
+    return;
+  }
+
+  const flight = { animation, artwork };
+  downloadFlightAnimations.add(flight);
+  void animation.finished
+    .catch(() => undefined)
+    .then(() => {
+      downloadFlightAnimations.delete(flight);
+      artwork.remove();
+    });
+}
+
+function prefersReducedMotion() {
+  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 }
 
 function upsertDownloadTask(task: OnlineDownloadTask) {
@@ -2316,7 +2449,9 @@ defineExpose({
           {{ t("Search") }}
         </button>
         <button
+          ref="downloadsTab"
           role="tab"
+          data-online-download-tab
           class="tab"
           :class="activeTab === 'downloads' ? 'tab-active text-base-content' : 'text-muted'"
           :aria-selected="activeTab === 'downloads'"

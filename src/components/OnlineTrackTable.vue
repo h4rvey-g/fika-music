@@ -33,7 +33,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   play: [track: OnlineTrack];
-  download: [track: OnlineTrack];
+  download: [track: OnlineTrack, artwork: HTMLElement | null];
   downloadSelection: [tracks: OnlineTrack[]];
   favorite: [track: OnlineTrack];
   addToPlaylist: [track: OnlineTrack];
@@ -137,6 +137,14 @@ function handleWindowPointerDown(event: PointerEvent) {
 function downloadSelection() {
   if (selectedTracks.value.length) emit("downloadSelection", [...selectedTracks.value]);
   closeContextMenu();
+}
+
+function downloadTrack(event: MouseEvent, track: OnlineTrack) {
+  const trigger = event.currentTarget;
+  const artwork = trigger instanceof HTMLElement
+    ? trigger.closest("tr")?.querySelector<HTMLElement>("[data-online-track-artwork]") ?? null
+    : null;
+  emit("download", track, artwork);
 }
 
 function addSelectionToPlaylist() {
@@ -254,6 +262,7 @@ function artistActionId(track: OnlineTrack, artist: string) {
                 />
               </span>
               <div
+                data-online-track-artwork
                 class="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded"
                 :class="selectedKeys.has(track.key) ? 'bg-neutral-content/15' : 'bg-base-200'"
               >
@@ -367,7 +376,7 @@ function artistActionId(track: OnlineTrack, artist: string) {
                 type="button"
                 :aria-label="t('Download {title}', { title: track.title })"
                 :title="t('Download')"
-                @click.stop="$emit('download', track)"
+                @click.stop="downloadTrack($event, track)"
                 @dblclick.stop
               >
                 <Download :size="16" aria-hidden="true" />

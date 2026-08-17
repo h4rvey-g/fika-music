@@ -275,7 +275,10 @@ async function search(
 }
 
 describe("Online Music workspace", () => {
+  let originalAnimate: PropertyDescriptor | undefined;
+
   beforeEach(() => {
+    originalAnimate = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "animate");
     vi.clearAllMocks();
     eventListeners.clear();
     tauriMocks.listen.mockImplementation(
@@ -307,6 +310,11 @@ describe("Online Music workspace", () => {
   });
 
   afterEach(() => {
+    if (originalAnimate) {
+      Object.defineProperty(HTMLElement.prototype, "animate", originalAnimate);
+    } else {
+      delete (HTMLElement.prototype as Partial<HTMLElement>).animate;
+    }
     document.body.innerHTML = "";
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -1454,7 +1462,99 @@ describe("Online Music workspace", () => {
     wrapper.unmount();
   });
 
-  it("creates one download task for a multi-selection", async () => {
+  it("flies a downloaded track artwork into the Downloads tab without leaving search", async () => {
+    const downloadedTrack = track(1, "https://cdn.test/song-1.jpg");
+    const task: OnlineDownloadTask = {
+      taskId: "track-task",
+      kind: "track",
+      title: downloadedTrack.title,
+      state: "queued",
+      destination: "/downloads",
+      selectedAudioSourceId: null,
+      totalItems: 1,
+      completedItems: 0,
+      skippedItems: 0,
+      failedItems: 0,
+      createdAt: 1,
+      updatedAt: 1,
+      items: [],
+    };
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "get_online_music_settings") {
+        return Promise.resolve({ ...settings, downloadDirectory: "/downloads" });
+      }
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "start_online_music_search") return Promise.resolve("search-1");
+      if (command === "online_music_playlists") {
+        return Promise.resolve({
+          items: [],
+          failures: [],
+          supportedChannels: 0,
+          completedChannels: 0,
+        });
+      }
+      if (command === "create_online_download_task") return Promise.resolve(task);
+      if (command === "start_online_download_task") {
+        return Promise.resolve({ ...task, state: "running", updatedAt: 2 });
+      }
+      return Promise.resolve(null);
+    });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      const isTarget = this.dataset.onlineDownloadTab !== undefined;
+      const left = isTarget ? 720 : 80;
+      const top = isTarget ? 20 : 240;
+      const width = isTarget ? 96 : 32;
+      const height = 32;
+      return {
+        bottom: top + height,
+        height,
+        left,
+        right: left + width,
+        top,
+        width,
+        x: left,
+        y: top,
+        toJSON: () => ({}),
+      };
+    });
+    const cancel = vi.fn();
+    const animate = vi.fn((
+      _keyframes: Keyframe[] | PropertyIndexedKeyframes | null,
+      _options?: number | KeyframeAnimationOptions,
+    ) => ({
+      cancel,
+      finished: new Promise<Animation>(() => undefined),
+    }) as unknown as Animation);
+    Object.defineProperty(HTMLElement.prototype, "animate", {
+      configurable: true,
+      value: animate,
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+    await search(wrapper, "Song", "songs", [downloadedTrack]);
+
+    await wrapper.get('button[aria-label="Download Song 1"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.findAll('[role="tab"]')[0].classes()).toContain("tab-active");
+    expect(wrapper.findAll('[role="tab"]')[1].classes()).not.toContain("tab-active");
+    const flightImage = document.body.querySelector<HTMLImageElement>(
+      '[data-online-download-flight="song-1"] img',
+    );
+    expect(flightImage?.getAttribute("src")).toBe(downloadedTrack.coverUrl);
+    expect(animate).toHaveBeenCalledOnce();
+    const keyframes = animate.mock.calls[0]?.[0] as Keyframe[];
+    expect(keyframes[2]?.transform).toContain("translate3d(672px, -220px, 0)");
+    expect(animate.mock.calls[0]?.[1]).toMatchObject({ duration: 680, fill: "forwards" });
+
+    wrapper.unmount();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(document.body.querySelector("[data-online-download-flight]")).toBeNull();
+  });
+
+  it("creates one download task for a multi-selection without leaving search", async () => {
     const tracks = [track(1), track(2)];
     const task: OnlineDownloadTask = {
       taskId: "selection-task",
@@ -1515,7 +1615,8 @@ describe("Online Music workspace", () => {
     expect(tauriMocks.invoke).toHaveBeenCalledWith("start_online_download_task", {
       taskId: "selection-task",
     });
-    expect(wrapper.findAll('[role="tab"]')[1].classes()).toContain("tab-active");
+    expect(wrapper.findAll('[role="tab"]')[0].classes()).toContain("tab-active");
+    expect(wrapper.findAll('[role="tab"]')[1].classes()).not.toContain("tab-active");
     wrapper.unmount();
   });
 

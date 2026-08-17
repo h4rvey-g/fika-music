@@ -175,6 +175,15 @@ describe("OnlineTrackTable", () => {
     expect(wrapper.emitted("addToPlaylist")?.[0]).toEqual([track]);
   });
 
+  it("emits the clicked track artwork with a download request", async () => {
+    const wrapper = mountTable();
+
+    await wrapper.get('button[aria-label="Download Song 1"]').trigger("click");
+
+    const artwork = wrapper.get("[data-online-track-artwork]").element;
+    expect(wrapper.emitted("download")?.[0]).toEqual([track, artwork]);
+  });
+
   it("opens artist and album metadata without selecting the row", async () => {
     const wrapper = mountTable();
     const row = wrapper.get('[data-online-track-key="song-1"]');
