@@ -92,6 +92,7 @@ const ONLINE_DOWNLOAD_COMPLETED_EVENT: &str = "online-music:download-completed";
 const LIBRARY_METADATA_VERSION: i64 = 1;
 const LIBRARY_FOLDER_SETTING_KEY: &str = "local_music_folder";
 const MAX_ONLINE_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MEDIA_SIGNATURE_PROBE_BYTES: u64 = 64;
 const DEFAULT_DOWNLOAD_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(60);
 const YT_DLP_DOWNLOAD_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -1355,18 +1356,35 @@ fn download_online_item_with_http(
     let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok());
-    let extension_hint = media_extension(content_type, &resolved.url);
-    if extension_hint.is_none() && !is_generic_media_type(content_type) {
-        return Err(OnlineItemDownloadError::Message(
-            "media type is not a supported audio format".to_owned(),
-        ));
-    }
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let extension_hint = media_extension(content_type.as_deref(), response.url().as_str());
     let total_bytes = response.content_length();
     if total_bytes.is_some_and(|length| length > MAX_ONLINE_DOWNLOAD_BYTES) {
         return Err(OnlineItemDownloadError::Message(
             "media download is larger than 2 GiB".to_owned(),
         ));
+    }
+    // Imported sources can mislabel direct audio responses, so inspect a small prefix before
+    // rejecting an otherwise unsupported media type.
+    let mut prefix = Vec::with_capacity(MEDIA_SIGNATURE_PROBE_BYTES as usize);
+    response
+        .by_ref()
+        .take(MEDIA_SIGNATURE_PROBE_BYTES)
+        .read_to_end(&mut prefix)
+        .map_err(|_| OnlineItemDownloadError::Message("media download stream failed".to_owned()))?;
+    if prefix.is_empty() {
+        return Err(OnlineItemDownloadError::Message(
+            "media download returned an empty file".to_owned(),
+        ));
+    }
+    if !media_response_is_plausible_audio(content_type.as_deref(), &prefix) {
+        return Err(OnlineItemDownloadError::Message(
+            "media type is not a supported audio format".to_owned(),
+        ));
+    }
+    if cancellation.is_cancelled() {
+        return Err(OnlineItemDownloadError::Cancelled);
     }
     let temporary_suffix = extension_hint
         .map(|extension| format!(".{extension}"))
@@ -1377,7 +1395,8 @@ fn download_online_item_with_http(
         .tempfile_in(destination)?;
     begin_online_item_download(app, task_id, item, temporary.path(), total_bytes)?;
     let mut buffer = [0_u8; 64 * 1024];
-    let mut downloaded = 0_u64;
+    temporary.write_all(&prefix)?;
+    let mut downloaded = prefix.len() as u64;
     let mut last_progress_update = Instant::now();
     loop {
         if cancellation.is_cancelled() {
@@ -1400,11 +1419,6 @@ fn download_online_item_with_http(
             persist_online_download_progress(app, task_id, &item.item_id, downloaded, total_bytes);
             last_progress_update = Instant::now();
         }
-    }
-    if downloaded == 0 {
-        return Err(OnlineItemDownloadError::Message(
-            "media download returned an empty file".to_owned(),
-        ));
     }
     persist_online_download_progress(app, task_id, &item.item_id, downloaded, total_bytes);
     temporary.flush()?;
@@ -1907,8 +1921,7 @@ fn media_extension(content_type: Option<&str>, url: &str) -> Option<&'static str
         "audio/mp4" | "audio/x-m4a" => return Some("m4a"),
         "audio/aac" => return Some("aac"),
         "audio/ogg" | "audio/opus" => return Some("ogg"),
-        "" | "application/octet-stream" => {}
-        _ => return None,
+        _ => {}
     }
     let path = url
         .split(['?', '#'])
@@ -1925,6 +1938,23 @@ fn media_extension(content_type: Option<&str>, url: &str) -> Option<&'static str
         }
     }
     None
+}
+
+fn media_response_is_plausible_audio(content_type: Option<&str>, prefix: &[u8]) -> bool {
+    media_extension(content_type, "").is_some()
+        || is_generic_media_type(content_type)
+        || prefix.starts_with(b"ID3")
+        || matches!(
+            FileType::from_buffer(prefix),
+            Some(
+                FileType::Aac
+                    | FileType::Flac
+                    | FileType::Mpeg
+                    | FileType::Mp4
+                    | FileType::Opus
+                    | FileType::Vorbis
+            )
+        )
 }
 
 fn is_generic_media_type(content_type: Option<&str>) -> bool {
@@ -5947,6 +5977,38 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn media_extension_should_use_url_suffix_when_content_type_is_mislabeled() {
+        assert_eq!(
+            media_extension(Some("text/plain"), "https://media.example/song.mp3"),
+            Some("mp3")
+        );
+    }
+
+    #[test]
+    fn media_response_should_accept_mislabeled_mp3_content() {
+        assert!(media_response_is_plausible_audio(
+            Some("text/plain; charset=utf-8"),
+            &[0xff, 0xfb, 0x90, 0x64],
+        ));
+    }
+
+    #[test]
+    fn media_response_should_accept_mislabeled_id3_mp3_content() {
+        assert!(media_response_is_plausible_audio(
+            Some("application/force-download"),
+            b"ID3\x04\0\0\0\0\0\0",
+        ));
+    }
+
+    #[test]
+    fn media_response_should_reject_json_with_unsupported_media_type() {
+        assert!(!media_response_is_plausible_audio(
+            Some("application/json"),
+            br#"{"code":403,"message":"forbidden"}"#,
+        ));
     }
 
     #[test]
