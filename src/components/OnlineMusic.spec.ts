@@ -1189,6 +1189,84 @@ describe("Online Music workspace", () => {
     wrapper.unmount();
   });
 
+  it("filters daily recommendations by the selected provider without reloading", async () => {
+    const neteaseTrack = track(1);
+    const kugouTrack = createOnlineTrack({
+      ...track(2),
+      candidates: [createOnlineTrackCandidate({
+        channelId: "fika.kugou::kg",
+        pluginId: "fika.kugou",
+        sourceId: "kg",
+        channelName: "KuGou",
+        id: "2",
+        title: "Song 2",
+        trackNumber: 2,
+        platformIds: { id: 2 },
+        rank: 2,
+      })],
+    });
+    const sharedTrack = createOnlineTrack({
+      ...track(3),
+      candidates: [
+        ...track(3).candidates,
+        createOnlineTrackCandidate({
+          channelId: "fika.kugou::kg",
+          pluginId: "fika.kugou",
+          sourceId: "kg",
+          channelName: "KuGou",
+          id: "3",
+          title: "Song 3",
+          trackNumber: 3,
+          platformIds: { id: 3 },
+          rank: 3,
+        }),
+      ],
+    });
+    tauriMocks.invoke.mockImplementation((command: string, args?: { kind?: string }) => {
+      if (command === "get_online_music_settings") return Promise.resolve(settings);
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "online_music_recommendations") {
+        return Promise.resolve({
+          kind: args?.kind ?? "daily",
+          items: args?.kind === "daily" ? [neteaseTrack, kugouTrack, sharedTrack] : [],
+          failures: [],
+          supportedChannels: args?.kind === "daily" ? 2 : 1,
+          completedChannels: args?.kind === "daily" ? 2 : 1,
+        });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+    await wrapper.get('button[aria-label="每日推荐"]').trigger("click");
+    await flushPromises();
+    const recommendationRequestCount = tauriMocks.invoke.mock.calls.filter(
+      ([command]) => command === "online_music_recommendations",
+    ).length;
+    const visibleTrackKeys = () => wrapper.findAll("[data-online-track-key]")
+      .map((row) => row.attributes("data-online-track-key"));
+    const netease = wrapper.get('button[data-recommendation-provider="fika.netease"]');
+    const kugou = wrapper.get('button[data-recommendation-provider="fika.kugou"]');
+
+    await netease.trigger("click");
+    expect(netease.attributes("aria-pressed")).toBe("true");
+    expect(kugou.attributes("aria-pressed")).toBe("false");
+    expect(visibleTrackKeys()).toEqual(["song-1", "song-3"]);
+
+    await kugou.trigger("click");
+    expect(netease.attributes("aria-pressed")).toBe("false");
+    expect(kugou.attributes("aria-pressed")).toBe("true");
+    expect(visibleTrackKeys()).toEqual(["song-2", "song-3"]);
+
+    await kugou.trigger("click");
+    expect(kugou.attributes("aria-pressed")).toBe("false");
+    expect(visibleTrackKeys()).toEqual(["song-1", "song-2", "song-3"]);
+    expect(tauriMocks.invoke.mock.calls.filter(
+      ([command]) => command === "online_music_recommendations",
+    )).toHaveLength(recommendationRequestCount);
+    wrapper.unmount();
+  });
+
   it("appends unique private roaming tracks from a control below the current batch", async () => {
     let roamingRequests = 0;
     tauriMocks.invoke.mockImplementation((command: string, args?: { kind?: string }) => {

@@ -260,6 +260,7 @@ const resultScrollPosition = ref(0);
 const summaryScrollPosition = ref(0);
 const activeRecommendation = ref<MusicRecommendationKind | null>(null);
 const recommendationTracks = ref<OnlineTrack[]>([]);
+const selectedRecommendationProviderId = ref<string | null>(null);
 const recommendationLoading = ref(false);
 const recommendationError = ref<string | null>(null);
 const recommendationFailures = ref<OnlineRecommendationsResult["failures"]>([]);
@@ -354,6 +355,41 @@ const isArtistTopTracksTab = computed(() =>
 const activeRecommendationEntry = computed(() =>
   recommendationEntries.find((entry) => entry.id === activeRecommendation.value) ?? null,
 );
+const selectedRecommendationProvider = computed(() =>
+  activeRecommendationEntry.value?.providers.find(
+    (provider) => provider.pluginId === selectedRecommendationProviderId.value,
+  ) ?? null,
+);
+const visibleRecommendationTracks = computed(() => {
+  const pluginId = selectedRecommendationProvider.value?.pluginId;
+  if (!pluginId) return recommendationTracks.value;
+  return recommendationTracks.value
+    .filter((track) => track.candidates.some((candidate) => candidate.pluginId === pluginId))
+    .sort((left, right) =>
+      recommendationProviderRank(left, pluginId) - recommendationProviderRank(right, pluginId)
+    );
+});
+const visibleRecommendationFailures = computed(() => {
+  const provider = selectedRecommendationProvider.value;
+  if (!provider) return recommendationFailures.value;
+  return recommendationFailures.value.filter((failure) =>
+    recommendationFailureMatchesProvider(failure, provider)
+  );
+});
+const visibleRecommendationError = computed(() => {
+  if (!selectedRecommendationProvider.value) return recommendationError.value;
+  if (visibleRecommendationTracks.value.length) return null;
+  const result = activeRecommendation.value
+    ? recommendationPreviews.value[activeRecommendation.value].result
+    : null;
+  if (result?.supportedChannels === 0) return recommendationError.value;
+  return visibleRecommendationFailures.value[0]?.message ?? null;
+});
+const visibleRecommendationProviders = computed(() =>
+  selectedRecommendationProvider.value
+    ? [selectedRecommendationProvider.value]
+    : activeRecommendationEntry.value?.providers ?? [],
+);
 const visibleSongListKey = computed(() => {
   if (activeTab.value !== "search") return null;
   if (detail.value) {
@@ -361,7 +397,9 @@ const visibleSongListKey = computed(() => {
       ? `detail:${detail.value.kind}:${detail.value.entity.key}`
       : null;
   }
-  if (activeRecommendation.value) return `recommendation:${activeRecommendation.value}`;
+  if (activeRecommendation.value) {
+    return `recommendation:${activeRecommendation.value}:${selectedRecommendationProviderId.value ?? "all"}`;
+  }
   if (!hasSubmittedSearch.value || (expandedSection.value && expandedSection.value !== "songs")) {
     return null;
   }
@@ -369,7 +407,7 @@ const visibleSongListKey = computed(() => {
 });
 const visibleSongTracks = computed(() => {
   if (detail.value) return isArtistTopTracksTab.value ? detailTracks.value : [];
-  if (activeRecommendation.value) return recommendationTracks.value;
+  if (activeRecommendation.value) return visibleRecommendationTracks.value;
   if (hasSubmittedSearch.value && (!expandedSection.value || expandedSection.value === "songs")) {
     return sectionItems<OnlineTrack>("songs");
   }
@@ -700,6 +738,32 @@ function applyRecommendationResult(result: OnlineRecommendationsResult) {
   recommendationTracks.value = result.items;
   recommendationFailures.value = result.failures;
   recommendationError.value = recommendationResultError(result);
+}
+
+function recommendationProviderRank(track: OnlineTrack, pluginId: string) {
+  return Math.min(
+    ...track.candidates
+      .filter((candidate) => candidate.pluginId === pluginId)
+      .map((candidate) => candidate.rank),
+  );
+}
+
+function recommendationFailureMatchesProvider(
+  failure: OnlineRecommendationsResult["failures"][number],
+  provider: RecommendationEntry["providers"][number],
+) {
+  return failure.channelId === provider.pluginId
+    || failure.channelId.startsWith(`${provider.pluginId}:`)
+    || failure.channelName.toLocaleLowerCase().includes(provider.label.toLocaleLowerCase());
+}
+
+async function toggleRecommendationProvider(pluginId: string) {
+  selectedRecommendationProviderId.value = selectedRecommendationProviderId.value === pluginId
+    ? null
+    : pluginId;
+  const listEntry = beginVisibleSongListEntry();
+  await nextTick();
+  await finishVisibleSongListEntry(listEntry);
 }
 
 async function loadRecommendation(
@@ -1219,6 +1283,7 @@ async function loadNextPrivateRoamingBatch(targetQueue = recommendationTracks.va
 async function openRecommendation(kind: MusicRecommendationKind, force = false) {
   cancelTrackEntityResolution();
   abandonRecommendationRequest();
+  if (activeRecommendation.value !== kind) selectedRecommendationProviderId.value = null;
   activeRecommendation.value = kind;
   recommendationTracks.value = [];
   recommendationFailures.value = [];
@@ -1246,6 +1311,7 @@ function closeRecommendation() {
   cancelTrackEntityResolution();
   abandonRecommendationRequest();
   activeRecommendation.value = null;
+  selectedRecommendationProviderId.value = null;
   recommendationTracks.value = [];
   recommendationFailures.value = [];
   recommendationError.value = null;
@@ -1265,6 +1331,7 @@ async function submitSearch(suggestion?: string) {
   suggestionsOpen.value = false;
   abandonRecommendationRequest();
   activeRecommendation.value = null;
+  selectedRecommendationProviderId.value = null;
   recommendationTracks.value = [];
   recommendationFailures.value = [];
   recommendationError.value = null;
@@ -1838,19 +1905,19 @@ async function playAllDetail() {
 }
 
 async function playAllRecommendation() {
-  if (!recommendationTracks.value.length) return;
+  if (!visibleRecommendationTracks.value.length) return;
   const queue = activeRecommendation.value === "roaming"
-    ? recommendationTracks.value
-    : [...recommendationTracks.value];
+    ? visibleRecommendationTracks.value
+    : [...visibleRecommendationTracks.value];
   await playTrack(queue[0], queue, true);
 }
 
 async function downloadAllRecommendation() {
-  if (!recommendationTracks.value.length || !activeRecommendationEntry.value) return;
+  if (!visibleRecommendationTracks.value.length || !activeRecommendationEntry.value) return;
   await createDownload(
     "recommendation",
     t(activeRecommendationEntry.value.label),
-    [...recommendationTracks.value],
+    [...visibleRecommendationTracks.value],
   );
 }
 
@@ -2360,6 +2427,7 @@ function showHome() {
 
   abandonRecommendationRequest();
   activeRecommendation.value = null;
+  selectedRecommendationProviderId.value = null;
   recommendationTracks.value = [];
   recommendationFailures.value = [];
   recommendationError.value = null;
@@ -2816,15 +2884,39 @@ defineExpose({
         </div>
         <div class="min-w-0 flex-1">
           <h2 class="truncate text-base font-semibold">{{ t(activeRecommendationEntry.label) }}</h2>
-          <div class="mt-1 flex flex-wrap gap-1">
-            <span
-              v-for="provider in activeRecommendationEntry.providers"
-              :key="provider.pluginId"
-              class="badge badge-sm"
+          <div
+            v-if="activeRecommendationEntry.providers.length > 1"
+            class="mt-1 flex flex-wrap items-center gap-1"
+          >
+            <div
+              class="join"
+              role="group"
+              :aria-label="t('Recommendation channels')"
             >
-              {{ provider.label }}
+              <button
+                v-for="provider in activeRecommendationEntry.providers"
+                :key="provider.pluginId"
+                class="btn btn-ghost btn-xs join-item"
+                :class="{ 'btn-active': selectedRecommendationProviderId === provider.pluginId }"
+                type="button"
+                :data-recommendation-provider="provider.pluginId"
+                :aria-label="t('Filter by {name}', { name: provider.label })"
+                :aria-pressed="selectedRecommendationProviderId === provider.pluginId"
+                :title="t('Filter by {name}', { name: provider.label })"
+                @click="toggleRecommendationProvider(provider.pluginId)"
+              >
+                {{ provider.label }}
+              </button>
+            </div>
+            <span v-if="visibleRecommendationFailures.length && visibleRecommendationTracks.length" class="badge badge-warning badge-sm">
+              {{ t("Partial") }}
             </span>
-            <span v-if="recommendationFailures.length && recommendationTracks.length" class="badge badge-warning badge-sm">
+          </div>
+          <div v-else class="mt-1 flex flex-wrap gap-1">
+            <span class="badge badge-sm">
+              {{ activeRecommendationEntry.providers[0]?.label }}
+            </span>
+            <span v-if="visibleRecommendationFailures.length && visibleRecommendationTracks.length" class="badge badge-warning badge-sm">
               {{ t("Partial") }}
             </span>
           </div>
@@ -2846,7 +2938,7 @@ defineExpose({
             />
           </button>
           <button
-            v-if="recommendationTracks.length"
+            v-if="visibleRecommendationTracks.length"
             class="btn btn-sm"
             type="button"
             @click="playAllRecommendation"
@@ -2855,7 +2947,7 @@ defineExpose({
             {{ t("Play all") }}
           </button>
           <button
-            v-if="recommendationTracks.length"
+            v-if="visibleRecommendationTracks.length"
             class="btn btn-square btn-ghost btn-sm"
             type="button"
             :aria-label="t('Download all recommendations')"
@@ -2867,12 +2959,12 @@ defineExpose({
         </div>
       </div>
 
-      <div v-if="recommendationError" role="alert" class="alert alert-error mb-3 py-2">
+      <div v-if="visibleRecommendationError" role="alert" class="alert alert-error mb-3 py-2">
         <AlertCircle :size="17" aria-hidden="true" />
-        <span class="min-w-0 flex-1 text-sm">{{ recommendationError }}</span>
-        <div v-if="!recommendationTracks.length" class="flex shrink-0 flex-wrap gap-1">
+        <span class="min-w-0 flex-1 text-sm">{{ visibleRecommendationError }}</span>
+        <div v-if="!visibleRecommendationTracks.length" class="flex shrink-0 flex-wrap gap-1">
           <button
-            v-for="provider in activeRecommendationEntry.providers"
+            v-for="provider in visibleRecommendationProviders"
             :key="provider.pluginId"
             class="btn btn-sm"
             type="button"
@@ -2883,20 +2975,20 @@ defineExpose({
         </div>
       </div>
       <div
-        v-else-if="recommendationFailures.length && recommendationTracks.length"
+        v-else-if="visibleRecommendationFailures.length && visibleRecommendationTracks.length"
         role="status"
         class="alert alert-warning mb-3 py-2 text-sm"
       >
         <AlertCircle :size="17" aria-hidden="true" />
-        {{ t("{names} unavailable", { names: recommendationFailures.map((failure) => failure.channelName).join(', ') }) }}
+        {{ t("{names} unavailable", { names: visibleRecommendationFailures.map((failure) => failure.channelName).join(', ') }) }}
       </div>
 
       <div v-if="recommendationLoading" class="space-y-2">
         <div v-for="index in 8" :key="index" class="skeleton h-11 w-full"></div>
       </div>
       <OnlineTrackTable
-        v-else-if="recommendationTracks.length"
-        :tracks="recommendationTracks"
+        v-else-if="visibleRecommendationTracks.length"
+        :tracks="visibleRecommendationTracks"
         :active-track="activeOnlineTrack"
         :is-playing="isPlaying"
         :track-action-id="trackActionId"
@@ -2905,7 +2997,7 @@ defineExpose({
         :supports-playlist-selection="supportsPlaylistSelection"
         :supports-comments="onlineTrackSupportsComments"
         :is-favorite="isTrackFavorite"
-        @play="requestTrackPlayback($event, recommendationTracks)"
+        @play="requestTrackPlayback($event, visibleRecommendationTracks)"
         @download="downloadTrack"
         @download-selection="downloadTracks"
         @favorite="addToFavorites"
@@ -2918,7 +3010,7 @@ defineExpose({
         @open-album="openTrackAlbum"
       />
       <div
-        v-if="activeRecommendationEntry.id === 'roaming' && recommendationTracks.length"
+        v-if="activeRecommendationEntry.id === 'roaming' && visibleRecommendationTracks.length"
         class="flex justify-center border-t border-base-300 py-4"
       >
         <button
@@ -2938,7 +3030,7 @@ defineExpose({
           {{ t("Load next songs") }}
         </button>
       </div>
-      <div v-else-if="!recommendationError" class="flex min-h-48 items-center justify-center text-sm text-muted">
+      <div v-else-if="!visibleRecommendationError" class="flex min-h-48 items-center justify-center text-sm text-muted">
         {{ t("No recommendations available") }}
       </div>
     </div>
