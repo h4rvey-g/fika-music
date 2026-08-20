@@ -1,0 +1,35 @@
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -1,1 +1,2 @@
++import java.io.FileInputStream
+ import java.util.Properties
+@@ -26,4 +27,20 @@ android {
+         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
+         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+     }
++    signingConfigs {
++        create("release") {
++            val keystorePropertiesFile = rootProject.file("keystore.properties")
++            val keystoreProperties = Properties().apply {
++                if (keystorePropertiesFile.exists()) {
++                    FileInputStream(keystorePropertiesFile).use { load(it) }
++                }
++            }
++
++            keyAlias = keystoreProperties.getProperty("keyAlias")
++            keyPassword = keystoreProperties.getProperty("password")
++            storeFile = file(keystoreProperties.getProperty("storeFile"))
++            storePassword = keystoreProperties.getProperty("password")
++            storeType = keystoreProperties.getProperty("storeType")
++        }
++    }
+     buildTypes {
+@@ -42,6 +59,7 @@ android {
+             }
+         }
+         getByName("release") {
++            signingConfig = signingConfigs.getByName("release")
+             isMinifyEnabled = true
+             proguardFiles(
+                 *fileTree(".") { include("**/*.pro") }

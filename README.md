@@ -91,9 +91,27 @@ release workflow. Keep the version synchronized in:
 - `src-tauri/Cargo.lock`
 - `src-tauri/tauri.conf.json`
 
-The workflow publishes Windows and Linux x86_64 bundles plus Intel and Apple
-silicon macOS bundles after every build succeeds. It can also be started
-manually from GitHub Actions to retry an unpublished version.
+The workflow publishes Windows and Linux x86_64 bundles, Intel and Apple
+silicon macOS bundles, and signed universal Android APK and AAB bundles after
+every build succeeds. It can also be started manually from GitHub Actions to
+retry an unpublished version.
+
+### Android signing
+
+Android releases use the stable application ID `com.hvg.fikamusic`, configured
+in `src-tauri/tauri.android.conf.json`. Configure these GitHub Actions secrets
+before running a release:
+
+| Secret | Value |
+| --- | --- |
+| `ANDROID_KEY_BASE64` | Base64-encoded PKCS#12 Android upload keystore |
+| `ANDROID_KEY_ALIAS` | Alias of the key in the keystore |
+| `ANDROID_KEY_PASSWORD` | Password shared by the keystore and key |
+
+The workflow generates the Android project from the locked Tauri CLI, signs the
+APK and AAB, verifies both signatures, and uploads them to the draft GitHub
+Release. Keep the keystore backed up: future Android releases must use the same
+key so installed copies can be upgraded.
 
 ### macOS ad-hoc signing
 

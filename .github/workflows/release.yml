@@ -6,10 +6,13 @@ on:
     branches:
       - main
     paths:
+      - .github/workflows/release.yml
       - package.json
       - package-lock.json
+      - scripts/android-signing.patch
       - src-tauri/Cargo.toml
       - src-tauri/Cargo.lock
+      - src-tauri/tauri.android.conf.json
       - src-tauri/tauri.conf.json
 
 permissions:
@@ -283,12 +286,170 @@ jobs:
 
           bash scripts/verify-macos-dmg.sh "${dmg_paths[0]}"
 
+  build-android:
+    name: Build Android
+    needs:
+      - version
+      - create-release
+    if: needs.version.outputs.should_release == 'true'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      ANDROID_BUILD_TOOLS_VERSION: 36.0.0
+      ANDROID_NDK_VERSION: 28.2.13676358
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Require Android signing secrets
+        shell: bash
+        env:
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          required=(
+            ANDROID_KEY_ALIAS
+            ANDROID_KEY_BASE64
+            ANDROID_KEY_PASSWORD
+          )
+          missing=()
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+
+          if ((${#missing[@]} > 0)); then
+            echo "::error::Missing required Android signing secret(s): ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" \
+            "ndk;${ANDROID_NDK_VERSION}"
+
+          ndk_home="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
+          echo "NDK_HOME=$ndk_home" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ndk_home" >> "$GITHUB_ENV"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.1
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache Rust build artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          shared-key: release-android
+          workspaces: ./src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Initialize Android project
+        run: npm run tauri android init -- --ci --skip-targets-install
+
+      - name: Configure Android signing
+        shell: bash
+        env:
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          git apply \
+            --directory=src-tauri/gen/android \
+            scripts/android-signing.patch
+
+          keystore="$RUNNER_TEMP/android-release.jks"
+          printf '%s' "$ANDROID_KEY_BASE64" | base64 --decode > "$keystore"
+          chmod 600 "$keystore"
+
+          properties=src-tauri/gen/android/keystore.properties
+          {
+            printf 'keyAlias=%s\n' "$ANDROID_KEY_ALIAS"
+            printf 'password=%s\n' "$ANDROID_KEY_PASSWORD"
+            printf 'storeFile=%s\n' "$keystore"
+            printf 'storeType=PKCS12\n'
+          } > "$properties"
+          chmod 600 "$properties"
+
+      - name: Build signed Android bundles
+        run: npm run tauri android build -- --ci --apk --aab
+
+      - name: Verify and stage Android bundles
+        id: android-bundles
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          apk=src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
+          aab=src-tauri/gen/android/app/build/outputs/bundle/universalRelease/app-universal-release.aab
+
+          for path in "$apk" "$aab"; do
+            if [[ ! -f "$path" ]]; then
+              echo "::error file=${path}::Expected Android release bundle was not generated"
+              exit 1
+            fi
+          done
+
+          "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/apksigner" \
+            verify --verbose --print-certs "$apk"
+          jarsigner_output="$(jarsigner -verify "$aab" 2>&1)"
+          printf '%s\n' "$jarsigner_output"
+          if ! grep -q '^jar verified' <<< "$jarsigner_output"; then
+            echo "::error file=${aab}::Android App Bundle signature verification failed"
+            exit 1
+          fi
+
+          mkdir -p android-release
+          cp "$apk" "android-release/Fika-Music_${VERSION}_universal.apk"
+          cp "$aab" "android-release/Fika-Music_${VERSION}_universal.aab"
+
+      - name: Upload Android bundles to draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: gh release upload "$TAG" android-release/* --clobber
+
   publish-release:
     name: Publish release
     needs:
       - version
       - build
-    if: needs.version.outputs.should_release == 'true' && needs.build.result == 'success'
+      - build-android
+    if: needs.version.outputs.should_release == 'true' && needs.build.result == 'success' && needs.build-android.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
