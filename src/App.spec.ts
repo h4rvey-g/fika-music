@@ -99,7 +99,7 @@ vi.mock("./components/AudioSourceManager.vue", () => ({
 vi.mock("./components/LibraryBrowser.vue", () => ({
   default: defineComponent({
     name: "LibraryBrowser",
-    emits: ["playbackQueue", "addToCollection", "createCollection", "summary", "error"],
+    emits: ["playbackQueue", "queueTracks", "addToCollection", "createCollection", "summary", "error"],
     setup(_, { emit }) {
       function playSecond() {
         emit(
@@ -1792,6 +1792,43 @@ describe("application shell", () => {
       trackId: 1,
     });
     expect(wrapper.get('button[aria-label="Previous track"]').attributes("disabled")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  it("plays queued tracks before resuming the current playback queue", async () => {
+    const defaultInvoke = tauriMocks.invoke.getMockImplementation();
+    tauriMocks.invoke.mockImplementation((command: string, payload?: Record<string, unknown>) => {
+      if (command === "local_track_media_source") {
+        return Promise.resolve({ filePath: `/music/${payload?.trackId ?? 1}.mp3` });
+      }
+      if (command === "local_track_playback_details") {
+        return Promise.resolve({ coverDataUrl: null, lyrics: null, lyricsError: null });
+      }
+      return defaultInvoke?.(command, payload);
+    });
+
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get('button[aria-label="Play Second"]').trigger("click");
+    await flushPromises();
+
+    wrapper.getComponent({ name: "LibraryBrowser" }).vm.$emit(
+      "queueTracks",
+      [createLocalTrack({ id: 1, title: "Queued First" })],
+      "next",
+    );
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="playback-queue-toggle"]').text()).toContain("1");
+    await wrapper.get('[data-testid="playback-queue-toggle"]').trigger("click");
+    expect(wrapper.get("#playback-queue-title").text()).toBe("Playback queue");
+    expect(wrapper.text()).toContain("Queued First");
+
+    wrapper.get("audio").element.dispatchEvent(new Event("ended"));
+    await flushPromises();
+
+    expect(wrapper.get('button[data-testid="playback-queue-toggle"]').text()).not.toContain("1");
+    expect(wrapper.get('footer[aria-label="Playback bar"]').text()).toContain("Queued First");
     wrapper.unmount();
   });
 

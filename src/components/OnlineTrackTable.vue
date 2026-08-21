@@ -33,6 +33,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   play: [track: OnlineTrack];
+  queueTracks: [tracks: OnlineTrack[], placement: "next" | "last"];
   download: [track: OnlineTrack, artwork: HTMLElement | null];
   downloadSelection: [tracks: OnlineTrack[]];
   favorite: [track: OnlineTrack];
@@ -139,6 +140,13 @@ function downloadSelection() {
   closeContextMenu();
 }
 
+function queueSelection(placement: "next" | "last") {
+  if (selectedTracks.value.length) {
+    emit("queueTracks", [...selectedTracks.value], placement);
+  }
+  closeContextMenu();
+}
+
 function downloadTrack(event: MouseEvent, track: OnlineTrack) {
   const trigger = event.currentTarget;
   const artwork = trigger instanceof HTMLElement
@@ -185,7 +193,7 @@ function viewComments() {
 
 function menuPosition(x: number, y: number) {
   const width = 240;
-  const height = 252;
+  const height = 340;
   return {
     x: Math.max(8, Math.min(x, window.innerWidth - width - 8)),
     y: Math.max(8, Math.min(y, window.innerHeight - height - 8)),
@@ -400,8 +408,32 @@ function artistActionId(track: OnlineTrack, artist: string) {
       </li>
       <li>
         <button type="button" @click="downloadSelection">
-        <Download :size="16" aria-hidden="true" />
+          <Download :size="16" aria-hidden="true" />
           {{ t("Download") }}
+        </button>
+      </li>
+      <li>
+        <button type="button" @click="queueSelection('next')">
+          <ListPlus :size="16" aria-hidden="true" />
+          {{ t("Play next") }}
+        </button>
+      </li>
+      <li>
+        <button type="button" @click="queueSelection('last')">
+          <Music2 :size="16" aria-hidden="true" />
+          {{ t("Add to queue") }}
+        </button>
+      </li>
+      <li>
+        <button type="button" @click="queueSelection('next')">
+          <ListPlus :size="16" aria-hidden="true" />
+          {{ t("Play next") }}
+        </button>
+      </li>
+      <li>
+        <button type="button" @click="queueSelection('last')">
+          <Music2 :size="16" aria-hidden="true" />
+          {{ t("Add to queue") }}
         </button>
       </li>
       <li>

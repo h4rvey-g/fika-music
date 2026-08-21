@@ -49,6 +49,7 @@ import PluginManager from "./components/PluginManager.vue";
 import PluginWorkspace from "./components/PluginWorkspace.vue";
 import NeteaseSource from "./components/NeteaseSource.vue";
 import NowPlayingPanel from "./components/NowPlayingPanel.vue";
+import PlaybackQueue from "./components/PlaybackQueue.vue";
 import NowPlayingLyricsSettings from "./components/NowPlayingLyricsSettings.vue";
 import DesktopLyricsSettings from "./components/DesktopLyricsSettings.vue";
 import AppUpdateSettings from "./components/AppUpdateSettings.vue";
@@ -89,6 +90,11 @@ import {
   type OnlinePlayback,
   type OnlineTrack,
 } from "./lib/online-music-api";
+import {
+  playbackQueueItemFromCollectionItem,
+  type PlaybackQueueItem,
+  type PlaybackQueuePlacement,
+} from "./lib/playback-queue";
 import { TAURI_COMMANDS } from "./generated/bindings";
 import type {
   AudioSourceSelectionMode,
@@ -366,6 +372,9 @@ const activeRemoteLyricsQuery = ref<TrackLyricsQuery | null>(null);
 const isLoadingLyrics = ref(false);
 const lyricsError = ref<string | null>(null);
 const isPreparingPlayback = ref(false);
+const playbackQueue = ref<PlaybackQueueItem[]>([]);
+const playbackQueueOpen = ref(false);
+const manualPlaybackActive = ref(false);
 const audioElement = ref<HTMLAudioElement | null>(null);
 const playbackOptionsMenu = ref<HTMLDetailsElement | null>(null);
 const libraryBrowser = ref<LibraryBrowserInstance | null>(null);
@@ -405,6 +414,7 @@ let remoteQueueGeneration = 0;
 let audioSourceSelectionModeGeneration = 0;
 let sourceChangeMessageTimer: ReturnType<typeof setTimeout> | null = null;
 let collectionNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+let playbackQueueSequence = 0;
 let sidebarCollectionPlaybackGeneration = 0;
 let dynamicThemeGeneration = 0;
 const desktopLyricsUnlisteners: UnlistenFn[] = [];
@@ -497,6 +507,7 @@ const canGoPrevious = computed(() => {
   return playbackMode.value !== "sequential" || localQueueIndex.value > 0;
 });
 const canGoNext = computed(() => {
+  if (playbackQueue.value.length) return true;
   if (collectionQueueActive.value && collectionQueueIndex.value >= 0) {
     return playbackMode.value !== "sequential"
       || collectionQueueIndex.value < collectionQueue.value.length - 1;
@@ -1470,11 +1481,106 @@ function ownsOnlinePlaybackRequest(
     && onlinePlaybackController === controller;
 }
 
-async function playTrack(track: LocalTrack, preserveCollectionQueue = false) {
+function nextPlaybackQueueId() {
+  playbackQueueSequence += 1;
+  return `playback-queue-${playbackQueueSequence}`;
+}
+
+function appendPlaybackQueue(items: PlaybackQueueItem[], placement: PlaybackQueuePlacement) {
+  if (!items.length) return;
+  playbackQueue.value = placement === "next"
+    ? [...items, ...playbackQueue.value]
+    : [...playbackQueue.value, ...items];
+  if (!activeTrack.value && !activeRemoteTitle.value && !isPreparingPlayback.value) {
+    void playNextPlaybackQueueItem();
+  }
+}
+
+function queueLocalTracks(tracks: LocalTrack[], placement: PlaybackQueuePlacement) {
+  appendPlaybackQueue(
+    tracks.map((track) => ({ id: nextPlaybackQueueId(), kind: "local", track })),
+    placement,
+  );
+}
+
+function queueOnlineTracks(tracks: OnlineTrack[], placement: PlaybackQueuePlacement) {
+  appendPlaybackQueue(
+    tracks.map((track) => ({ id: nextPlaybackQueueId(), kind: "online", track })),
+    placement,
+  );
+}
+
+function queueCollectionTracks(items: MusicCollectionItem[], placement: PlaybackQueuePlacement) {
+  const queueItems = items.flatMap((item) => {
+    const queueItem = playbackQueueItemFromCollectionItem(item, nextPlaybackQueueId());
+    return queueItem ? [queueItem] : [];
+  });
+  appendPlaybackQueue(queueItems, placement);
+}
+
+function clearPlaybackQueue() {
+  playbackQueue.value = [];
+  manualPlaybackActive.value = false;
+}
+
+function removePlaybackQueueItem(index: number) {
+  if (index < 0 || index >= playbackQueue.value.length) return;
+  playbackQueue.value = playbackQueue.value.filter((_, itemIndex) => itemIndex !== index);
+}
+
+function movePlaybackQueueItem(from: number, to: number) {
+  if (
+    from < 0
+    || from >= playbackQueue.value.length
+    || to < 0
+    || to >= playbackQueue.value.length
+    || from === to
+  ) return;
+  const next = [...playbackQueue.value];
+  const [item] = next.splice(from, 1);
+  next.splice(to, 0, item);
+  playbackQueue.value = next;
+}
+
+async function playPlaybackQueueItem(index: number) {
+  const item = playbackQueue.value[index];
+  if (!item) return;
+  playbackQueue.value = playbackQueue.value.filter((_, itemIndex) => itemIndex !== index);
+  await playManualPlaybackItem(item);
+}
+
+async function playNextPlaybackQueueItem() {
+  const [item, ...remaining] = playbackQueue.value;
+  if (!item) return false;
+  playbackQueue.value = remaining;
+  await playManualPlaybackItem(item);
+  return true;
+}
+
+async function playManualPlaybackItem(item: PlaybackQueueItem) {
+  manualPlaybackActive.value = true;
+  if (item.kind === "local") {
+    await playTrack(item.track, {
+      preserveCollectionQueue: true,
+      preserveLocalQueue: true,
+      preserveRemoteQueue: true,
+    });
+    return;
+  }
+  await playStandaloneOnlineTrack(item.track, true);
+}
+
+type LocalPlaybackOptions = {
+  preserveCollectionQueue?: boolean;
+  preserveLocalQueue?: boolean;
+  preserveRemoteQueue?: boolean;
+};
+
+async function playTrack(track: LocalTrack, options: LocalPlaybackOptions = {}) {
   const generation = beginPlaybackRequest();
   sampleListeningTime();
-  if (!preserveCollectionQueue) clearCollectionPlaybackQueue();
-  clearRemotePlaybackQueue();
+  if (!options.preserveCollectionQueue) clearCollectionPlaybackQueue();
+  if (!options.preserveRemoteQueue) clearRemotePlaybackQueue();
   isPreparingPlayback.value = true;
   appError.value = null;
 
@@ -1488,7 +1594,7 @@ async function playTrack(track: LocalTrack, preserveCollectionQueue = false) {
     activeRemoteTitle.value = null;
     activeRemoteQuality.value = null;
     audioUrl.value = convertFileSrc(source.filePath);
-    queuedLocalTrack.value = track;
+    if (!options.preserveLocalQueue) queuedLocalTrack.value = track;
     resetListeningSession();
     void loadLocalTrackPlaybackDetails(track);
 
@@ -1513,6 +1619,7 @@ async function playTrack(track: LocalTrack, preserveCollectionQueue = false) {
 }
 
 async function handleLibraryPlaybackQueue(queue: LibraryPlaybackQueue, autoplay: boolean) {
+  clearPlaybackQueue();
   clearCollectionPlaybackQueue();
   localQueueId.value = queue.queueId;
   localQueueTotal.value = queue.total;
@@ -1654,6 +1761,7 @@ async function handleOnlinePlayRequest(
   appendable: boolean,
   loadMore?: OnlineQueueLoadMore,
 ) {
+  clearPlaybackQueue();
   clearCollectionPlaybackQueue();
   remoteQueueGeneration += 1;
   cancelOnlinePreload();
@@ -1672,6 +1780,7 @@ async function handleCollectionPlayback(
   index: number,
   autoplay = true,
 ) {
+  clearPlaybackQueue();
   if (!items[index]) return;
   clearLocalPlaybackQueue();
   clearRemotePlaybackQueue();
@@ -1686,7 +1795,7 @@ async function playCollectionQueueTrack(index: number) {
   if (!item) return;
   collectionQueueIndex.value = index;
   if (item.localTrack) {
-    await playTrack(item.localTrack, true);
+    await playTrack(item.localTrack, { preserveCollectionQueue: true });
     return;
   }
   if (item.onlineTrack) {
@@ -1918,7 +2027,7 @@ function cancelOnlinePreload() {
   clearPreloadedMedia();
 }
 
-async function playStandaloneOnlineTrack(track: OnlineTrack) {
+async function playStandaloneOnlineTrack(track: OnlineTrack, preservePlaybackQueues = false) {
   const generation = beginPlaybackRequest();
   onlinePlaybackController?.abort();
   const controller = new AbortController();
@@ -1930,7 +2039,7 @@ async function playStandaloneOnlineTrack(track: OnlineTrack) {
   try {
     const playback = await resolveConfiguredOnlinePlayback(track, controller.signal, false);
     if (!ownsOnlinePlaybackRequest(generation, controller)) return generation;
-    await applyOnlinePlayback(playback, generation);
+    await applyOnlinePlayback(playback, generation, preservePlaybackQueues);
   } catch (error) {
     if (
       ownsPlaybackRequest(generation)
@@ -1947,10 +2056,14 @@ async function playStandaloneOnlineTrack(track: OnlineTrack) {
   return generation;
 }
 
-async function applyOnlinePlayback(playback: OnlinePlayback, generation: number) {
+async function applyOnlinePlayback(
+  playback: OnlinePlayback,
+  generation: number,
+  preserveLocalQueue = false,
+) {
   if (!ownsPlaybackRequest(generation)) return false;
   sampleListeningTime();
-  clearLocalPlaybackQueue();
+  if (!preserveLocalQueue) clearLocalPlaybackQueue();
   activeTrack.value = null;
   activeOnlineTrack.value = playback.track;
   activeRemoteTitle.value = playback.track.title;
@@ -2091,6 +2204,10 @@ async function playPreviousTrack() {
 }
 
 async function playNextTrack() {
+  if (playbackQueue.value.length) {
+    await playNextPlaybackQueueItem();
+    return;
+  }
   if (collectionQueueActive.value) {
     const index = collectionQueueNavigationIndex("next");
     if (index >= 0) await playCollectionQueueTrack(index);
@@ -2221,6 +2338,13 @@ async function onAudioEnded() {
   isPlaying.value = false;
   isPlaybackWaiting.value = false;
   playbackPosition.value = playbackDuration.value;
+  if (playbackQueue.value.length) {
+    await playNextPlaybackQueueItem();
+    return;
+  }
+  if (manualPlaybackActive.value) {
+    manualPlaybackActive.value = false;
+  }
   if (
     !collectionQueueActive.value
     && collectionQueue.value.length
@@ -2564,6 +2688,7 @@ function trackSubtitle(track: LocalTrack) {
               :scan-status="scanStatus"
               :scan-message="scanMessage"
               @playback-queue="handleLibraryPlaybackQueue"
+              @queue-tracks="queueLocalTracks"
               @add-to-collection="addLocalSelectionToCollection"
               @create-collection="createCollectionFromLocalSelection"
               @summary="updateLibrarySummary"
@@ -2618,6 +2743,7 @@ function trackSubtitle(track: LocalTrack) {
               :active-online-track="activeOnlineTrack"
               :is-playing="isPlaying"
               @play="handleCollectionPlayback"
+              @queue-tracks="queueCollectionTracks"
               @add-to-collection="addCollectionItemsToCollection"
               @create-collection="createCollectionFromCollectionItems"
               @changed="updateCollectionSummary"
@@ -2693,6 +2819,7 @@ function trackSubtitle(track: LocalTrack) {
               :is-playing="isPlaying"
               :local-music-folder="selectedFolder"
               @play-request="handleOnlinePlayRequest"
+              @queue-tracks="queueOnlineTracks"
               @add-to-collection="addOnlineTracksToCollection"
               @create-collection="createCollectionFromOnlineTracks"
               @open-audio-sources="selectSection('sources')"
@@ -3019,6 +3146,16 @@ function trackSubtitle(track: LocalTrack) {
         </div>
       </div>
 
+      <PlaybackQueue
+        :open="playbackQueueOpen"
+        :items="playbackQueue"
+        @close="playbackQueueOpen = false"
+        @clear="playbackQueue = []"
+        @play="playPlaybackQueueItem"
+        @remove="removePlaybackQueueItem"
+        @move="movePlaybackQueueItem"
+      />
+
       <footer
         class="z-30 shrink-0 border-t border-base-300 bg-base-100/95 backdrop-blur"
         :aria-label="t('Playback bar')"
@@ -3131,6 +3268,28 @@ function trackSubtitle(track: LocalTrack) {
             class="col-start-2 row-start-1 flex shrink-0 items-center justify-end gap-1 md:col-start-3 lg:col-start-3 lg:row-start-1"
             data-testid="playback-actions"
           >
+            <div class="tooltip tooltip-top" :data-tip="t('Playback queue')">
+              <button
+                class="btn btn-square btn-ghost btn-sm indicator"
+                :class="{ 'btn-active': playbackQueueOpen }"
+                type="button"
+                :aria-label="t('Playback queue')"
+                :aria-pressed="playbackQueueOpen"
+                :title="t('Playback queue')"
+                data-testid="playback-queue-toggle"
+                @click="playbackQueueOpen = true"
+              >
+                <ListMusic :size="17" aria-hidden="true" />
+                <span
+                  v-if="playbackQueue.length"
+                  class="badge badge-primary badge-xs indicator-item"
+                  aria-hidden="true"
+                >
+                  {{ playbackQueue.length > 99 ? "99+" : playbackQueue.length }}
+                </span>
+              </button>
+            </div>
+
             <div
               class="tooltip tooltip-top"
               :data-tip="desktopLyricsPreferences.enabled ? t('Hide desktop lyrics') : t('Show desktop lyrics')"

@@ -91,6 +91,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   playbackQueue: [queue: LibraryPlaybackQueue, autoplay: boolean];
+  queueTracks: [tracks: LocalTrack[], placement: "next" | "last"];
   addToCollection: [source: LocalCollectionSelection];
   createCollection: [source: LocalCollectionSelection];
   error: [message: string];
@@ -996,6 +997,13 @@ async function copyContextPath() {
 function showProperties() {
   propertiesTrack.value = rowMenu.value?.track ?? null;
   rowMenu.value = null;
+}
+
+function queueContextTrack(placement: "next" | "last") {
+  const track = rowMenu.value?.track;
+  if (!track) return;
+  emit("queueTracks", [track], placement);
+  closeMenus();
 }
 
 async function handleGridKeydown(event: KeyboardEvent) {
@@ -1989,9 +1997,11 @@ defineExpose({
     data-menu-surface
     :aria-label="t('Track actions')"
   >
-      <li><button type="button" :disabled="isCreatingQueue" @click="createPlaybackQueue(rowMenu.trackIndex, true, true)"><Play :size="16" aria-hidden="true" />{{ t("Play selection") }}</button></li>
-      <li><button type="button" :disabled="isCreatingQueue" @click="createPlaybackQueue(rowMenu.trackIndex, false, true)"><ListMusic :size="16" aria-hidden="true" />{{ t("Set playback queue") }}</button></li>
-      <li><button type="button" @click="requestCollectionAction(false)"><ListPlus :size="16" aria-hidden="true" />{{ t("Add selection to Collection") }}</button></li>
+    <li><button type="button" :disabled="isCreatingQueue" @click="createPlaybackQueue(rowMenu.trackIndex, true, true)"><Play :size="16" aria-hidden="true" />{{ t("Play selection") }}</button></li>
+    <li><button type="button" :disabled="isCreatingQueue" @click="createPlaybackQueue(rowMenu.trackIndex, false, true)"><ListMusic :size="16" aria-hidden="true" />{{ t("Set playback queue") }}</button></li>
+    <li><button type="button" @click="queueContextTrack('next')"><ListPlus :size="16" aria-hidden="true" />{{ t("Play next") }}</button></li>
+    <li><button type="button" @click="queueContextTrack('last')"><ListMusic :size="16" aria-hidden="true" />{{ t("Add to queue") }}</button></li>
+    <li><button type="button" @click="requestCollectionAction(false)"><ListPlus :size="16" aria-hidden="true" />{{ t("Add selection to Collection") }}</button></li>
       <li><button type="button" @click="requestCollectionAction(true)"><FolderPlus :size="16" aria-hidden="true" />{{ t("New Collection from selection") }}</button></li>
       <li><button type="button" :disabled="metadataTask?.state === 'running' || metadataTask?.state === 'paused'" @click="requestMetadataLookup"><Tags :size="16" aria-hidden="true" />{{ t("Look up metadata") }}</button></li>
     <li class="my-1 h-px bg-base-300"></li>

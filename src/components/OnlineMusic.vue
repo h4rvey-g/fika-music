@@ -177,6 +177,7 @@ const emit = defineEmits<{
     appendable: boolean,
     loadMore?: () => Promise<OnlineTrack[]>,
   ];
+  queueTracks: [tracks: OnlineTrack[], placement: "next" | "last"];
   openAudioSources: [];
   downloadCompleted: [destination: string];
   togglePlayback: [];
@@ -184,6 +185,10 @@ const emit = defineEmits<{
   addToCollection: [tracks: OnlineTrack[]];
   createCollection: [tracks: OnlineTrack[]];
 }>();
+
+function handleQueueTracks(tracks: OnlineTrack[], placement: "next" | "last") {
+  emit("queueTracks", tracks, placement);
+}
 
 const sections: Array<{ id: OnlineSearchSection; label: string; icon: typeof Music2 }> = [
   { id: "songs", label: "Songs", icon: Music2 },
@@ -2754,6 +2759,7 @@ defineExpose({
           :supports-comments="onlineTrackSupportsComments"
           :is-favorite="isTrackFavorite"
           @play="playTrack($event, detailTracks)"
+          @queue-tracks="handleQueueTracks"
           @download="downloadTrack"
           @download-selection="downloadTracks"
           @favorite="addToFavorites"
@@ -2998,6 +3004,7 @@ defineExpose({
         :supports-comments="onlineTrackSupportsComments"
         :is-favorite="isTrackFavorite"
         @play="requestTrackPlayback($event, visibleRecommendationTracks)"
+        @queue-tracks="handleQueueTracks"
         @download="downloadTrack"
         @download-selection="downloadTracks"
         @favorite="addToFavorites"
@@ -3354,6 +3361,7 @@ defineExpose({
           :supports-comments="onlineTrackSupportsComments"
           :is-favorite="isTrackFavorite"
           @play="requestTrackPlayback($event, sectionItems<OnlineTrack>('songs'))"
+          @queue-tracks="handleQueueTracks"
           @download="downloadTrack"
           @download-selection="downloadTracks"
           @favorite="addToFavorites"
