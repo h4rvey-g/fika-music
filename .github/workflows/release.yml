@@ -348,8 +348,16 @@ jobs:
             "ndk;${ANDROID_NDK_VERSION}"
 
           ndk_home="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
-          echo "NDK_HOME=$ndk_home" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$ndk_home" >> "$GITHUB_ENV"
+          bindgen_sysroot="${ndk_home}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          if [[ ! -d "${bindgen_sysroot}/usr/include" ]]; then
+            echo "::error::Android NDK sysroot not found at ${bindgen_sysroot}"
+            exit 1
+          fi
+          {
+            echo "NDK_HOME=$ndk_home"
+            echo "ANDROID_NDK_HOME=$ndk_home"
+            echo "BINDGEN_EXTRA_CLANG_ARGS=--sysroot=$bindgen_sysroot"
+          } >> "$GITHUB_ENV"
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
