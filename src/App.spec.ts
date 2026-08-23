@@ -46,6 +46,10 @@ const collectionBrowserMocks = vi.hoisted(() => ({
   startCollection: vi.fn(),
 }));
 
+const libraryBrowserMocks = vi.hoisted(() => ({
+  startRandomTrack: vi.fn(async () => undefined),
+}));
+
 const mediaSessionMocks = vi.hoisted(() => ({
   handlers: new Map<string, (() => void) | null>(),
   setActionHandler: vi.fn(),
@@ -100,7 +104,7 @@ vi.mock("./components/LibraryBrowser.vue", () => ({
   default: defineComponent({
     name: "LibraryBrowser",
     emits: ["playbackQueue", "queueTracks", "addToCollection", "createCollection", "summary", "error"],
-    setup(_, { emit }) {
+    setup(_, { emit, expose }) {
       function playSecond() {
         emit(
           "playbackQueue",
@@ -121,6 +125,12 @@ vi.mock("./components/LibraryBrowser.vue", () => ({
           true,
         );
       }
+      expose({
+        refresh: vi.fn(async () => undefined),
+        startFirstTrack: vi.fn(async () => undefined),
+        startRandomTrack: libraryBrowserMocks.startRandomTrack,
+        updatePlayCount: vi.fn(),
+      });
       return { playSecond };
     },
     template: '<button type="button" aria-label="Play Second" @click="playSecond">Library browser</button>',
@@ -553,6 +563,19 @@ describe("application shell", () => {
     expect(collectionBrowserMocks.startCollection).toHaveBeenCalledWith("collection-1");
     expect(tauriMocks.invoke).toHaveBeenCalledWith("local_track_media_source", { trackId: 7 });
     expect(wrapper.get('[data-testid="playback-track-info"]').text()).toContain("First Song");
+    wrapper.unmount();
+  });
+
+  it("starts Local Music from a random track on sidebar double-click", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get('[data-section-id="settings"]').trigger("click");
+
+    await wrapper.get('[data-section-id="local"]').trigger("dblclick");
+    await flushPromises();
+
+    expect(wrapper.get("h1").text()).toBe("Local Music");
+    expect(libraryBrowserMocks.startRandomTrack).toHaveBeenCalledOnce();
     wrapper.unmount();
   });
 

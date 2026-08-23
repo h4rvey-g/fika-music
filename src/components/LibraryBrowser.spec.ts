@@ -440,6 +440,37 @@ describe("LibraryBrowser", () => {
     });
   });
 
+  it("starts a random track after the initial library query is ready", async () => {
+    let resolveQuery!: (page: LibraryQueryPage) => void;
+    const pendingQuery = new Promise<LibraryQueryPage>((resolve) => {
+      resolveQuery = resolve;
+    });
+    const defaultInvoke = tauriMocks.invoke.getMockImplementation();
+    tauriMocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "query_local_library") return pendingQuery;
+      return defaultInvoke?.(command, args);
+    });
+    const random = vi.spyOn(Math, "random").mockReturnValue(0.75);
+    const wrapper = mountLibrary();
+    const browser = wrapper.vm as unknown as { startRandomTrack: () => Promise<void> };
+
+    const playback = browser.startRandomTrack();
+    expect(tauriMocks.invoke).not.toHaveBeenCalledWith(
+      "create_local_library_playback_queue",
+      expect.anything(),
+    );
+    resolveQuery(queryPage());
+    await playback;
+    random.mockRestore();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("create_local_library_playback_queue", {
+      snapshotId: "snapshot-1",
+      startIndex: 1,
+      selection: null,
+    });
+    expect(wrapper.emitted("playbackQueue")?.[0]?.[1]).toBe(true);
+  });
+
   it("selects and plays a complete album group from its header", async () => {
     const wrapper = mountLibrary();
     await flushPromises();

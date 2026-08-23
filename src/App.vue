@@ -180,6 +180,7 @@ import {
 type LibraryBrowserInstance = {
   refresh: () => Promise<void>;
   startFirstTrack: () => Promise<void>;
+  startRandomTrack: () => Promise<void>;
   updatePlayCount: (trackId: number, playCount: number) => void;
 };
 
@@ -415,7 +416,7 @@ let audioSourceSelectionModeGeneration = 0;
 let sourceChangeMessageTimer: ReturnType<typeof setTimeout> | null = null;
 let collectionNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 let playbackQueueSequence = 0;
-let sidebarCollectionPlaybackGeneration = 0;
+let sidebarPlaybackGeneration = 0;
 let dynamicThemeGeneration = 0;
 const desktopLyricsUnlisteners: UnlistenFn[] = [];
 const collectionUnlisteners: UnlistenFn[] = [];
@@ -807,20 +808,28 @@ function selectCollection(collectionId: string) {
 
 async function playCollectionFromSidebar(collection: MusicCollectionSummary) {
   selectCollection(collection.id);
-  const generation = ++sidebarCollectionPlaybackGeneration;
+  const generation = ++sidebarPlaybackGeneration;
   if (!collection.itemCount) {
     showCollectionNotice(t("{name} has no tracks to play.", { name: collection.name }));
     return;
   }
   await nextTick();
   if (
-    generation !== sidebarCollectionPlaybackGeneration
+    generation !== sidebarPlaybackGeneration
     || activeSection.value !== "collection"
     || activeCollectionId.value !== collection.id
   ) {
     return;
   }
   await collectionBrowser.value?.startCollection(collection.id);
+}
+
+async function playLocalMusicFromSidebar() {
+  selectSection("local");
+  const generation = ++sidebarPlaybackGeneration;
+  await nextTick();
+  if (generation !== sidebarPlaybackGeneration || activeSection.value !== "local") return;
+  await libraryBrowser.value?.startRandomTrack();
 }
 
 function locationsMatch(left: AppLocation, right: AppLocation) {
@@ -3527,6 +3536,7 @@ function trackSubtitle(track: LocalTrack) {
                       data-section-id="local"
                       :aria-current="activeSection === 'local' ? 'page' : undefined"
                       @click="selectSection('local')"
+                      @dblclick="playLocalMusicFromSidebar"
                     >
                       <Library :size="18" aria-hidden="true" />
                       <span class="min-w-0 flex-1 truncate">{{ t("Local Music") }}</span>

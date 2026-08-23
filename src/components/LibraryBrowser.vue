@@ -201,6 +201,7 @@ let isPumpingCovers = false;
 let unlistenAlbumArt: (() => void) | null = null;
 let unlistenMetadata: (() => void) | null = null;
 let unlistenLibraryChanged: (() => void) | null = null;
+let libraryInitialization: Promise<void> | null = null;
 
 const rowHeight = 34;
 const albumCoverSize = rowHeight * 2 - 8;
@@ -322,7 +323,8 @@ onMounted(() => {
   window.addEventListener("pointerdown", handleWindowPointerDown);
   window.addEventListener("keydown", handleWindowKeydown);
   void initializeOnlineFeatures();
-  void initializeLibraryUpdates();
+  libraryInitialization = initializeLibraryUpdates();
+  void libraryInitialization;
 });
 
 onBeforeUnmount(() => {
@@ -1192,16 +1194,28 @@ async function setTrackRating(track: LocalTrack, rating: number) {
   }
 }
 
-async function startFirstTrack() {
+async function startTrackAtIndex(startIndex: number) {
   if (!total.value) {
     return;
   }
   clearSelection();
-  selectionRanges.value = [{ start: 0, end: 0 }];
-  selectionAnchor.value = 0;
-  const firstTrack = [...itemsByIndex.value.values()].find((item) => item.trackIndex === 0);
-  focusedVirtualIndex.value = firstTrack?.index ?? null;
-  await createPlaybackQueue(0, true);
+  selectionRanges.value = [{ start: startIndex, end: startIndex }];
+  selectionAnchor.value = startIndex;
+  const selectedTrack = [...itemsByIndex.value.values()]
+    .find((item) => item.trackIndex === startIndex);
+  focusedVirtualIndex.value = selectedTrack?.index ?? null;
+  await createPlaybackQueue(startIndex, true);
+}
+
+async function startFirstTrack() {
+  await libraryInitialization;
+  await startTrackAtIndex(0);
+}
+
+async function startRandomTrack() {
+  await libraryInitialization;
+  if (!total.value) return;
+  await startTrackAtIndex(Math.floor(Math.random() * total.value));
 }
 
 function scheduleVisibleCovers() {
@@ -1600,6 +1614,7 @@ function taskPercent(task: { total: number; processed: number } | null) {
 defineExpose({
   refresh: () => runQuery("background"),
   startFirstTrack,
+  startRandomTrack,
   updatePlayCount,
 });
 </script>
