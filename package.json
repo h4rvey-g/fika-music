@@ -1,7 +1,7 @@
 {
   "name": "fika-music",
   "private": true,
-  "version": "0.2.8",
+  "version": "0.2.9",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -20,6 +20,7 @@
     "@tanstack/vue-query": "^5.101.4",
     "@tanstack/vue-virtual": "^3.13.33",
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-global-shortcut": "^2.3.2",
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",

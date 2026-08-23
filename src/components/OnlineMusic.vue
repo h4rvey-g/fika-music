@@ -82,6 +82,7 @@ import { addNeteasePlaylistTrack, NETEASE_PLUGIN_ID } from "../lib/netease-api";
 import { addKugouPlaylistTrack, KUGOU_PLUGIN_ID } from "../lib/kugou-api";
 import { onlineTrackSupportsComments } from "../lib/online-comment-api";
 import { formatNumber, t } from "../i18n";
+import { shortcutAriaKeys } from "../lib/keyboard-shortcuts";
 
 type SectionState = {
   loading: boolean;
@@ -222,6 +223,7 @@ const recommendationEntries: RecommendationEntry[] = [
 ];
 
 const query = ref("");
+const searchInput = ref<HTMLInputElement | null>(null);
 const workspaceRoot = ref<HTMLElement | null>(null);
 const searchArea = ref<HTMLElement | null>(null);
 const mainScrollViewport = ref<HTMLElement | null>(null);
@@ -685,6 +687,12 @@ function openSuggestions() {
     return;
   }
   suggestionsOpen.value = keyword.length >= 2;
+}
+
+function focusSearch() {
+  searchInput.value?.focus();
+  searchInput.value?.select();
+  openSuggestions();
 }
 
 function handleWindowPointerDown(event: PointerEvent) {
@@ -2453,6 +2461,7 @@ function showHome() {
 defineExpose({
   addToFavorites,
   downloadTrack,
+  focusSearch,
   isDownloadActionPending,
   isTrackActionPending,
   isTrackFavorite,
@@ -2470,12 +2479,14 @@ defineExpose({
           <label class="input input-sm join-item flex min-w-0 flex-1 items-center gap-2">
             <Search :size="16" aria-hidden="true" />
             <input
+              ref="searchInput"
               v-model="query"
               class="min-w-0 grow"
               type="search"
               autocomplete="off"
               :placeholder="t('Search songs, artists, albums, and playlists')"
               :aria-label="t('Search Online Music')"
+              :aria-keyshortcuts="shortcutAriaKeys('focusSearch')"
               @input="onQueryInput"
               @focus="openSuggestions"
               @click="openSuggestions"

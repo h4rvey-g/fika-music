@@ -15,6 +15,7 @@ import {
   Gauge,
   Headphones,
   Heart,
+  Keyboard,
   Library,
   Languages,
   ListMusic,
@@ -39,6 +40,7 @@ import {
   Sparkles,
   Trash2,
   Volume2,
+  VolumeX,
   X,
 } from "@lucide/vue";
 import LibraryBrowser from "./components/LibraryBrowser.vue";
@@ -53,11 +55,13 @@ import PlaybackQueue from "./components/PlaybackQueue.vue";
 import NowPlayingLyricsSettings from "./components/NowPlayingLyricsSettings.vue";
 import DesktopLyricsSettings from "./components/DesktopLyricsSettings.vue";
 import AppUpdateSettings from "./components/AppUpdateSettings.vue";
+import SystemShortcutSettings from "./components/SystemShortcutSettings.vue";
 import OnlineMusic from "./components/OnlineMusic.vue";
 import OnlineMusicSettingsPanel from "./components/OnlineMusicSettings.vue";
 import fikaLogoUrl from "../src-tauri/icons/fika.svg";
 import { useLibraryScan } from "./composables/use-library-scan";
 import { useAppUpdater } from "./composables/use-app-updater";
+import { useGlobalShortcuts } from "./composables/use-global-shortcuts";
 import { useOnlineMusicConfig } from "./composables/use-online-music-config";
 import { NETEASE_PLUGIN_ID } from "./lib/netease-api";
 import { KUGOU_PLUGIN_ID } from "./lib/kugou-api";
@@ -118,6 +122,24 @@ import {
   type PlaybackMode,
   type ThemePreference,
 } from "./lib/ui-preferences";
+import {
+  APP_SHORTCUTS,
+  SHORTCUT_CATEGORIES,
+  isInteractiveShortcutTarget,
+  matchKeyboardShortcut,
+  shortcutAriaKeys,
+  shortcutDisplayBindings,
+  shortcutHint,
+  type AppShortcutId,
+} from "./lib/keyboard-shortcuts";
+import {
+  GLOBAL_SHORTCUT_ACTIONS,
+  captureGlobalShortcut,
+  globalShortcutAriaKeys,
+  globalShortcutDisplayKeys,
+  type GlobalShortcutAction,
+  type GlobalShortcutCaptureError,
+} from "./lib/global-shortcut-preferences";
 import {
   applyCoverTheme,
   clearCoverTheme,
@@ -194,6 +216,7 @@ type CollectionBrowserInstance = {
 type OnlineMusicInstance = {
   addToFavorites: (track: OnlineTrack) => Promise<void>;
   downloadTrack: (track: OnlineTrack) => Promise<void>;
+  focusSearch: () => void;
   isDownloadActionPending: () => boolean;
   isTrackActionPending: (track: OnlineTrack, action: "favorite" | "playlist") => boolean;
   isTrackFavorite: (track: OnlineTrack) => boolean;
@@ -256,6 +279,10 @@ const settingsTabs = [
   { id: "updates", label: "Software update", icon: RefreshCw },
 ] as const;
 const SETTINGS_PANEL_ID = "settings-panel";
+const shortcutGroups = SHORTCUT_CATEGORIES.map((category) => ({
+  category,
+  shortcuts: APP_SHORTCUTS.filter((shortcut) => shortcut.category === category),
+}));
 
 const STREAM_QUALITY_OPTIONS: ReadonlyArray<{ value: SourceQuality; label: string }> = [
   { value: "128k", label: "128 kbps" },
@@ -300,6 +327,12 @@ const libraryScan = useLibraryScan((message) => {
   appError.value = message;
 });
 const appUpdater = useAppUpdater();
+const globalShortcuts = useGlobalShortcuts((action) => {
+  runAppShortcut(action);
+});
+const globalShortcutBindings = globalShortcuts.bindings;
+const globalShortcutErrors = globalShortcuts.errors;
+const applyingGlobalShortcut = globalShortcuts.applyingAction;
 const {
   scanStatus,
   selectedFolder,
@@ -343,6 +376,14 @@ const canSubmitCollectionName = computed(() =>
     || smartCollectionRulesAreComplete(smartCollectionRules.value)),
 );
 const sidebarOpen = ref(false);
+const shortcutHelpOpen = ref(false);
+const shortcutHelpDialog = ref<HTMLDialogElement | null>(null);
+const shortcutHelpCloseButton = ref<HTMLButtonElement | null>(null);
+const recordingGlobalShortcut = ref<GlobalShortcutAction | null>(null);
+const globalShortcutCaptureError = ref<Readonly<{
+  action: GlobalShortcutAction;
+  error: Exclude<GlobalShortcutCaptureError, "modifier-only">;
+}> | null>(null);
 const activeTrack = ref<LocalTrack | null>(null);
 const activeRemoteTitle = ref<string | null>(null);
 const activeOnlineTrack = ref<OnlineTrack | null>(null);
@@ -418,6 +459,8 @@ let collectionNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 let playbackQueueSequence = 0;
 let sidebarPlaybackGeneration = 0;
 let dynamicThemeGeneration = 0;
+let shortcutHelpReturnFocus: HTMLElement | null = null;
+let volumeBeforeMute = savedUiPreferences.volume > 0 ? savedUiPreferences.volume : 0.8;
 const desktopLyricsUnlisteners: UnlistenFn[] = [];
 const collectionUnlisteners: UnlistenFn[] = [];
 const failedOnlineAttempts = new ExpiringCache<string, true>(5 * 60_000, 256);
@@ -477,6 +520,19 @@ const activeOnlinePlaylistPending = computed(() => {
 });
 const activeOnlineDownloadPending = computed(() => onlineMusic.value?.isDownloadActionPending() ?? false);
 const volumePercent = computed(() => Math.round(volume.value * 100));
+const canTogglePlayback = computed(() =>
+  !isPreparingPlayback.value
+  && Boolean(
+    activeTrack.value
+    || activeRemoteTitle.value
+    || queuedLocalTrack.value
+    || collectionQueue.value.length
+    || libraryTrackCount.value,
+  ),
+);
+const configuredGlobalShortcuts = computed(() => GLOBAL_SHORTCUT_ACTIONS.filter(
+  (action) => Boolean(globalShortcutBindings.value[action.id]),
+));
 const currentPlaybackAudioSourceId = computed(() =>
   activeOnlineTrack.value
     ? activeOnlineAudioSourceId.value
@@ -582,7 +638,10 @@ watch(
   ([theme, coverUrl]) => void applyTheme(theme, coverUrl),
   { immediate: true },
 );
-watch(volume, updateVolume);
+watch(volume, (nextVolume) => {
+  if (nextVolume > 0) volumeBeforeMute = nextVolume;
+  updateVolume();
+});
 watch(audioUrl, () => {
   playbackPosition.value = 0;
   playbackDuration.value = 0;
@@ -650,7 +709,9 @@ onMounted(async () => {
   window.addEventListener("mousedown", suppressMouseNavigationDefault);
   window.addEventListener("mouseup", handleMouseNavigation);
   window.addEventListener("auxclick", suppressMouseNavigationDefault);
+  window.addEventListener("keydown", handleAppShortcut);
   setupMediaSessionActions();
+  void globalShortcuts.initialize();
   void appUpdater.initialize();
   await setupDesktopLyricsEvents();
   await setupCollectionEvents();
@@ -678,6 +739,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("mousedown", suppressMouseNavigationDefault);
   window.removeEventListener("mouseup", handleMouseNavigation);
   window.removeEventListener("auxclick", suppressMouseNavigationDefault);
+  window.removeEventListener("keydown", handleAppShortcut);
   clearMediaSessionActions();
   libraryScan.dispose();
   if (sourceChangeMessageTimer) clearTimeout(sourceChangeMessageTimer);
@@ -688,6 +750,7 @@ onBeforeUnmount(() => {
   cancelOnlinePreload();
   for (const unlisten of desktopLyricsUnlisteners) unlisten();
   for (const unlisten of collectionUnlisteners) unlisten();
+  void globalShortcuts.dispose();
   appUpdater.dispose();
   sampleListeningTime();
 });
@@ -716,6 +779,181 @@ function setupMediaSessionActions() {
 function clearMediaSessionActions() {
   setMediaSessionAction("previoustrack", null);
   setMediaSessionAction("nexttrack", null);
+}
+
+function handleAppShortcut(event: KeyboardEvent) {
+  if (recordingGlobalShortcut.value) {
+    handleGlobalShortcutRecording(event);
+    return;
+  }
+  if (event.defaultPrevented || event.isComposing) return;
+  const match = matchKeyboardShortcut(event);
+  if (!match || (event.repeat && !match.shortcut.allowRepeat)) return;
+
+  const openDialog = document.querySelector("dialog[open]");
+  if (openDialog) {
+    if (match.shortcut.id === "showShortcuts" && shortcutHelpOpen.value) {
+      event.preventDefault();
+      closeShortcutHelp();
+    }
+    return;
+  }
+
+  if (!match.binding.allowInInteractive && isInteractiveShortcutTarget(event.target)) {
+    return;
+  }
+  if (!runAppShortcut(match.shortcut.id)) return;
+  event.preventDefault();
+}
+
+function startGlobalShortcutRecording(action: GlobalShortcutAction) {
+  if (!globalShortcuts.available || applyingGlobalShortcut.value) return;
+  if (recordingGlobalShortcut.value === action) {
+    recordingGlobalShortcut.value = null;
+    globalShortcutCaptureError.value = null;
+    return;
+  }
+  recordingGlobalShortcut.value = action;
+  globalShortcutCaptureError.value = null;
+  globalShortcuts.clearError(action);
+}
+
+function handleGlobalShortcutRecording(event: KeyboardEvent) {
+  const action = recordingGlobalShortcut.value;
+  if (!action || event.isComposing) return;
+  event.preventDefault();
+
+  if (event.key === "Escape") {
+    recordingGlobalShortcut.value = null;
+    globalShortcutCaptureError.value = null;
+    return;
+  }
+  if ((event.key === "Backspace" || event.key === "Delete")
+    && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+    recordingGlobalShortcut.value = null;
+    globalShortcutCaptureError.value = null;
+    void globalShortcuts.clearBinding(action);
+    return;
+  }
+
+  const captured = captureGlobalShortcut(event);
+  if (captured.error === "modifier-only") return;
+  if (captured.error) {
+    globalShortcutCaptureError.value = { action, error: captured.error };
+    return;
+  }
+
+  recordingGlobalShortcut.value = null;
+  globalShortcutCaptureError.value = null;
+  void globalShortcuts.setBinding(action, captured.shortcut);
+}
+
+function clearGlobalShortcut(action: GlobalShortcutAction) {
+  if (recordingGlobalShortcut.value === action) {
+    recordingGlobalShortcut.value = null;
+    globalShortcutCaptureError.value = null;
+  }
+  void globalShortcuts.clearBinding(action);
+}
+
+function runAppShortcut(shortcut: AppShortcutId): boolean {
+  switch (shortcut) {
+    case "togglePlayback":
+      if (!canTogglePlayback.value) return false;
+      void togglePlayback();
+      return true;
+    case "previousTrack":
+      if (isPreparingPlayback.value || !canGoPrevious.value) return false;
+      void playPreviousTrack();
+      return true;
+    case "nextTrack":
+      if (isPreparingPlayback.value || !canGoNext.value) return false;
+      void playNextTrack();
+      return true;
+    case "seekBackward":
+      return seekPlaybackBy(-5);
+    case "seekForward":
+      return seekPlaybackBy(5);
+    case "volumeDown":
+      adjustVolume(-0.05);
+      return true;
+    case "volumeUp":
+      adjustVolume(0.05);
+      return true;
+    case "toggleMute":
+      toggleMute();
+      return true;
+    case "focusSearch":
+      void focusOnlineSearch();
+      return true;
+    case "openSettings":
+      selectSection("settings");
+      return true;
+    case "showShortcuts":
+      openShortcutHelp();
+      return true;
+  }
+}
+
+async function focusOnlineSearch() {
+  navigateTo({ section: "online", pluginId: null, collectionId: null });
+  await nextTick();
+  onlineMusic.value?.focusSearch();
+}
+
+function openShortcutHelp() {
+  if (shortcutHelpOpen.value) return;
+  shortcutHelpReturnFocus = document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null;
+  shortcutHelpOpen.value = true;
+  sidebarOpen.value = false;
+  void nextTick(() => shortcutHelpCloseButton.value?.focus());
+}
+
+function closeShortcutHelp() {
+  if (!shortcutHelpOpen.value) return;
+  shortcutHelpOpen.value = false;
+  const returnFocus = shortcutHelpReturnFocus;
+  shortcutHelpReturnFocus = null;
+  void nextTick(() => {
+    if (returnFocus?.isConnected) returnFocus.focus();
+  });
+}
+
+function trapShortcutHelpFocus(event: KeyboardEvent) {
+  const dialog = shortcutHelpDialog.value;
+  if (!dialog) return;
+  const focusable = Array.from(
+    dialog.querySelectorAll<HTMLElement>(
+      "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
+    ),
+  ).filter((element) => element.tabIndex >= 0);
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (!first || !last) return;
+
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function shortcutTitle(label: string, shortcut: AppShortcutId) {
+  return `${label} (${shortcutHint(shortcut)})`;
+}
+
+function appCommandAriaKeys(shortcuts: AppShortcutId | readonly AppShortcutId[]) {
+  const ids = Array.isArray(shortcuts) ? shortcuts : [shortcuts];
+  const systemBindings = ids.flatMap((id) => {
+    const action = GLOBAL_SHORTCUT_ACTIONS.find((candidate) => candidate.id === id);
+    const binding = action ? globalShortcutBindings.value[action.id] : null;
+    return binding ? [globalShortcutAriaKeys(binding)] : [];
+  });
+  return [shortcutAriaKeys(ids), ...systemBindings].join(" ");
 }
 
 async function setupDesktopLyricsEvents() {
@@ -2343,6 +2581,19 @@ function updateVolume() {
   }
 }
 
+function adjustVolume(delta: number) {
+  volume.value = Math.round(Math.min(1, Math.max(0, volume.value + delta)) * 100) / 100;
+}
+
+function toggleMute() {
+  if (volume.value > 0) {
+    volumeBeforeMute = volume.value;
+    volume.value = 0;
+    return;
+  }
+  volume.value = Math.max(0.05, volumeBeforeMute);
+}
+
 async function onAudioEnded() {
   pauseListeningTime();
   isPlaying.value = false;
@@ -2493,6 +2744,12 @@ function seekPlaybackTo(position: number) {
   const nextPosition = Math.min(playbackDuration.value, Math.max(0, position));
   audio.currentTime = nextPosition;
   playbackPosition.value = nextPosition;
+}
+
+function seekPlaybackBy(offset: number) {
+  if (!audioElement.value || playbackDuration.value <= 0) return false;
+  seekPlaybackTo(playbackPosition.value + offset);
+  return true;
 }
 
 function seekPlayback(event: Event) {
@@ -3062,6 +3319,18 @@ function trackSubtitle(track: LocalTrack) {
               </div>
             </section>
 
+            <SystemShortcutSettings
+              v-if="activeSettingsTab === 'playback'"
+              :applying-action="applyingGlobalShortcut"
+              :available="globalShortcuts.available"
+              :bindings="globalShortcutBindings"
+              :capture-error="globalShortcutCaptureError"
+              :errors="globalShortcutErrors"
+              :recording-action="recordingGlobalShortcut"
+              @clear="clearGlobalShortcut"
+              @record="startGlobalShortcutRecording"
+            />
+
             <section
               v-if="activeSettingsTab === 'library'"
               class="overflow-hidden rounded border border-base-300 bg-base-100"
@@ -3212,13 +3481,14 @@ function trackSubtitle(track: LocalTrack) {
                 </button>
               </div>
 
-              <div class="tooltip tooltip-top" :data-tip="t('Previous')">
+              <div class="tooltip tooltip-top" :data-tip="shortcutTitle(t('Previous'), 'previousTrack')">
                 <button
                   class="btn btn-square btn-ghost btn-sm"
                   type="button"
                   :disabled="isPreparingPlayback || !canGoPrevious"
                   :aria-label="t('Previous track')"
-                  :title="t('Previous')"
+                  :aria-keyshortcuts="appCommandAriaKeys('previousTrack')"
+                  :title="shortcutTitle(t('Previous'), 'previousTrack')"
                   @click="playPreviousTrack"
                 >
                   <SkipBack :size="17" aria-hidden="true" />
@@ -3228,9 +3498,10 @@ function trackSubtitle(track: LocalTrack) {
               <button
                 class="btn btn-circle btn-neutral btn-sm mx-0.5 shrink-0"
                 type="button"
-                :disabled="isPreparingPlayback || (!activeTrack && !activeRemoteTitle && !queuedLocalTrack && !collectionQueue.length && !libraryTrackCount)"
+                :disabled="!canTogglePlayback"
                 :aria-label="isPlaying ? t('Pause playback') : t('Play playback')"
-                :title="isPlaying ? t('Pause') : t('Play')"
+                :aria-keyshortcuts="appCommandAriaKeys('togglePlayback')"
+                :title="shortcutTitle(isPlaying ? t('Pause') : t('Play'), 'togglePlayback')"
                 @click="togglePlayback"
               >
                 <RefreshCw v-if="isPreparingPlayback" class="animate-spin" :size="17" aria-hidden="true" />
@@ -3238,13 +3509,14 @@ function trackSubtitle(track: LocalTrack) {
                 <Play v-else :size="17" aria-hidden="true" />
               </button>
 
-              <div class="tooltip tooltip-top" :data-tip="t('Next')">
+              <div class="tooltip tooltip-top" :data-tip="shortcutTitle(t('Next'), 'nextTrack')">
                 <button
                   class="btn btn-square btn-ghost btn-sm"
                   type="button"
                   :disabled="isPreparingPlayback || !canGoNext"
                   :aria-label="t('Next track')"
-                  :title="t('Next')"
+                  :aria-keyshortcuts="appCommandAriaKeys('nextTrack')"
+                  :title="shortcutTitle(t('Next'), 'nextTrack')"
                   @click="playNextTrack"
                 >
                   <SkipForward :size="17" aria-hidden="true" />
@@ -3265,6 +3537,7 @@ function trackSubtitle(track: LocalTrack) {
                 :value="playbackPosition"
                 :disabled="!audioUrl || playbackDuration <= 0"
                 :aria-label="t('Seek playback')"
+                :aria-keyshortcuts="appCommandAriaKeys(['seekBackward', 'seekForward'])"
                 :aria-valuetext="t('{position} of {duration}', { position: formatPlaybackTime(playbackPosition), duration: formatPlaybackTime(playbackDuration) })"
                 @input="seekPlayback"
               />
@@ -3343,11 +3616,14 @@ function trackSubtitle(track: LocalTrack) {
               <button
                 class="btn btn-square btn-ghost btn-sm"
                 type="button"
-                :aria-label="t('Volume')"
+                :aria-label="volume > 0 ? t('Mute') : t('Unmute')"
+                :aria-keyshortcuts="appCommandAriaKeys('toggleMute')"
                 :aria-valuetext="`${volumePercent}%`"
-                :title="t('Volume')"
+                :title="shortcutTitle(volume > 0 ? t('Mute') : t('Unmute'), 'toggleMute')"
+                @click="toggleMute"
               >
-                <Volume2 :size="17" aria-hidden="true" />
+                <VolumeX v-if="volume === 0" :size="17" aria-hidden="true" />
+                <Volume2 v-else :size="17" aria-hidden="true" />
               </button>
               <div
                 class="absolute bottom-full left-1/2 z-50 hidden -translate-x-1/2 flex-col pb-2 group-hover:flex group-focus-within:flex"
@@ -3363,6 +3639,7 @@ function trackSubtitle(track: LocalTrack) {
                     max="1"
                     step="0.01"
                     :aria-label="t('Volume')"
+                    :aria-keyshortcuts="appCommandAriaKeys(['volumeDown', 'volumeUp'])"
                     :aria-valuetext="`${volumePercent}%`"
                     @input="updateVolume"
                   />
@@ -3647,10 +3924,24 @@ function trackSubtitle(track: LocalTrack) {
                 data-section-id="settings"
                 :class="{ 'menu-active': activeSection === settingsSection.id }"
                 :aria-current="activeSection === settingsSection.id ? 'page' : undefined"
+                :aria-keyshortcuts="appCommandAriaKeys('openSettings')"
+                :title="shortcutTitle(t('Settings'), 'openSettings')"
                 @click="selectSection(settingsSection.id)"
               >
                 <Settings :size="18" aria-hidden="true" />
                 <span>{{ t(settingsSection.label) }}</span>
+              </button>
+            </li>
+            <li>
+              <button
+                type="button"
+                :aria-keyshortcuts="appCommandAriaKeys('showShortcuts')"
+                :title="shortcutTitle(t('Keyboard shortcuts'), 'showShortcuts')"
+                @click="openShortcutHelp"
+              >
+                <Keyboard :size="18" aria-hidden="true" />
+                <span>{{ t("Keyboard shortcuts") }}</span>
+                <kbd class="kbd kbd-xs ml-auto">{{ shortcutHint("showShortcuts") }}</kbd>
               </button>
             </li>
           </ul>
@@ -3660,6 +3951,102 @@ function trackSubtitle(track: LocalTrack) {
     </div>
 
     <Teleport to="body">
+      <dialog
+        v-if="shortcutHelpOpen"
+        ref="shortcutHelpDialog"
+        open
+        tabindex="0"
+        class="modal"
+        aria-modal="true"
+        aria-labelledby="keyboard-shortcuts-title"
+        data-testid="keyboard-shortcuts-dialog"
+        @cancel.prevent="closeShortcutHelp"
+        @keydown.tab="trapShortcutHelpFocus"
+      >
+        <div class="modal-box max-w-xl rounded p-0">
+          <div class="flex items-center gap-3 border-b border-base-300 px-5 py-4">
+            <Keyboard :size="19" aria-hidden="true" />
+            <h2 id="keyboard-shortcuts-title" class="min-w-0 flex-1 text-base font-semibold">
+              {{ t("Keyboard shortcuts") }}
+            </h2>
+            <button
+              ref="shortcutHelpCloseButton"
+              class="btn btn-square btn-ghost btn-sm"
+              type="button"
+              :aria-label="t('Close keyboard shortcuts')"
+              :title="t('Close')"
+              @click="closeShortcutHelp"
+            >
+              <X :size="17" aria-hidden="true" />
+            </button>
+          </div>
+
+          <div class="max-h-[min(70vh,36rem)] overflow-y-auto px-5 py-2">
+            <section
+              v-for="group in shortcutGroups"
+              :key="group.category"
+              class="py-3"
+            >
+              <h3 class="mb-1 text-xs font-semibold uppercase text-muted">
+                {{ t(group.category) }}
+              </h3>
+              <ul class="divide-y divide-base-300">
+                <li
+                  v-for="shortcut in group.shortcuts"
+                  :key="shortcut.id"
+                  class="flex min-h-11 items-center justify-between gap-4 py-2"
+                >
+                  <span class="min-w-0 text-sm">{{ t(shortcut.label) }}</span>
+                  <span class="flex shrink-0 items-center gap-1">
+                    <template
+                      v-for="(binding, bindingIndex) in shortcutDisplayBindings(shortcut.id)"
+                      :key="`${shortcut.id}-${bindingIndex}`"
+                    >
+                      <span v-if="bindingIndex > 0" class="px-1 text-xs text-muted">
+                        {{ t("or") }}
+                      </span>
+                      <span class="flex items-center gap-1">
+                        <template v-for="(key, keyIndex) in binding" :key="`${key}-${keyIndex}`">
+                          <span v-if="keyIndex > 0" class="text-xs text-muted" aria-hidden="true">+</span>
+                          <kbd class="kbd kbd-sm">{{ key }}</kbd>
+                        </template>
+                      </span>
+                    </template>
+                  </span>
+                </li>
+              </ul>
+            </section>
+
+            <section v-if="configuredGlobalShortcuts.length" class="py-3">
+              <h3 class="mb-1 text-xs font-semibold uppercase text-muted">
+                {{ t("System-wide") }}
+              </h3>
+              <ul class="divide-y divide-base-300">
+                <li
+                  v-for="action in configuredGlobalShortcuts"
+                  :key="`system-${action.id}`"
+                  class="flex min-h-11 items-center justify-between gap-4 py-2"
+                >
+                  <span class="min-w-0 text-sm">{{ t(action.label) }}</span>
+                  <span class="flex shrink-0 items-center gap-1">
+                    <template
+                      v-for="(key, index) in globalShortcutDisplayKeys(globalShortcutBindings[action.id]!)"
+                      :key="`system-${action.id}-${key}-${index}`"
+                    >
+                      <span v-if="index > 0" class="text-xs text-muted" aria-hidden="true">+</span>
+                      <kbd class="kbd kbd-sm">{{ key }}</kbd>
+                    </template>
+                  </span>
+                </li>
+              </ul>
+            </section>
+          </div>
+        </div>
+        <form method="dialog" class="modal-backdrop" @submit.prevent="closeShortcutHelp">
+          <button type="submit" tabindex="-1">{{ t("Close") }}</button>
+        </form>
+      </dialog>
+
       <div
         v-if="localMusicContextMenu || collectionContextMenu"
         class="fixed inset-0 z-50"
