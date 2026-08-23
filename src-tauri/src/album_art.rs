@@ -2176,6 +2176,7 @@ mod tests {
             modified_at: None,
             indexed_at: 1,
             play_count: 0,
+            rating: 0,
         }
     }
 

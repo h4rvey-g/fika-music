@@ -182,6 +182,9 @@ describe("LibraryBrowser", () => {
           track: tracks[0],
         });
       }
+      if (command === "set_local_track_rating") {
+        return Promise.resolve(args?.rating);
+      }
       return Promise.resolve(null);
     });
   });
@@ -212,9 +215,25 @@ describe("LibraryBrowser", () => {
       "Artist",
       "#",
       "Time",
+      "Rating",
       "Plays",
     ]);
     expect(wrapper.text()).toContain("2 tracks");
+  });
+
+  it("persists a rating selected from the rating column", async () => {
+    const wrapper = mountLibrary();
+    await flushPromises();
+
+    await wrapper.get('input[name="library-rating-1"][value="4"]').setValue(true);
+    await flushPromises();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("set_local_track_rating", {
+      trackId: 1,
+      rating: 4,
+    });
+    expect(wrapper.get('input[name="library-rating-1"][value="4"]').attributes("checked"))
+      .toBeDefined();
   });
 
   it("centers the active track when the virtual list is entered", async () => {

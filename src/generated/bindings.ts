@@ -56,7 +56,7 @@ export type LibrarySelectionRequest = { selectAll: boolean, ranges: Array<Librar
 
 export type LibrarySortDirection = "ascending" | "descending";
 
-export type LibrarySortField = "relevance" | "title" | "artist" | "album" | "albumArtist" | "genre" | "year" | "codec" | "bitrateKbps" | "sampleRateHz" | "durationSeconds" | "trackNumber" | "discNumber" | "fileName" | "filePath" | "fileSizeBytes" | "modifiedAt" | "indexedAt" | "playCount";
+export type LibrarySortField = "relevance" | "title" | "artist" | "album" | "albumArtist" | "genre" | "year" | "codec" | "bitrateKbps" | "sampleRateHz" | "durationSeconds" | "trackNumber" | "discNumber" | "fileName" | "filePath" | "fileSizeBytes" | "modifiedAt" | "indexedAt" | "playCount" | "rating";
 
 export type LibraryTaskState = "idle" | "running" | "paused" | "completed";
 
@@ -68,7 +68,7 @@ export type LibraryViewItemKind = "albumHeader" | "albumContinuation" | "track";
 
 export type LibraryViewRange = { snapshotId: string, offset: number, items: Array<LibraryViewItem>, };
 
-export type LocalTrack = { id: number, filePath: string, fileName: string, title: string, artist: string | null, album: string | null, albumArtist: string | null, genre: string | null, year: number | null, codec: string | null, bitrateKbps: number | null, sampleRateHz: number | null, durationSeconds: number | null, trackNumber: number | null, discNumber: number | null, fileSizeBytes: number, modifiedAt: number | null, indexedAt: number, playCount: number, };
+export type LocalTrack = { id: number, filePath: string, fileName: string, title: string, artist: string | null, album: string | null, albumArtist: string | null, genre: string | null, year: number | null, codec: string | null, bitrateKbps: number | null, sampleRateHz: number | null, durationSeconds: number | null, trackNumber: number | null, discNumber: number | null, fileSizeBytes: number, modifiedAt: number | null, indexedAt: number, playCount: number, rating: number, };
 
 export type LocalTrackPlaybackDetails = { coverDataUrl: string | null, lyrics: ResolvedLyrics | null, lyricsError: string | null, };
 
@@ -192,7 +192,7 @@ export type ScanProgressEvent = { status: ScanStatus, message: string | null, };
 
 export type ScanStatus = { isRunning: boolean, folderPath: string | null, discoveredFiles: number, scannedFiles: number, indexedTracks: number, skippedFiles: number, errorCount: number, lastError: string | null, startedAt: number | null, finishedAt: number | null, };
 
-export type SmartCollectionField = "title" | "artist" | "album" | "albumArtist" | "genre" | "year" | "codec" | "bitrateKbps" | "sampleRateHz" | "durationSeconds" | "trackNumber" | "discNumber" | "fileName" | "filePath" | "fileSizeBytes" | "modifiedAt" | "indexedAt" | "playCount";
+export type SmartCollectionField = "title" | "artist" | "album" | "albumArtist" | "genre" | "year" | "codec" | "bitrateKbps" | "sampleRateHz" | "durationSeconds" | "trackNumber" | "discNumber" | "fileName" | "filePath" | "fileSizeBytes" | "modifiedAt" | "indexedAt" | "playCount" | "rating";
 
 export type SmartCollectionOperator = "equals" | "notEquals" | "contains" | "doesNotContain" | "greaterThan" | "greaterThanOrEqual" | "lessThan" | "lessThanOrEqual" | "matchesRegex" | "doesNotMatchRegex";
 
@@ -296,6 +296,7 @@ export const TAURI_COMMANDS = {
   createLocalLibraryPlaybackQueue: "create_local_library_playback_queue",
   localLibraryQueueTrack: "local_library_queue_track",
   incrementLocalTrackPlayCount: "increment_local_track_play_count",
+  setLocalTrackRating: "set_local_track_rating",
   localTrackMediaSource: "local_track_media_source",
   localTrackPlaybackDetails: "local_track_playback_details",
   resolveRemoteTrackLyrics: "resolve_remote_track_lyrics",

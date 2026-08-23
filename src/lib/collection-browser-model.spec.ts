@@ -82,4 +82,24 @@ describe("Collection browser model", () => {
 
     expect(groups[0].tracks.map((track) => track.item.id)).toEqual(["first", "second"]);
   });
+
+  it("sorts rated local tracks while keeping unrated online tracks last", () => {
+    const groups = buildCollectionAlbumGroups(
+      [
+        localItem("two-stars", 0, { album: "Shared", rating: 2 }),
+        onlineItem("online", 1, { album: "Shared" }),
+        localItem("five-stars", 2, { album: "Shared", rating: 5 }),
+      ],
+      "",
+      ["title"],
+      "rating",
+      "descending",
+    );
+
+    expect(groups[0].tracks.map((track) => track.item.id)).toEqual([
+      "five-stars",
+      "two-stars",
+      "online",
+    ]);
+  });
 });

@@ -68,6 +68,7 @@ import {
   writeCollectionDragPayload,
   type LocalCollectionSelection,
 } from "../lib/collection-api";
+import TrackRating from "./TrackRating.vue";
 
 type ColumnDefinition = {
   id: LibraryColumnId;
@@ -118,6 +119,7 @@ const columnDefinitions: ReadonlyArray<ColumnDefinition> = [
   { id: "modifiedAt", label: "Modified", sortField: "modifiedAt" },
   { id: "indexedAt", label: "Indexed", sortField: "indexedAt" },
   { id: "playCount", label: "Plays", sortField: "playCount", numeric: true },
+  { id: "rating", label: "Rating", sortField: "rating", numeric: true },
 ];
 
 const searchFieldOptions: ReadonlyArray<{ id: LibraryTextField; label: string }> = [
@@ -171,6 +173,7 @@ const queueStatus = ref<string | null>(null);
 const isCreatingQueue = ref(false);
 const draggedColumn = ref<LibraryColumnId | null>(null);
 const resizing = ref<{ id: LibraryColumnId; startX: number; startWidth: number } | null>(null);
+const pendingRatingIds = ref(new Set<number>());
 
 const albumArtSettings = ref<AlbumArtSettings>({ networkEnabled: false });
 const albumCovers = shallowRef(new Map<string, AlbumCoverResult>());
@@ -1150,6 +1153,45 @@ function updatePlayCount(trackId: number, playCount: number) {
   itemsByIndex.value = next;
 }
 
+function updateRating(trackId: number, rating: number) {
+  const next = new Map(itemsByIndex.value);
+  for (const [index, item] of next) {
+    if (item.track?.id === trackId) {
+      next.set(index, { ...item, track: { ...item.track, rating } });
+    }
+  }
+  itemsByIndex.value = next;
+  if (propertiesTrack.value?.id === trackId) {
+    propertiesTrack.value = { ...propertiesTrack.value, rating };
+  }
+}
+
+function setRatingPending(trackId: number, pending: boolean) {
+  const next = new Set(pendingRatingIds.value);
+  if (pending) next.add(trackId);
+  else next.delete(trackId);
+  pendingRatingIds.value = next;
+}
+
+async function setTrackRating(track: LocalTrack, rating: number) {
+  if (pendingRatingIds.value.has(track.id) || rating === track.rating) return;
+  const previousRating = track.rating;
+  setRatingPending(track.id, true);
+  updateRating(track.id, rating);
+  try {
+    const savedRating = await invoke<number>(TAURI_COMMANDS.setLocalTrackRating, {
+      trackId: track.id,
+      rating,
+    });
+    updateRating(track.id, savedRating);
+  } catch (error) {
+    updateRating(track.id, previousRating);
+    emit("error", normalizeError(error));
+  } finally {
+    setRatingPending(track.id, false);
+  }
+}
+
 async function startFirstTrack() {
   if (!total.value) {
     return;
@@ -1435,6 +1477,9 @@ function displayValue(track: LocalTrack, columnId: LibraryColumnId) {
     case "modifiedAt": return formatTimestamp(track.modifiedAt);
     case "indexedAt": return formatTimestamp(track.indexedAt);
     case "playCount": return formatNumber(track.playCount);
+    case "rating": return track.rating > 0
+      ? t("{count} stars", { count: track.rating })
+      : t("Unrated");
     default: return "";
   }
 }
@@ -1963,6 +2008,14 @@ defineExpose({
                   :aria-label="t('Paused')"
                 />
               </template>
+              <TrackRating
+                v-else-if="column.id === 'rating'"
+                :rating="row.item.track.rating"
+                :name="`library-rating-${row.item.track.id}`"
+                :title="row.item.track.title"
+                :disabled="pendingRatingIds.has(row.item.track.id)"
+                @change="setTrackRating(row.item.track, $event)"
+              />
               <span v-else class="truncate">{{ displayValue(row.item.track, column.id) }}</span>
             </div>
           </div>
@@ -2126,6 +2179,7 @@ defineExpose({
             [t('Format'), [propertiesTrack.codec, propertiesTrack.bitrateKbps ? `${propertiesTrack.bitrateKbps} kbps` : '', propertiesTrack.sampleRateHz ? formatSampleRate(propertiesTrack.sampleRateHz) : ''].filter(Boolean).join(' · ')],
             [t('File size'), formatFileSize(propertiesTrack.fileSizeBytes)],
             [t('Play count'), formatNumber(propertiesTrack.playCount)],
+            [t('Rating'), propertiesTrack.rating > 0 ? t('{count} stars', { count: propertiesTrack.rating }) : t('Unrated')],
           ]"
           :key="entry[0]"
         >

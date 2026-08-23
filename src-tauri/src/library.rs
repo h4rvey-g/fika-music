@@ -59,6 +59,7 @@ pub enum LibrarySortField {
     ModifiedAt,
     IndexedAt,
     PlayCount,
+    Rating,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -690,6 +691,12 @@ impl LibraryService {
         }
     }
 
+    pub fn update_rating(&mut self, track_id: i64, rating: i64) {
+        if let Some(index) = self.track_by_id.get(&track_id).copied() {
+            self.tracks[index].track.rating = rating;
+        }
+    }
+
     pub fn album_target(&self, group_id: &str) -> Result<LibraryAlbumTarget, LibraryError> {
         let album = self
             .albums
@@ -1083,6 +1090,7 @@ fn field_order(
         }
         LibrarySortField::IndexedAt => left.track.indexed_at.cmp(&right.track.indexed_at),
         LibrarySortField::PlayCount => left.track.play_count.cmp(&right.track.play_count),
+        LibrarySortField::Rating => left.track.rating.cmp(&right.track.rating),
         LibrarySortField::Relevance => Ordering::Equal,
     };
     match direction {
@@ -1396,6 +1404,7 @@ mod tests {
             modified_at: Some(1),
             indexed_at: 1,
             play_count: 0,
+            rating: 0,
         }
     }
 

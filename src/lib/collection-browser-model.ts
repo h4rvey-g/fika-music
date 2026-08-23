@@ -34,6 +34,7 @@ export type CollectionTrackView = {
   modifiedAt: number | null;
   indexedAt: number | null;
   playCount: number | null;
+  rating: number | null;
   coverUrl: string | null;
 };
 
@@ -70,6 +71,7 @@ export const COLLECTION_COLUMN_DEFINITIONS: ReadonlyArray<CollectionColumnDefini
   { id: "modifiedAt", label: "Modified", sortField: "modifiedAt" },
   { id: "indexedAt", label: "Indexed", sortField: "indexedAt" },
   { id: "playCount", label: "Plays", sortField: "playCount", numeric: true },
+  { id: "rating", label: "Rating", sortField: "rating", numeric: true },
 ];
 
 export const COLLECTION_SEARCH_FIELD_OPTIONS: ReadonlyArray<{
@@ -136,8 +138,9 @@ export function buildCollectionAlbumGroups(
     const order = compareOptional(
       sortValue(left.tracks[0], sortField),
       sortValue(right.tracks[0], sortField),
+      direction,
     );
-    return order * direction || minimumPosition(left) - minimumPosition(right);
+    return order || minimumPosition(left) - minimumPosition(right);
   });
   return groups;
 }
@@ -165,6 +168,7 @@ export function collectionTrackView(item: MusicCollectionItem): CollectionTrackV
       modifiedAt: track.modifiedAt,
       indexedAt: track.indexedAt,
       playCount: track.playCount,
+      rating: track.rating,
       coverUrl: null,
     };
   }
@@ -189,6 +193,7 @@ export function collectionTrackView(item: MusicCollectionItem): CollectionTrackV
     modifiedAt: null,
     indexedAt: null,
     playCount: null,
+    rating: null,
     coverUrl: track?.coverUrl ?? null,
   };
 }
@@ -216,6 +221,11 @@ export function displayCollectionTrackValue(
     case "modifiedAt": return formatTimestamp(track.modifiedAt);
     case "indexedAt": return formatTimestamp(track.indexedAt);
     case "playCount": return track.playCount === null ? "" : formatNumber(track.playCount);
+    case "rating": return track.rating === null
+      ? ""
+      : track.rating > 0
+        ? t("{count} stars", { count: track.rating })
+        : t("Unrated");
     default: return "";
   }
 }
@@ -271,8 +281,12 @@ function collectionTrackOrder(
   direction: number,
 ) {
   if (sortField !== "relevance") {
-    const explicit = compareOptional(sortValue(left, sortField), sortValue(right, sortField));
-    if (explicit) return explicit * direction;
+    const explicit = compareOptional(
+      sortValue(left, sortField),
+      sortValue(right, sortField),
+      direction,
+    );
+    if (explicit) return explicit;
   }
   return compareOptional(left.discNumber, right.discNumber)
     || compareOptional(left.trackNumber, right.trackNumber)
@@ -299,6 +313,7 @@ function sortValue(track: CollectionTrackView, field: LibrarySortField): string 
     case "modifiedAt": return track.modifiedAt;
     case "indexedAt": return track.indexedAt;
     case "playCount": return track.playCount;
+    case "rating": return track.rating;
     case "relevance": return track.item.position;
   }
 }
@@ -306,6 +321,7 @@ function sortValue(track: CollectionTrackView, field: LibrarySortField): string 
 function compareOptional(
   left: string | number | null,
   right: string | number | null,
+  direction = 1,
 ) {
   const leftMissing = left === null || left === "";
   const rightMissing = right === null || right === "";
@@ -313,9 +329,10 @@ function compareOptional(
     if (leftMissing && rightMissing) return 0;
     return leftMissing ? 1 : -1;
   }
-  return typeof left === "number" && typeof right === "number"
+  const order = typeof left === "number" && typeof right === "number"
     ? left - right
     : String(left).localeCompare(String(right));
+  return order * direction;
 }
 
 function minimumPosition(group: CollectionAlbumGroup) {

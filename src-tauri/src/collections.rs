@@ -57,6 +57,7 @@ pub enum SmartCollectionField {
     ModifiedAt,
     IndexedAt,
     PlayCount,
+    Rating,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -232,7 +233,8 @@ const LOCAL_TRACK_BY_ID_SQL: &str = "
         file_size_bytes,
         modified_at,
         indexed_at,
-        play_count
+        play_count,
+        rating
     FROM local_tracks
     WHERE id = ?1
 ";
@@ -970,6 +972,7 @@ impl SmartCollectionField {
                 | Self::ModifiedAt
                 | Self::IndexedAt
                 | Self::PlayCount
+                | Self::Rating
         )
     }
 
@@ -999,6 +1002,7 @@ impl SmartCollectionField {
             Self::ModifiedAt => track.modified_at,
             Self::IndexedAt => Some(track.indexed_at),
             Self::PlayCount => Some(track.play_count),
+            Self::Rating => Some(track.rating),
             _ => None,
         }
     }
@@ -1301,6 +1305,41 @@ mod tests {
                 listed[0].item_count,
             ),
             (0, 1, 1),
+        );
+    }
+
+    #[test]
+    fn smart_collection_should_filter_tracks_by_rating() {
+        let mut connection = test_connection();
+        let favorite =
+            insert_tagged_track(&connection, "favorite.flac", "Favorite", "Artist", 2024);
+        let other = insert_tagged_track(&connection, "other.flac", "Other", "Artist", 2024);
+        connection
+            .execute(
+                "UPDATE local_tracks SET rating = 5 WHERE id = ?1",
+                [favorite],
+            )
+            .expect("rating should update");
+        connection
+            .execute("UPDATE local_tracks SET rating = 3 WHERE id = ?1", [other])
+            .expect("rating should update");
+        let collection = create_collection(
+            &mut connection,
+            "Highly rated",
+            Some(smart_rules(vec![SmartCollectionRule {
+                field: SmartCollectionField::Rating,
+                operator: SmartCollectionOperator::GreaterThanOrEqual,
+                value: "4".to_owned(),
+            }])),
+        )
+        .expect("smart collection should be created");
+
+        let detail = collection_detail(&connection, &collection.id)
+            .expect("smart collection should resolve");
+
+        assert_eq!(
+            detail.items[0].local_track.as_ref().map(|track| track.id),
+            Some(favorite),
         );
     }
 

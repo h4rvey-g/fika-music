@@ -26,6 +26,7 @@ export const SMART_COLLECTION_FIELD_OPTIONS: ReadonlyArray<{
   { value: "modifiedAt", label: "Modified timestamp" },
   { value: "indexedAt", label: "Indexed timestamp" },
   { value: "playCount", label: "Play count" },
+  { value: "rating", label: "Rating" },
 ];
 
 const NUMERIC_FIELDS = new Set<SmartCollectionField>([
@@ -39,6 +40,7 @@ const NUMERIC_FIELDS = new Set<SmartCollectionField>([
   "modifiedAt",
   "indexedAt",
   "playCount",
+  "rating",
 ]);
 
 const TEXT_OPERATORS: ReadonlyArray<SmartCollectionOperator> = [

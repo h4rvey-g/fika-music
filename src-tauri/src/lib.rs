@@ -133,6 +133,7 @@ macro_rules! with_tauri_commands {
             create_local_library_playback_queue,
             local_library_queue_track,
             increment_local_track_play_count,
+            set_local_track_rating,
             local_track_media_source,
             local_track_playback_details,
             resolve_remote_track_lyrics,
@@ -248,6 +249,8 @@ enum AppError {
     ScanAlreadyRunning,
     #[error("local track was not found: {0}")]
     TrackNotFound(i64),
+    #[error("local track rating must be between 0 and 5: {0}")]
+    InvalidTrackRating(i64),
     #[error("local track file is missing: {0}")]
     TrackFileMissing(String),
     #[error("library error: {0}")]
@@ -291,6 +294,7 @@ pub struct LocalTrack {
     modified_at: Option<i64>,
     indexed_at: i64,
     play_count: i64,
+    rating: i64,
 }
 
 #[derive(Debug)]
@@ -5175,6 +5179,48 @@ fn increment_local_track_play_count(
     Ok(play_count)
 }
 
+#[tauri::command]
+fn set_local_track_rating(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    track_id: i64,
+    rating: i64,
+) -> CommandResult<i64> {
+    if !(0..=5).contains(&rating) {
+        return Err(AppError::InvalidTrackRating(rating).to_string());
+    }
+
+    let saved_rating = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| AppError::StatePoisoned("db").to_string())?;
+        db.execute(
+            "UPDATE local_tracks SET rating = ?1 WHERE id = ?2",
+            params![rating, track_id],
+        )
+        .map_err(|error| error.to_string())?;
+        db.query_row(
+            "SELECT rating FROM local_tracks WHERE id = ?1",
+            params![track_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| AppError::TrackNotFound(track_id).to_string())?
+    };
+
+    {
+        let mut library = state
+            .library
+            .lock()
+            .map_err(|_| AppError::StatePoisoned("library").to_string())?;
+        library.update_rating(track_id, saved_rating);
+    }
+    emit_library_changed(&app, 1, 0);
+    Ok(saved_rating)
+}
+
 fn run_library_scan(app: AppHandle, folder: PathBuf, force_reindex: bool) {
     let result = (|| {
         let state = app.state::<AppState>();
@@ -5795,7 +5841,8 @@ fn list_tracks(connection: &Connection) -> rusqlite::Result<Vec<LocalTrack>> {
             file_size_bytes,
             modified_at,
             indexed_at,
-            play_count
+            play_count,
+            rating
         FROM local_tracks
         ORDER BY artist IS NULL, artist COLLATE NOCASE, album IS NULL, album COLLATE NOCASE, track_number IS NULL, track_number, title COLLATE NOCASE
         ",
@@ -5831,7 +5878,8 @@ fn track_by_path(connection: &Connection, file_path: &str) -> AppResult<LocalTra
             file_size_bytes,
             modified_at,
             indexed_at,
-            play_count
+            play_count,
+            rating
         FROM local_tracks
         WHERE file_path = ?1
         ",
@@ -5864,7 +5912,8 @@ fn track_by_id(connection: &Connection, track_id: i64) -> AppResult<Option<Local
             file_size_bytes,
             modified_at,
             indexed_at,
-            play_count
+            play_count,
+            rating
         FROM local_tracks
         WHERE id = ?1
         ",
@@ -5896,6 +5945,7 @@ fn local_track_from_row(row: &Row<'_>) -> rusqlite::Result<LocalTrack> {
         modified_at: row.get(16)?,
         indexed_at: row.get(17)?,
         play_count: row.get(18)?,
+        rating: row.get(19)?,
     })
 }
 
@@ -6712,6 +6762,30 @@ mod tests {
             ),
             (1, "Alpha Revised", Some("Artist B"))
         );
+    }
+
+    #[test]
+    fn upsert_local_track_should_preserve_user_rating() {
+        let connection = initialized_connection();
+        let track = upsert_local_track(
+            &connection,
+            &draft("/library/alpha.mp3", "Alpha", Some("Artist A")),
+        )
+        .expect("track should insert");
+        connection
+            .execute(
+                "UPDATE local_tracks SET rating = 5 WHERE id = ?1",
+                [track.id],
+            )
+            .expect("rating should update");
+
+        let updated = upsert_local_track(
+            &connection,
+            &draft("/library/alpha.mp3", "Alpha Revised", Some("Artist B")),
+        )
+        .expect("track should update");
+
+        assert_eq!(updated.rating, 5);
     }
 
     #[test]

@@ -188,6 +188,7 @@ export function createLocalTrack(overrides: Partial<LocalTrack> = {}): LocalTrac
     modifiedAt: 1,
     indexedAt: 1,
     playCount: 0,
+    rating: 0,
     ...overrides,
   };
 }

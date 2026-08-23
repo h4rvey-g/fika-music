@@ -80,6 +80,7 @@ import type {
   LocalTrack,
   MetadataLookupTaskStatus,
 } from "../generated/bindings";
+import TrackRating from "./TrackRating.vue";
 type MenuPosition = { x: number; y: number };
 type RowMenu = MenuPosition & { track: CollectionTrackView };
 type GroupMenu = MenuPosition & { group: CollectionAlbumGroup };
@@ -126,6 +127,7 @@ const propertiesTrack = ref<LocalTrack | null>(null);
 const queueStatus = ref<string | null>(null);
 const draggedColumn = ref<LibraryColumnId | null>(null);
 const resizing = ref<{ id: LibraryColumnId; startX: number; startWidth: number } | null>(null);
+const pendingRatingIds = ref(new Set<number>());
 const albumArtSettings = ref<AlbumArtSettings>({ networkEnabled: false });
 const albumArtTask = ref<AlbumArtTaskStatus | null>(null);
 const metadataTask = ref<MetadataLookupTaskStatus | null>(null);
@@ -1016,6 +1018,48 @@ function updatePlayCount(trackId: number, playCount: number) {
   };
 }
 
+function updateRating(trackId: number, rating: number) {
+  if (!detail.value) return;
+  detail.value = {
+    ...detail.value,
+    items: detail.value.items.map((item) => item.localTrack?.id === trackId
+      ? { ...item, localTrack: { ...item.localTrack, rating } }
+      : item),
+  };
+  if (propertiesTrack.value?.id === trackId) {
+    propertiesTrack.value = { ...propertiesTrack.value, rating };
+  }
+}
+
+function setRatingPending(trackId: number, pending: boolean) {
+  const next = new Set(pendingRatingIds.value);
+  if (pending) next.add(trackId);
+  else next.delete(trackId);
+  pendingRatingIds.value = next;
+}
+
+async function setTrackRating(track: CollectionTrackView, rating: number) {
+  const localTrack = track.item.localTrack;
+  if (!localTrack || pendingRatingIds.value.has(localTrack.id) || rating === localTrack.rating) {
+    return;
+  }
+  const previousRating = localTrack.rating;
+  setRatingPending(localTrack.id, true);
+  updateRating(localTrack.id, rating);
+  try {
+    const savedRating = await invoke<number>(TAURI_COMMANDS.setLocalTrackRating, {
+      trackId: localTrack.id,
+      rating,
+    });
+    updateRating(localTrack.id, savedRating);
+  } catch (error) {
+    updateRating(localTrack.id, previousRating);
+    emit("error", normalizeError(error));
+  } finally {
+    setRatingPending(localTrack.id, false);
+  }
+}
+
 async function waitForCollection(expectedCollectionId: string) {
   if (componentUnmounted || props.collectionId !== expectedCollectionId) return false;
   const pending = pendingCollectionLoad;
@@ -1466,6 +1510,14 @@ defineExpose({
                 />
                 <span class="truncate">{{ displayValue(track, column.id) }}</span>
               </template>
+              <TrackRating
+                v-else-if="column.id === 'rating' && track.item.localTrack"
+                :rating="track.item.localTrack.rating"
+                :name="`collection-rating-${track.item.localTrack.id}`"
+                :title="track.item.localTrack.title"
+                :disabled="pendingRatingIds.has(track.item.localTrack.id)"
+                @change="setTrackRating(track, $event)"
+              />
               <span v-else class="truncate">{{ displayValue(track, column.id) }}</span>
             </div>
           </div>
@@ -1617,6 +1669,7 @@ defineExpose({
             [t('Format'), [propertiesTrack.codec, propertiesTrack.bitrateKbps ? `${propertiesTrack.bitrateKbps} kbps` : ''].filter(Boolean).join(' / ')],
             [t('File size'), t('{count} bytes', { count: formatNumber(propertiesTrack.fileSizeBytes) })],
             [t('Play count'), formatNumber(propertiesTrack.playCount)],
+            [t('Rating'), propertiesTrack.rating > 0 ? t('{count} stars', { count: propertiesTrack.rating }) : t('Unrated')],
           ]"
           :key="entry[0]"
         >

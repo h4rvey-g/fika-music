@@ -13,6 +13,7 @@ describe("smart collection model", () => {
 
   it("offers comparison operators for numeric fields", () => {
     expect(smartCollectionOperators("year")).toContain("greaterThan");
+    expect(smartCollectionOperators("rating")).toContain("greaterThanOrEqual");
   });
 
   it("resets an incompatible operator when a rule field changes", () => {

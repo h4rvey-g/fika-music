@@ -23,7 +23,8 @@ export type LibraryColumnId =
   | "fileSizeBytes"
   | "modifiedAt"
   | "indexedAt"
-  | "playCount";
+  | "playCount"
+  | "rating";
 
 export type LibraryColumnPreference = {
   id: LibraryColumnId;
@@ -51,6 +52,7 @@ export const LIBRARY_COLUMN_DEFAULTS: ReadonlyArray<LibraryColumnPreference> = [
   { id: "trackNumber", visible: true, width: 56 },
   { id: "year", visible: false, width: 62 },
   { id: "durationSeconds", visible: true, width: 68 },
+  { id: "rating", visible: true, width: 92 },
   { id: "playCount", visible: true, width: 70 },
   { id: "albumArtist", visible: false, width: 180 },
   { id: "genre", visible: false, width: 140 },
@@ -103,6 +105,7 @@ const sortFields = new Set<LibrarySortField>([
   "modifiedAt",
   "indexedAt",
   "playCount",
+  "rating",
 ]);
 
 export function loadLibraryPreferences(

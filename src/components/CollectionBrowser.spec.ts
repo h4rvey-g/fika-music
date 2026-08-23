@@ -75,7 +75,7 @@ function mountCollection() {
 describe("CollectionBrowser", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    tauriMocks.invoke.mockImplementation((command: string) => {
+    tauriMocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "get_music_collection") return Promise.resolve(detail);
       if (command === "get_album_art_settings") {
         return Promise.resolve({ networkEnabled: true });
@@ -103,6 +103,7 @@ describe("CollectionBrowser", () => {
         };
         return Promise.resolve(mutation);
       }
+      if (command === "set_local_track_rating") return Promise.resolve(args?.rating);
       return Promise.resolve(null);
     });
   });
@@ -119,9 +120,23 @@ describe("CollectionBrowser", () => {
       expect.stringContaining("Online Song"),
     ]);
     expect(wrapper.findAll("[data-album-row]")).toHaveLength(1);
+    expect(wrapper.findAll('[role="radiogroup"]')).toHaveLength(1);
 
     await wrapper.get('[data-collection-item-id="item-online"]').trigger("dblclick");
     expect(wrapper.emitted("play")?.[0]).toEqual([detail.items, 1, true]);
+  });
+
+  it("persists ratings for local Collection tracks", async () => {
+    const wrapper = mountCollection();
+    await flushPromises();
+
+    await wrapper.get('input[name="collection-rating-1"][value="5"]').setValue(true);
+    await flushPromises();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("set_local_track_rating", {
+      trackId: 1,
+      rating: 5,
+    });
   });
 
   it("waits for its in-flight load and starts the full Collection", async () => {

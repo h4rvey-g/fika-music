@@ -3,7 +3,7 @@ use rusqlite_migration::{Migrations, M};
 use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
-const CURRENT_SCHEMA_VERSION: i64 = 12;
+const CURRENT_SCHEMA_VERSION: i64 = 13;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CredentialStoreError {
@@ -363,6 +363,15 @@ fn migrations() -> Migrations<'static> {
             add_column_if_missing(transaction, "music_collections", "smart_rules_json", "TEXT")?;
             Ok(())
         }),
+        M::up_with_hook("", |transaction| {
+            add_column_if_missing(
+                transaction,
+                "local_tracks",
+                "rating",
+                "INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5)",
+            )?;
+            Ok(())
+        }),
     ])
 }
 
@@ -447,6 +456,7 @@ mod tests {
         assert_eq!(user_version(&connection), CURRENT_SCHEMA_VERSION);
         assert!(has_manifest_fingerprint(&connection));
         assert!(has_library_column(&connection, "play_count"));
+        assert!(has_library_column(&connection, "rating"));
         assert!(has_library_column(&connection, "metadata_version"));
         assert!(has_table(&connection, "app_settings"));
         assert!(has_table(&connection, "album_art_lookups"));
@@ -469,6 +479,21 @@ mod tests {
             "album_art_lookups",
             "failed_tracks"
         ));
+    }
+
+    #[test]
+    fn rating_column_should_reject_values_above_five() {
+        let mut connection = Connection::open_in_memory().expect("database should open");
+        initialize(&mut connection).expect("migrations should run");
+
+        let result = connection.execute(
+            "INSERT INTO local_tracks (
+                file_path, file_name, title, file_size_bytes, indexed_at, rating
+             ) VALUES ('/music/invalid.mp3', 'invalid.mp3', 'Invalid', 1, 1, 6)",
+            [],
+        );
+
+        assert!(result.is_err(), "an out-of-range rating should be rejected");
     }
 
     #[test]

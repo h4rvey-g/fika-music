@@ -1003,6 +1003,7 @@ function smartCollectionValuePlaceholder(rule: SmartCollectionRule) {
   if (rule.operator === "matchesRegex" || rule.operator === "doesNotMatchRegex") {
     return t("Regular expression");
   }
+  if (rule.field === "rating") return "5";
   return isNumericSmartCollectionField(rule.field) ? "2000" : t("Value");
 }
 
@@ -3836,6 +3837,8 @@ function trackSubtitle(track: LocalTrack) {
                     class="input input-sm w-full"
                     :type="isNumericSmartCollectionField(rule.field) ? 'number' : 'text'"
                     :step="isNumericSmartCollectionField(rule.field) ? 1 : undefined"
+                    :min="rule.field === 'rating' ? 0 : undefined"
+                    :max="rule.field === 'rating' ? 5 : undefined"
                     maxlength="512"
                     autocomplete="off"
                     :placeholder="smartCollectionValuePlaceholder(rule)"
