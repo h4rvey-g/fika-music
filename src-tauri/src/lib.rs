@@ -4077,6 +4077,13 @@ fn clear_chksz_api_key(state: State<'_, AppState>) -> Result<(), AudioSourceComm
 }
 
 #[tauri::command]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+async fn select_audio_source_file() -> Result<Option<String>, AudioSourceCommandError> {
+    Ok(None)
+}
+
+#[tauri::command]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn select_audio_source_file() -> Result<Option<String>, AudioSourceCommandError> {
     let file = rfd::AsyncFileDialog::new()
         .set_title("Choose an audio source")
@@ -4471,6 +4478,13 @@ fn list_plugins(state: State<'_, AppState>) -> Result<Vec<PluginRecord>, PluginC
 }
 
 #[tauri::command]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+async fn select_plugin_package() -> Result<Option<String>, PluginCommandError> {
+    Ok(None)
+}
+
+#[tauri::command]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn select_plugin_package() -> Result<Option<String>, PluginCommandError> {
     let folder = rfd::AsyncFileDialog::new()
         .set_title("Choose a Plugin package")
@@ -4660,6 +4674,13 @@ where
 }
 
 #[tauri::command]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+async fn select_music_folder() -> CommandResult<Option<String>> {
+    Ok(None)
+}
+
+#[tauri::command]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn select_music_folder() -> CommandResult<Option<String>> {
     let folder = rfd::AsyncFileDialog::new()
         .set_title("Choose a music folder")

@@ -31,7 +31,6 @@ lofty = "0.24.0"
 walkdir = "2.5.0"
 notify = "8.2.0"
 thiserror = "2.0.18"
-rfd = "0.17.2"
 oxc_allocator = "0.138.0"
 oxc_ast = "0.138.0"
 oxc_ast_visit = "0.138.0"
@@ -77,5 +76,6 @@ unicode-width = "0.2.2"
 rquickjs = { version = "0.12.1", features = ["bindgen"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+rfd = "0.17.2"
 tauri-plugin-global-shortcut = "2"
 

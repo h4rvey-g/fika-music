@@ -36,6 +36,15 @@ pub(crate) fn clear_online_search_history(state: State<'_, AppState>) -> Command
 }
 
 #[tauri::command]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub(crate) async fn select_online_download_directory(
+    _initial_directory: Option<String>,
+) -> CommandResult<Option<String>> {
+    Ok(None)
+}
+
+#[tauri::command]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub(crate) async fn select_online_download_directory(
     initial_directory: Option<String>,
 ) -> CommandResult<Option<String>> {
