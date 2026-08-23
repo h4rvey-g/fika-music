@@ -1,5 +1,6 @@
 use crate::lx_js_importer::{self, LxJsImportAdapter, LxJsImportReport};
 use crate::lx_js_runtime::ImportedLxJsProvider;
+use crate::lx_v8_sidecar::{ImportedLxV8Provider, LxV8Sidecar};
 use crate::plugin_system::PluginManifest;
 use crate::registry_support::{
     manifest_fingerprint, now_timestamp, operation_nonce, remove_path, sha256_hex, valid_identifier,
@@ -471,6 +472,7 @@ struct DownloadedAudioSource {
 pub struct AudioSourceRegistry {
     audio_sources_dir: PathBuf,
     runtime: Arc<SourceRuntime>,
+    v8_sidecar: Option<Arc<LxV8Sidecar>>,
     bundled_sources: BTreeMap<String, BundledAudioSourceRegistration>,
     entries: BTreeMap<String, AudioSourceEntryRuntime>,
 }
@@ -491,9 +493,15 @@ impl AudioSourceRegistry {
         Self {
             audio_sources_dir: audio_sources_dir.into(),
             runtime,
+            v8_sidecar: None,
             bundled_sources: BTreeMap::new(),
             entries: BTreeMap::new(),
         }
+    }
+
+    pub(crate) fn with_v8_sidecar(mut self, sidecar: Arc<LxV8Sidecar>) -> Self {
+        self.v8_sidecar = Some(sidecar);
+        self
     }
 
     pub fn with_bundled_source(
@@ -724,7 +732,7 @@ impl AudioSourceRegistry {
         connection: &Connection,
         source_path: &Path,
     ) -> Result<AudioSourceRecord, AudioSourceSystemError> {
-        let (manifest, source, report) = prepare_import(source_path)?;
+        let (manifest, source, report) = prepare_import(source_path, self.v8_sidecar.is_some())?;
         let source_file_name = source_path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -1134,7 +1142,11 @@ impl AudioSourceRegistry {
         let package_path = PathBuf::from(&entry.record.path);
         let provider_result = match origin {
             AudioSourceOrigin::Bundled => self.build_bundled_provider(&manifest),
-            AudioSourceOrigin::Imported => build_imported_provider(&manifest, &package_path),
+            AudioSourceOrigin::Imported => build_imported_provider(
+                &manifest,
+                &package_path,
+                self.v8_sidecar.as_ref().map(Arc::clone),
+            ),
         };
         let provider = match provider_result {
             Ok(provider) => provider,
@@ -1448,10 +1460,12 @@ impl AudioSourceRegistry {
 
 pub(crate) fn prepare_remote_audio_source_import(
     source_url: &str,
+    v8_sidecar_available: bool,
 ) -> Result<PreparedAudioSourceImport, AudioSourceSystemError> {
     let downloaded = download_audio_source(source_url)?;
     let source_path = PathBuf::from(&downloaded.source_file_name);
-    let (manifest, source, report) = prepare_import_contents(&source_path, downloaded.source)?;
+    let (manifest, source, report) =
+        prepare_import_contents(&source_path, downloaded.source, v8_sidecar_available)?;
     Ok(PreparedAudioSourceImport {
         manifest,
         source,
@@ -1616,6 +1630,7 @@ fn audio_manifest_from_legacy(manifest: &PluginManifest) -> Option<AudioSourceMa
 
 fn prepare_import(
     source_path: &Path,
+    v8_sidecar_available: bool,
 ) -> Result<(AudioSourceManifest, String, LxJsImportReport), AudioSourceSystemError> {
     if !source_path.is_file() {
         return Err(AudioSourceSystemError::Package(format!(
@@ -1629,12 +1644,13 @@ fn prepare_import(
         return Err(source_too_large_error());
     }
     let source = fs::read_to_string(source_path)?;
-    prepare_import_contents(source_path, source)
+    prepare_import_contents(source_path, source, v8_sidecar_available)
 }
 
 fn prepare_import_contents(
     source_path: &Path,
     source: String,
+    v8_sidecar_available: bool,
 ) -> Result<(AudioSourceManifest, String, LxJsImportReport), AudioSourceSystemError> {
     validate_source_extension(source_path)?;
     if source.len() > MAX_SOURCE_BYTES {
@@ -1642,23 +1658,18 @@ fn prepare_import_contents(
     }
     let report = lx_js_importer::analyze_lx_js_source(source_path, &source)
         .map_err(|error| AudioSourceSystemError::Package(error.to_string()))?;
-    if !report.contract.uses_global_lx
-        || !report.contract.registers_request_handler
-        || !report
-            .contract
-            .declared_actions
-            .contains(&SourceAction::MusicUrl)
+    let (adapter, source_catalog) = if let Some(adapter) =
+        lx_js_importer::supported_import_adapter(&report)
     {
+        (adapter, imported_javascript_source_catalog(&report))
+    } else if v8_sidecar_available && report.obfuscation.likely_obfuscated {
+        (LxJsImportAdapter::V8Sidecar, opaque_v8_source_catalog())
+    } else {
         return Err(AudioSourceSystemError::Package(
-            "file does not expose a supported LX musicUrl request contract".to_owned(),
+            "file does not expose a supported LX musicUrl request contract; opaque V8 sources require the isolated V8 sidecar"
+                .to_owned(),
         ));
-    }
-    let adapter = lx_js_importer::supported_import_adapter(&report).ok_or_else(|| {
-        AudioSourceSystemError::Package(
-            "LX source does not expose a supported musicUrl request contract".to_owned(),
-        )
-    })?;
-    let source_catalog = imported_javascript_source_catalog(&report);
+    };
     if source_catalog.is_empty() {
         return Err(AudioSourceSystemError::Package(
             "LX source did not expose a supported music source catalog".to_owned(),
@@ -1680,7 +1691,14 @@ fn prepare_import_contents(
         )
     };
     let provider_id = format!("{audio_source_id}-provider");
-    let adapter_note = "Imported from LX Music JavaScript and executed in Fika's constrained QuickJS Audio Source runtime.";
+    let adapter_note = match adapter {
+        LxJsImportAdapter::V8Sidecar => {
+            "Imported from opaque LX Music JavaScript and executed in Fika's isolated V8 Audio Source sidecar."
+        }
+        _ => {
+            "Imported from LX Music JavaScript and executed in Fika's constrained QuickJS Audio Source runtime."
+        }
+    };
     let description = report
         .metadata
         .description
@@ -1722,23 +1740,45 @@ fn prepare_import_contents(
 fn build_imported_provider(
     manifest: &AudioSourceManifest,
     package_path: &Path,
+    v8_sidecar: Option<Arc<LxV8Sidecar>>,
 ) -> Result<Arc<dyn SourceProvider>, AudioSourceSystemError> {
     let (source, report) = read_verified_source(manifest, package_path)?;
-    let catalog = imported_javascript_source_catalog(&report);
-    if catalog != manifest.source_catalog {
-        return Err(AudioSourceSystemError::ProviderLoad {
+    match LxJsImportAdapter::parse(&manifest.adapter) {
+        Some(LxJsImportAdapter::V8Sidecar) => {
+            let sidecar = v8_sidecar.ok_or_else(|| AudioSourceSystemError::ProviderLoad {
+                audio_source_id: manifest.id.clone(),
+                message: "isolated LX V8 sidecar is unavailable".to_owned(),
+            })?;
+            Ok(Arc::new(ImportedLxV8Provider::new(
+                sidecar,
+                manifest.provider_id.clone(),
+                report.manifest.display_name,
+                source,
+                report.metadata,
+                manifest.source_catalog.clone(),
+            )))
+        }
+        Some(_) => {
+            let catalog = imported_javascript_source_catalog(&report);
+            if catalog != manifest.source_catalog {
+                return Err(AudioSourceSystemError::ProviderLoad {
+                    audio_source_id: manifest.id.clone(),
+                    message: "source.js does not match the declared source catalog".to_owned(),
+                });
+            }
+            Ok(Arc::new(ImportedLxJsProvider::new(
+                manifest.provider_id.clone(),
+                report.manifest.display_name,
+                source,
+                report.metadata,
+                catalog,
+            )))
+        }
+        None => Err(AudioSourceSystemError::ProviderLoad {
             audio_source_id: manifest.id.clone(),
-            message: "source.js does not match the declared source catalog".to_owned(),
-        });
+            message: format!("unsupported adapter: {}", manifest.adapter),
+        }),
     }
-    let provider = ImportedLxJsProvider::new(
-        manifest.provider_id.clone(),
-        report.manifest.display_name,
-        source,
-        report.metadata,
-        catalog,
-    );
-    Ok(Arc::new(provider))
 }
 
 fn read_verified_source(
@@ -2028,6 +2068,30 @@ fn imported_javascript_source_catalog(report: &LxJsImportReport) -> BTreeMap<Str
         .collect()
 }
 
+fn opaque_v8_source_catalog() -> BTreeMap<String, SourceInfo> {
+    [
+        source_runtime::LX_SOURCE_WY,
+        source_runtime::LX_SOURCE_TX,
+        source_runtime::LX_SOURCE_KW,
+        source_runtime::LX_SOURCE_KG,
+        source_runtime::LX_SOURCE_MG,
+        source_runtime::LX_SOURCE_LOCAL,
+    ]
+    .into_iter()
+    .map(|source_id| {
+        (
+            source_id.to_owned(),
+            source_runtime::lx_music_source(
+                source_id,
+                imported_source_name(source_id),
+                vec![SourceAction::MusicUrl],
+                source_runtime::standard_lx_qualities(),
+            ),
+        )
+    })
+    .collect()
+}
+
 fn imported_source_name(source_id: &str) -> &str {
     match source_id {
         source_runtime::LX_SOURCE_WY => "NetEase",
@@ -2132,7 +2196,10 @@ fn upgrade_legacy_execution_manifest(
     package_path: &Path,
     manifest: &mut AudioSourceManifest,
 ) -> Result<(), AudioSourceSystemError> {
-    if manifest.adapter == LxJsImportAdapter::QuickJs.as_str() {
+    if matches!(
+        LxJsImportAdapter::parse(&manifest.adapter),
+        Some(LxJsImportAdapter::QuickJs | LxJsImportAdapter::V8Sidecar)
+    ) {
         return Ok(());
     }
     let (_, report) = read_verified_source(manifest, package_path)?;
@@ -2571,7 +2638,7 @@ mod tests {
 
     #[test]
     fn arithmetic_obfuscated_source_import_should_accept_music_url_contract() {
-        let (manifest, _, _) = prepare_import(&arithmetic_obfuscated_source())
+        let (manifest, _, _) = prepare_import(&arithmetic_obfuscated_source(), false)
             .expect("arithmetic-obfuscated source should prepare for import");
         let source = manifest
             .source_catalog
@@ -2581,6 +2648,63 @@ mod tests {
         assert_eq!(manifest.adapter, LxJsImportAdapter::QuickJs.as_str());
         assert_eq!(source.actions, [SourceAction::MusicUrl]);
         assert_eq!(source.qualities, [SourceQuality::K128]);
+    }
+
+    #[test]
+    fn opaque_source_should_select_v8_sidecar_when_available() {
+        let source = format!(
+            "/** @name Opaque Source */\nconst bytecode = '{}';",
+            "a".repeat(1_500)
+        );
+
+        let (manifest, _, _) = prepare_import_contents(Path::new("opaque.js"), source, true)
+            .expect("opaque source should prepare for isolated V8 validation");
+
+        assert_eq!(manifest.adapter, LxJsImportAdapter::V8Sidecar.as_str());
+        assert_eq!(manifest.source_catalog.len(), 6);
+    }
+
+    #[test]
+    #[ignore = "requires FIKA_LX_V8_PATH, FIKA_LX_V8_LIVE_SOURCE, and a live third-party endpoint"]
+    fn live_opaque_source_should_import_review_and_enable() {
+        let source_path = std::env::var_os("FIKA_LX_V8_LIVE_SOURCE")
+            .map(PathBuf::from)
+            .expect("FIKA_LX_V8_LIVE_SOURCE should point to an LX source");
+        let executable = std::env::var_os("FIKA_LX_V8_PATH")
+            .map(PathBuf::from)
+            .expect("FIKA_LX_V8_PATH should point to Deno");
+        let root = tempfile::tempdir().expect("test directory should exist");
+        let connection = database();
+        let sidecar = Arc::new(crate::lx_v8_sidecar::LxV8Sidecar::with_executable(
+            root.path().join("runtime"),
+            executable,
+        ));
+        let mut registry = AudioSourceRegistry::new(
+            root.path().join("audio-sources"),
+            Arc::new(SourceRuntime::new()),
+        )
+        .with_v8_sidecar(sidecar);
+        registry
+            .refresh(&connection)
+            .expect("empty registry should refresh");
+
+        let imported = registry
+            .import_file(&connection, &source_path)
+            .expect("opaque source should import");
+        registry
+            .set_capabilities(
+                &connection,
+                &imported.id,
+                [SourceCapability::NetworkAny],
+                true,
+            )
+            .expect("network capability should be reviewed");
+        let enabled = registry
+            .set_enabled(&connection, &imported.id, true)
+            .expect("reviewed opaque source should enable");
+
+        assert_eq!(imported.adapter.as_deref(), Some("v8-sidecar"));
+        assert_eq!(enabled.state, AudioSourceState::Enabled);
     }
 
     #[test]
@@ -2868,7 +2992,7 @@ mod tests {
         fs::create_dir_all(&plugins_dir).expect("Plugin directory should exist");
         let source_path = reference_source();
         let (audio_manifest, source, _) =
-            prepare_import(&source_path).expect("reference source should prepare");
+            prepare_import(&source_path, false).expect("reference source should prepare");
         let legacy_manifest = PluginManifest {
             manifest_version: crate::plugin_system::PLUGIN_MANIFEST_VERSION,
             id: audio_manifest.id.clone(),

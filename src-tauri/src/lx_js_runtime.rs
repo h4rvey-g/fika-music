@@ -600,7 +600,7 @@ struct LxInvocationResult {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-struct LxHttpOptions {
+pub(crate) struct LxHttpOptions {
     method: Option<String>,
     headers: BTreeMap<String, JsonValue>,
     body: Option<JsonValue>,
@@ -752,7 +752,7 @@ fn install_native_bindings<'js>(
     Ok(())
 }
 
-fn build_http_request(
+pub(crate) fn build_http_request(
     url: String,
     options: LxHttpOptions,
     deadline: Instant,
@@ -1064,7 +1064,7 @@ fn is_http_url(value: &str) -> bool {
         .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
 }
 
-fn resolve_webview_media_url(context: &mut SourceRuntimeContext, value: &str) -> String {
+pub(crate) fn resolve_webview_media_url(context: &mut SourceRuntimeContext, value: &str) -> String {
     let Ok(mut candidate) = url::Url::parse(value) else {
         return value.to_owned();
     };

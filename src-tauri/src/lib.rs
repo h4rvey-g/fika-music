@@ -34,6 +34,7 @@ mod library;
 mod library_watcher;
 pub mod lx_js_importer;
 mod lx_js_runtime;
+mod lx_v8_sidecar;
 pub mod lyrics;
 mod menu_bar_lyrics;
 pub mod netease;
@@ -269,6 +270,8 @@ enum AppError {
     OnlineExecution(#[from] online_execution::OnlineExecutionError),
     #[error("yt-dlp sidecar error: {0}")]
     YtDlp(#[from] yt_dlp_sidecar::YtDlpSidecarError),
+    #[error("LX V8 sidecar error: {0}")]
+    LxV8(#[from] lx_v8_sidecar::LxV8SidecarError),
 }
 
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
@@ -504,6 +507,17 @@ impl AppState {
                 .map(|path| path.join("runtime").join("yt-dlp"))
                 .unwrap_or_else(|| PathBuf::from("runtime").join("yt-dlp")),
         )?);
+        let lx_v8_sidecar = lx_v8_sidecar::LxV8Sidecar::is_supported_platform()
+            .then(|| {
+                lx_v8_sidecar::LxV8Sidecar::new(
+                    user_plugins_dir
+                        .parent()
+                        .map(|path| path.join("runtime").join("lx-v8"))
+                        .unwrap_or_else(|| PathBuf::from("runtime").join("lx-v8")),
+                )
+                .map(Arc::new)
+            })
+            .transpose()?;
         {
             let connection = db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
             audio_source_system::migrate_legacy_lx_plugins(
@@ -513,13 +527,17 @@ impl AppState {
             )?;
         }
         let mut audio_source_registry =
-            AudioSourceRegistry::new(audio_sources_dir, Arc::clone(&source_runtime))
-                .with_bundled_source(youtube_music_playback::bundled_audio_source_registration(
-                    Arc::clone(&yt_dlp_sidecar),
-                ))?
-                .with_bundled_source(chksz_playback::bundled_audio_source_registration(
-                    Arc::clone(&chksz_playback),
-                ))?;
+            AudioSourceRegistry::new(audio_sources_dir, Arc::clone(&source_runtime));
+        if let Some(sidecar) = lx_v8_sidecar {
+            audio_source_registry = audio_source_registry.with_v8_sidecar(sidecar);
+        }
+        audio_source_registry = audio_source_registry
+            .with_bundled_source(youtube_music_playback::bundled_audio_source_registration(
+                Arc::clone(&yt_dlp_sidecar),
+            ))?
+            .with_bundled_source(chksz_playback::bundled_audio_source_registration(
+                Arc::clone(&chksz_playback),
+            ))?;
         let provider_catalog =
             bundled_plugins::provider_catalog(provider_bridge, kugou_provider_bridge)?;
         #[cfg(test)]
@@ -4144,8 +4162,11 @@ async fn import_audio_source_url(
         ));
     }
     tauri::async_runtime::spawn_blocking(move || {
-        let prepared = audio_source_system::prepare_remote_audio_source_import(&source_url)
-            .map_err(AudioSourceCommandError::from)?;
+        let prepared = audio_source_system::prepare_remote_audio_source_import(
+            &source_url,
+            lx_v8_sidecar::LxV8Sidecar::is_supported_platform(),
+        )
+        .map_err(AudioSourceCommandError::from)?;
         let state = app.state::<AppState>();
         let db = state
             .db

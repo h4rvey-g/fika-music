@@ -491,6 +491,7 @@ impl SourceProvider for QishuiRustProvider {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LxJsImportAdapter {
     QuickJs,
+    V8Sidecar,
     Nianxin,
     Changqing,
     StaticTemplates,
@@ -500,6 +501,7 @@ impl LxJsImportAdapter {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::QuickJs => "quickjs",
+            Self::V8Sidecar => "v8-sidecar",
             Self::Nianxin => "nianxin",
             Self::Changqing => "changqing",
             Self::StaticTemplates => "static-templates",
@@ -509,6 +511,7 @@ impl LxJsImportAdapter {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "quickjs" => Some(Self::QuickJs),
+            "v8-sidecar" => Some(Self::V8Sidecar),
             "nianxin" => Some(Self::Nianxin),
             "changqing" => Some(Self::Changqing),
             "static-templates" => Some(Self::StaticTemplates),
@@ -533,9 +536,9 @@ pub fn import_adapter_templates(
     adapter: LxJsImportAdapter,
 ) -> Result<Vec<LxUrlTemplate>, LxJsImportError> {
     let (templates, family) = match adapter {
-        LxJsImportAdapter::QuickJs | LxJsImportAdapter::StaticTemplates => {
-            (report.endpoint.templates.clone(), None)
-        }
+        LxJsImportAdapter::QuickJs
+        | LxJsImportAdapter::V8Sidecar
+        | LxJsImportAdapter::StaticTemplates => (report.endpoint.templates.clone(), None),
         LxJsImportAdapter::Nianxin | LxJsImportAdapter::Changqing => {
             (report.endpoint.templates.clone(), Some(adapter.as_str()))
         }
@@ -546,7 +549,12 @@ pub fn import_adapter_templates(
         .filter(|template| template.has_track_id_placeholder)
         .filter(|template| LX_SOURCE_KEYS.contains(&template.source_id.as_str()))
         .collect::<Vec<_>>();
-    if templates.is_empty() && adapter != LxJsImportAdapter::QuickJs {
+    if templates.is_empty()
+        && !matches!(
+            adapter,
+            LxJsImportAdapter::QuickJs | LxJsImportAdapter::V8Sidecar
+        )
+    {
         return Err(LxJsImportError::Unsupported(format!(
             "the {} adapter did not expose a track URL template",
             adapter.as_str()
