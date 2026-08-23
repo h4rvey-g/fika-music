@@ -298,6 +298,9 @@ jobs:
     env:
       ANDROID_BUILD_TOOLS_VERSION: 36.0.0
       ANDROID_NDK_VERSION: 28.2.13676358
+      BUNDLETOOL_VERSION: 1.18.3
+      BUNDLETOOL_SHA256: a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29
+      GRADLE_OPTS: -Dorg.gradle.caching=true
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -333,6 +336,10 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+          cache: gradle
+          cache-dependency-path: |
+            package-lock.json
+            src-tauri/Cargo.lock
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -358,6 +365,23 @@ jobs:
             echo "ANDROID_NDK_HOME=$ndk_home"
             echo "BINDGEN_EXTRA_CLANG_ARGS=--sysroot=$bindgen_sysroot"
           } >> "$GITHUB_ENV"
+
+      - name: Install bundletool
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bundletool="$RUNNER_TEMP/bundletool-${BUNDLETOOL_VERSION}.jar"
+          curl \
+            --fail \
+            --location \
+            --retry 3 \
+            --show-error \
+            --silent \
+            --output "$bundletool" \
+            "https://github.com/google/bundletool/releases/download/${BUNDLETOOL_VERSION}/bundletool-all-${BUNDLETOOL_VERSION}.jar"
+          echo "${BUNDLETOOL_SHA256}  ${bundletool}" | sha256sum --check
+          echo "BUNDLETOOL_JAR=$bundletool" >> "$GITHUB_ENV"
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -410,25 +434,43 @@ jobs:
           chmod 600 "$properties"
 
       - name: Build signed Android bundles
-        run: npm run tauri android build -- --ci --apk --aab
+        run: npm run tauri android build -- --ci --aab
 
-      - name: Verify and stage Android bundles
+      - name: Generate, verify and stage Android bundles
         id: android-bundles
         shell: bash
         env:
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
 
-          apk=src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
           aab=src-tauri/gen/android/app/build/outputs/bundle/universalRelease/app-universal-release.aab
+          if [[ ! -f "$aab" ]]; then
+            echo "::error file=${aab}::Expected Android App Bundle was not generated"
+            exit 1
+          fi
 
-          for path in "$apk" "$aab"; do
-            if [[ ! -f "$path" ]]; then
-              echo "::error file=${path}::Expected Android release bundle was not generated"
-              exit 1
-            fi
-          done
+          keystore="$RUNNER_TEMP/android-release.jks"
+          password_file="$RUNNER_TEMP/android-keystore-password"
+          apks="$RUNNER_TEMP/fika-music.apks"
+          printf '%s' "$ANDROID_KEY_PASSWORD" > "$password_file"
+          chmod 600 "$password_file"
+
+          java -jar "$BUNDLETOOL_JAR" build-apks \
+            --bundle="$aab" \
+            --output="$apks" \
+            --mode=universal \
+            --overwrite \
+            --ks="$keystore" \
+            --ks-pass="file:$password_file" \
+            --ks-key-alias="$ANDROID_KEY_ALIAS"
+
+          mkdir -p android-release
+          unzip -j "$apks" universal.apk -d android-release
+          apk=android-release/Fika-Music_${VERSION}_universal.apk
+          mv android-release/universal.apk "$apk"
 
           "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/apksigner" \
             verify --verbose --print-certs "$apk"
@@ -439,8 +481,6 @@ jobs:
             exit 1
           fi
 
-          mkdir -p android-release
-          cp "$apk" "android-release/Fika-Music_${VERSION}_universal.apk"
           cp "$aab" "android-release/Fika-Music_${VERSION}_universal.aab"
 
       - name: Upload Android bundles to draft release
