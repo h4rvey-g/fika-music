@@ -361,6 +361,7 @@ describe("application shell", () => {
     expect(settingsTabs.findAll('[role="tab"]').map((tab) => tab.text())).toEqual([
       "Appearance",
       "Playback",
+      "Keyboard shortcuts",
       "Library",
       "Online Music",
       "Lyrics",
@@ -380,6 +381,13 @@ describe("application shell", () => {
     await settingsTabs.get('[data-settings-tab="playback"]').trigger("click");
     expect(wrapper.find("#theme-preference").exists()).toBe(false);
     expect(wrapper.find("#default-volume").exists()).toBe(true);
+    expect(wrapper.text()).not.toContain("System shortcuts are only available in the desktop app");
+
+    await settingsTabs.get('[data-settings-tab="shortcuts"]').trigger("click");
+    expect(wrapper.text()).toContain("Play or pause");
+    expect(wrapper.text()).toContain("Open search");
+    expect(wrapper.text()).toContain("System shortcuts");
+    expect(wrapper.text()).toContain("System shortcuts are only available in the desktop app");
 
     await settingsTabs.get('[data-settings-tab="library"]').trigger("click");
     expect(wrapper.find("#default-volume").exists()).toBe(false);
@@ -419,47 +427,26 @@ describe("application shell", () => {
     wrapper.unmount();
   });
 
-  it("opens the shortcut sheet and handles application navigation shortcuts", async () => {
+  it("opens shortcut settings and handles application navigation shortcuts", async () => {
     const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
 
-    const shortcutButton = wrapper.findAll("button")
-      .find((button) => button.text().includes("Keyboard shortcuts"));
-    expect(shortcutButton).toBeDefined();
-    (shortcutButton?.element as HTMLElement | undefined)?.focus();
-    await shortcutButton?.trigger("click");
-    await wrapper.vm.$nextTick();
-
-    const dialogElement = document.body.querySelector<HTMLElement>(
-      '[data-testid="keyboard-shortcuts-dialog"]',
-    );
-    expect(dialogElement).not.toBeNull();
-    const dialog = new DOMWrapper(dialogElement!);
-    expect(dialog.text()).toContain("Play or pause");
-    expect(dialog.text()).toContain("Open search");
-    const closeButton = dialog.get('button[aria-label="Close keyboard shortcuts"]');
-    expect(document.activeElement).toBe(closeButton.element);
-    expect(dispatchShortcut("Tab", {}, closeButton.element).defaultPrevented).toBe(true);
-    expect(document.activeElement).toBe(closeButton.element);
-
-    await closeButton.trigger("click");
-    await wrapper.vm.$nextTick();
-    expect(document.activeElement).toBe(shortcutButton?.element);
+    const navigation = wrapper.get('nav[aria-label="Primary navigation"]');
+    expect(navigation.findAll("button").some((button) => button.text().includes("Keyboard shortcuts")))
+      .toBe(false);
 
     dispatchShortcut("/", platformModifier());
     await wrapper.vm.$nextTick();
-    expect(document.body.querySelector('[data-testid="keyboard-shortcuts-dialog"]')).not.toBeNull();
-    dispatchShortcut("/", platformModifier());
-    await wrapper.vm.$nextTick();
-    expect(document.body.querySelector('[data-testid="keyboard-shortcuts-dialog"]')).toBeNull();
+
+    expect(wrapper.get("h1").text()).toBe("Settings");
+    expect(wrapper.get('[data-settings-tab="shortcuts"]').attributes("aria-selected")).toBe("true");
+    expect(wrapper.text()).toContain("Play or pause");
+    expect(wrapper.text()).toContain("Open search");
+    expect(wrapper.text()).toContain("System shortcuts");
 
     dispatchShortcut(",", platformModifier());
     await wrapper.vm.$nextTick();
     expect(wrapper.get("h1").text()).toBe("Settings");
-    await wrapper.get('[role="tab"][aria-controls="settings-panel"][id="settings-tab-playback"]').trigger("click");
-    await wrapper.vm.$nextTick();
-    expect(wrapper.text()).toContain("System shortcuts");
-    expect(wrapper.text()).toContain("System shortcuts are only available in the desktop app");
 
     dispatchShortcut("k", platformModifier());
     await flushPromises();
@@ -521,7 +508,7 @@ describe("application shell", () => {
     wrapper.unmount();
   });
 
-  it("exposes persisted system shortcuts on commands and in the shortcut sheet", async () => {
+  it("exposes persisted system shortcuts on commands and in shortcut settings", async () => {
     localStorage.setItem(GLOBAL_SHORTCUTS_STORAGE_KEY, JSON.stringify({
       ...DEFAULT_GLOBAL_SHORTCUT_PREFERENCES,
       toggleMute: "CommandOrControl+Shift+KeyM",
@@ -535,15 +522,11 @@ describe("application shell", () => {
     expect(wrapper.get('button[aria-label="Mute"]').attributes("aria-keyshortcuts"))
       .toContain(systemAriaShortcut);
 
-    const shortcutButton = wrapper.findAll("button")
-      .find((button) => button.text().includes("Keyboard shortcuts"));
-    await shortcutButton?.trigger("click");
+    dispatchShortcut("/", platformModifier());
     await wrapper.vm.$nextTick();
-    const dialog = new DOMWrapper(document.body.querySelector<HTMLElement>(
-      '[data-testid="keyboard-shortcuts-dialog"]',
-    )!);
-    expect(dialog.text()).toContain("System-wide");
-    expect(dialog.text()).toContain("Mute or unmute");
+    expect(wrapper.get('[data-settings-tab="shortcuts"]').attributes("aria-selected")).toBe("true");
+    expect(wrapper.get('button[aria-label*="Mute or unmute"]').attributes("aria-label"))
+      .toContain("Current shortcut");
     wrapper.unmount();
   });
 

@@ -136,7 +136,6 @@ import {
   GLOBAL_SHORTCUT_ACTIONS,
   captureGlobalShortcut,
   globalShortcutAriaKeys,
-  globalShortcutDisplayKeys,
   type GlobalShortcutAction,
   type GlobalShortcutCaptureError,
 } from "./lib/global-shortcut-preferences";
@@ -273,6 +272,7 @@ const settingsSection = {
 const settingsTabs = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "playback", label: "Playback", icon: Headphones },
+  { id: "shortcuts", label: "Keyboard shortcuts", icon: Keyboard },
   { id: "library", label: "Library", icon: FolderOpen },
   { id: "online", label: "Online Music", icon: Radio },
   { id: "lyrics", label: "Lyrics", icon: Captions },
@@ -376,9 +376,6 @@ const canSubmitCollectionName = computed(() =>
     || smartCollectionRulesAreComplete(smartCollectionRules.value)),
 );
 const sidebarOpen = ref(false);
-const shortcutHelpOpen = ref(false);
-const shortcutHelpDialog = ref<HTMLDialogElement | null>(null);
-const shortcutHelpCloseButton = ref<HTMLButtonElement | null>(null);
 const recordingGlobalShortcut = ref<GlobalShortcutAction | null>(null);
 const globalShortcutCaptureError = ref<Readonly<{
   action: GlobalShortcutAction;
@@ -459,7 +456,6 @@ let collectionNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 let playbackQueueSequence = 0;
 let sidebarPlaybackGeneration = 0;
 let dynamicThemeGeneration = 0;
-let shortcutHelpReturnFocus: HTMLElement | null = null;
 let volumeBeforeMute = savedUiPreferences.volume > 0 ? savedUiPreferences.volume : 0.8;
 const desktopLyricsUnlisteners: UnlistenFn[] = [];
 const collectionUnlisteners: UnlistenFn[] = [];
@@ -530,9 +526,6 @@ const canTogglePlayback = computed(() =>
     || libraryTrackCount.value,
   ),
 );
-const configuredGlobalShortcuts = computed(() => GLOBAL_SHORTCUT_ACTIONS.filter(
-  (action) => Boolean(globalShortcutBindings.value[action.id]),
-));
 const currentPlaybackAudioSourceId = computed(() =>
   activeOnlineTrack.value
     ? activeOnlineAudioSourceId.value
@@ -791,13 +784,7 @@ function handleAppShortcut(event: KeyboardEvent) {
   if (!match || (event.repeat && !match.shortcut.allowRepeat)) return;
 
   const openDialog = document.querySelector("dialog[open]");
-  if (openDialog) {
-    if (match.shortcut.id === "showShortcuts" && shortcutHelpOpen.value) {
-      event.preventDefault();
-      closeShortcutHelp();
-    }
-    return;
-  }
+  if (openDialog) return;
 
   if (!match.binding.allowInInteractive && isInteractiveShortcutTarget(event.target)) {
     return;
@@ -890,7 +877,7 @@ function runAppShortcut(shortcut: AppShortcutId): boolean {
       selectSection("settings");
       return true;
     case "showShortcuts":
-      openShortcutHelp();
+      openShortcutSettings();
       return true;
   }
 }
@@ -901,45 +888,9 @@ async function focusOnlineSearch() {
   onlineMusic.value?.focusSearch();
 }
 
-function openShortcutHelp() {
-  if (shortcutHelpOpen.value) return;
-  shortcutHelpReturnFocus = document.activeElement instanceof HTMLElement
-    ? document.activeElement
-    : null;
-  shortcutHelpOpen.value = true;
-  sidebarOpen.value = false;
-  void nextTick(() => shortcutHelpCloseButton.value?.focus());
-}
-
-function closeShortcutHelp() {
-  if (!shortcutHelpOpen.value) return;
-  shortcutHelpOpen.value = false;
-  const returnFocus = shortcutHelpReturnFocus;
-  shortcutHelpReturnFocus = null;
-  void nextTick(() => {
-    if (returnFocus?.isConnected) returnFocus.focus();
-  });
-}
-
-function trapShortcutHelpFocus(event: KeyboardEvent) {
-  const dialog = shortcutHelpDialog.value;
-  if (!dialog) return;
-  const focusable = Array.from(
-    dialog.querySelectorAll<HTMLElement>(
-      "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
-    ),
-  ).filter((element) => element.tabIndex >= 0);
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-  if (!first || !last) return;
-
-  if (event.shiftKey && document.activeElement === first) {
-    event.preventDefault();
-    last.focus();
-  } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault();
-    first.focus();
-  }
+function openShortcutSettings() {
+  selectSettingsTab("shortcuts");
+  selectSection("settings");
 }
 
 function shortcutTitle(label: string, shortcut: AppShortcutId) {
@@ -3319,17 +3270,61 @@ function trackSubtitle(track: LocalTrack) {
               </div>
             </section>
 
-            <SystemShortcutSettings
-              v-if="activeSettingsTab === 'playback'"
-              :applying-action="applyingGlobalShortcut"
-              :available="globalShortcuts.available"
-              :bindings="globalShortcutBindings"
-              :capture-error="globalShortcutCaptureError"
-              :errors="globalShortcutErrors"
-              :recording-action="recordingGlobalShortcut"
-              @clear="clearGlobalShortcut"
-              @record="startGlobalShortcutRecording"
-            />
+            <template v-if="activeSettingsTab === 'shortcuts'">
+              <section class="overflow-hidden rounded border border-base-300 bg-base-100">
+                <div class="flex items-center gap-3 border-b border-base-300 px-4 py-3">
+                  <Keyboard :size="18" aria-hidden="true" />
+                  <h2 class="text-base font-semibold">{{ t("Keyboard shortcuts") }}</h2>
+                </div>
+                <div class="px-4 py-1">
+                  <section
+                    v-for="group in shortcutGroups"
+                    :key="group.category"
+                    class="py-3"
+                  >
+                    <h3 class="mb-1 text-xs font-semibold uppercase text-muted">
+                      {{ t(group.category) }}
+                    </h3>
+                    <ul class="divide-y divide-base-300">
+                      <li
+                        v-for="shortcut in group.shortcuts"
+                        :key="shortcut.id"
+                        class="flex min-h-11 flex-wrap items-center justify-between gap-2 py-2 sm:flex-nowrap sm:gap-4"
+                      >
+                        <span class="min-w-0 text-sm">{{ t(shortcut.label) }}</span>
+                        <span class="flex shrink-0 flex-wrap items-center justify-end gap-1">
+                          <template
+                            v-for="(binding, bindingIndex) in shortcutDisplayBindings(shortcut.id)"
+                            :key="`${shortcut.id}-${bindingIndex}`"
+                          >
+                            <span v-if="bindingIndex > 0" class="px-1 text-xs text-muted">
+                              {{ t("or") }}
+                            </span>
+                            <span class="flex items-center gap-1">
+                              <template v-for="(key, keyIndex) in binding" :key="`${key}-${keyIndex}`">
+                                <span v-if="keyIndex > 0" class="text-xs text-muted" aria-hidden="true">+</span>
+                                <kbd class="kbd kbd-sm">{{ key }}</kbd>
+                              </template>
+                            </span>
+                          </template>
+                        </span>
+                      </li>
+                    </ul>
+                  </section>
+                </div>
+              </section>
+
+              <SystemShortcutSettings
+                :applying-action="applyingGlobalShortcut"
+                :available="globalShortcuts.available"
+                :bindings="globalShortcutBindings"
+                :capture-error="globalShortcutCaptureError"
+                :errors="globalShortcutErrors"
+                :recording-action="recordingGlobalShortcut"
+                @clear="clearGlobalShortcut"
+                @record="startGlobalShortcutRecording"
+              />
+            </template>
 
             <section
               v-if="activeSettingsTab === 'library'"
@@ -3932,18 +3927,6 @@ function trackSubtitle(track: LocalTrack) {
                 <span>{{ t(settingsSection.label) }}</span>
               </button>
             </li>
-            <li>
-              <button
-                type="button"
-                :aria-keyshortcuts="appCommandAriaKeys('showShortcuts')"
-                :title="shortcutTitle(t('Keyboard shortcuts'), 'showShortcuts')"
-                @click="openShortcutHelp"
-              >
-                <Keyboard :size="18" aria-hidden="true" />
-                <span>{{ t("Keyboard shortcuts") }}</span>
-                <kbd class="kbd kbd-xs ml-auto">{{ shortcutHint("showShortcuts") }}</kbd>
-              </button>
-            </li>
           </ul>
         </nav>
 
@@ -3951,102 +3934,6 @@ function trackSubtitle(track: LocalTrack) {
     </div>
 
     <Teleport to="body">
-      <dialog
-        v-if="shortcutHelpOpen"
-        ref="shortcutHelpDialog"
-        open
-        tabindex="0"
-        class="modal"
-        aria-modal="true"
-        aria-labelledby="keyboard-shortcuts-title"
-        data-testid="keyboard-shortcuts-dialog"
-        @cancel.prevent="closeShortcutHelp"
-        @keydown.tab="trapShortcutHelpFocus"
-      >
-        <div class="modal-box max-w-xl rounded p-0">
-          <div class="flex items-center gap-3 border-b border-base-300 px-5 py-4">
-            <Keyboard :size="19" aria-hidden="true" />
-            <h2 id="keyboard-shortcuts-title" class="min-w-0 flex-1 text-base font-semibold">
-              {{ t("Keyboard shortcuts") }}
-            </h2>
-            <button
-              ref="shortcutHelpCloseButton"
-              class="btn btn-square btn-ghost btn-sm"
-              type="button"
-              :aria-label="t('Close keyboard shortcuts')"
-              :title="t('Close')"
-              @click="closeShortcutHelp"
-            >
-              <X :size="17" aria-hidden="true" />
-            </button>
-          </div>
-
-          <div class="max-h-[min(70vh,36rem)] overflow-y-auto px-5 py-2">
-            <section
-              v-for="group in shortcutGroups"
-              :key="group.category"
-              class="py-3"
-            >
-              <h3 class="mb-1 text-xs font-semibold uppercase text-muted">
-                {{ t(group.category) }}
-              </h3>
-              <ul class="divide-y divide-base-300">
-                <li
-                  v-for="shortcut in group.shortcuts"
-                  :key="shortcut.id"
-                  class="flex min-h-11 items-center justify-between gap-4 py-2"
-                >
-                  <span class="min-w-0 text-sm">{{ t(shortcut.label) }}</span>
-                  <span class="flex shrink-0 items-center gap-1">
-                    <template
-                      v-for="(binding, bindingIndex) in shortcutDisplayBindings(shortcut.id)"
-                      :key="`${shortcut.id}-${bindingIndex}`"
-                    >
-                      <span v-if="bindingIndex > 0" class="px-1 text-xs text-muted">
-                        {{ t("or") }}
-                      </span>
-                      <span class="flex items-center gap-1">
-                        <template v-for="(key, keyIndex) in binding" :key="`${key}-${keyIndex}`">
-                          <span v-if="keyIndex > 0" class="text-xs text-muted" aria-hidden="true">+</span>
-                          <kbd class="kbd kbd-sm">{{ key }}</kbd>
-                        </template>
-                      </span>
-                    </template>
-                  </span>
-                </li>
-              </ul>
-            </section>
-
-            <section v-if="configuredGlobalShortcuts.length" class="py-3">
-              <h3 class="mb-1 text-xs font-semibold uppercase text-muted">
-                {{ t("System-wide") }}
-              </h3>
-              <ul class="divide-y divide-base-300">
-                <li
-                  v-for="action in configuredGlobalShortcuts"
-                  :key="`system-${action.id}`"
-                  class="flex min-h-11 items-center justify-between gap-4 py-2"
-                >
-                  <span class="min-w-0 text-sm">{{ t(action.label) }}</span>
-                  <span class="flex shrink-0 items-center gap-1">
-                    <template
-                      v-for="(key, index) in globalShortcutDisplayKeys(globalShortcutBindings[action.id]!)"
-                      :key="`system-${action.id}-${key}-${index}`"
-                    >
-                      <span v-if="index > 0" class="text-xs text-muted" aria-hidden="true">+</span>
-                      <kbd class="kbd kbd-sm">{{ key }}</kbd>
-                    </template>
-                  </span>
-                </li>
-              </ul>
-            </section>
-          </div>
-        </div>
-        <form method="dialog" class="modal-backdrop" @submit.prevent="closeShortcutHelp">
-          <button type="submit" tabindex="-1">{{ t("Close") }}</button>
-        </form>
-      </dialog>
-
       <div
         v-if="localMusicContextMenu || collectionContextMenu"
         class="fixed inset-0 z-50"
