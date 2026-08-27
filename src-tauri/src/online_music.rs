@@ -78,6 +78,8 @@ pub struct OnlineMusicSettings {
     pub playback_timeout_seconds: u64,
     #[serde(default = "default_quality")]
     pub playback_quality: SourceQuality,
+    #[serde(default = "default_playback_cache_max_mb")]
+    pub playback_cache_max_mb: u32,
     #[serde(default = "default_quality")]
     pub download_quality: SourceQuality,
     pub search_history_enabled: bool,
@@ -97,6 +99,7 @@ impl Default for OnlineMusicSettings {
             layer_timeout_seconds: 8,
             playback_timeout_seconds: 20,
             playback_quality: default_quality(),
+            playback_cache_max_mb: default_playback_cache_max_mb(),
             download_quality: default_quality(),
             search_history_enabled: true,
             download_directory: None,
@@ -109,6 +112,10 @@ impl Default for OnlineMusicSettings {
 
 fn default_quality() -> SourceQuality {
     SourceQuality::K320
+}
+
+fn default_playback_cache_max_mb() -> u32 {
+    crate::playback_cache::DEFAULT_PLAYBACK_CACHE_MAX_MB
 }
 
 impl OnlineMusicSettings {
@@ -125,6 +132,12 @@ impl OnlineMusicSettings {
             return Err(OnlineMusicError::InvalidSettings(
                 "playbackTimeoutSeconds must be between 5 and 60".to_owned(),
             ));
+        }
+        if self.playback_cache_max_mb > crate::playback_cache::MAX_PLAYBACK_CACHE_MB {
+            return Err(OnlineMusicError::InvalidSettings(format!(
+                "playbackCacheMaxMb must be between 0 and {}",
+                crate::playback_cache::MAX_PLAYBACK_CACHE_MB
+            )));
         }
         if !(1..=4).contains(&self.download_concurrency) {
             return Err(OnlineMusicError::InvalidSettings(
@@ -1342,6 +1355,38 @@ mod tests {
             settings.audio_source_selection_mode,
             AudioSourceSelectionMode::Automatic
         );
+    }
+
+    #[test]
+    fn settings_without_playback_cache_limit_should_default_to_500_mb() {
+        let value = serde_json::json!({
+            "excludedChannels": [],
+            "channelPriority": [],
+            "audioSourcePriority": [],
+            "layerTimeoutSeconds": 8,
+            "playbackTimeoutSeconds": 20,
+            "playbackQuality": "320k",
+            "downloadQuality": "320k",
+            "searchHistoryEnabled": true,
+            "downloadDirectory": null,
+            "filenameTemplate": "{artist} - {title}",
+            "downloadConcurrency": 2,
+            "batchNotifications": true
+        });
+
+        let settings: OnlineMusicSettings = serde_json::from_value(value).unwrap();
+
+        assert_eq!(settings.playback_cache_max_mb, 500);
+    }
+
+    #[test]
+    fn settings_should_reject_playback_cache_limits_above_10_gb() {
+        let settings = OnlineMusicSettings {
+            playback_cache_max_mb: crate::playback_cache::MAX_PLAYBACK_CACHE_MB + 1,
+            ..OnlineMusicSettings::default()
+        };
+
+        assert!(settings.validate().is_err());
     }
 
     #[test]

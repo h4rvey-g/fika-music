@@ -335,7 +335,7 @@ function previewTemplate(template: string, values: Record<string, string>) {
           </ul>
         </div>
 
-        <div class="grid gap-4 px-4 py-4 sm:grid-cols-3">
+        <div class="grid gap-4 px-4 py-4 sm:grid-cols-2 lg:grid-cols-4">
           <label class="form-control">
             <span class="label-text text-sm">{{ t("Playback quality") }}</span>
             <select
@@ -346,6 +346,19 @@ function previewTemplate(template: string, values: Record<string, string>) {
             >
               <option v-for="quality in qualityOptions" :key="quality.value" :value="quality.value">{{ quality.label }}</option>
             </select>
+          </label>
+          <label class="form-control">
+            <span class="label-text text-sm">{{ t("Playback cache limit (MB)") }}</span>
+            <input
+              data-testid="online-playback-cache-limit"
+              class="input input-sm mt-1"
+              type="number"
+              inputmode="numeric"
+              min="0"
+              max="10240"
+              :value="settings.playbackCacheMaxMb"
+              @change="persist({ playbackCacheMaxMb: Number(($event.currentTarget as HTMLInputElement).value) }, 'playback-cache-limit')"
+            />
           </label>
           <label class="form-control">
             <span class="label-text text-sm">{{ t("Per-source budget") }}</span>

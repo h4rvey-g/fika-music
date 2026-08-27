@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AudioSourceRecord } from "../generated/bindings";
 import {
+  cacheOnlinePlayback,
   clearPreloadedMedia,
   orderedAudioSources,
   invalidateOnlinePlaybackCaches,
@@ -144,6 +145,73 @@ describe("online music playback routing", () => {
   it("degrades quality only toward lower levels", () => {
     expect(qualityFallback("flac24bit")).toEqual(["flac24bit", "flac", "320k", "128k"]);
     expect(qualityFallback("320k")).toEqual(["320k", "128k"]);
+  });
+
+  it("uses a local playback cache hit before resolving an Audio Source", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_cached_online_playback") {
+        return Promise.resolve({
+          cacheId: "cache-entry-1",
+          providerName: "Cached Source",
+          candidate: {
+            id: "song-1",
+            pluginId: "plugin-1",
+            sourceId: "wy",
+            channelId: "netease",
+            channelName: "NetEase",
+          },
+          audioSourceId: "source-1",
+          quality: "320k",
+        });
+      }
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    const playback = await resolveOnlineTrack({
+      track,
+      audioSources: [],
+      settings,
+    });
+
+    expect(convertFileSrc).toHaveBeenCalledWith("cache-entry-1", "fika-cache");
+    expect(playback).toMatchObject({
+      url: "fika-cache://localhost/cache-entry-1",
+      providerName: "Cached Source",
+      quality: "320k",
+    });
+    expect(invoke).not.toHaveBeenCalledWith("dispatch_audio_source_request", expect.anything());
+  });
+
+  it("schedules resolved remote audio for background caching", async () => {
+    invoke.mockResolvedValue(undefined);
+    const playback = {
+      track,
+      url: "https://cdn.test/song.mp3",
+      remoteUrl: "https://cdn.test/song.mp3",
+      providerName: "Source One",
+      candidate: {
+        id: "song-1",
+        pluginId: "plugin-1",
+        sourceId: "wy",
+        channelId: "netease",
+        channelName: "NetEase",
+      },
+      audioSourceId: "source-1",
+      quality: "320k" as const,
+    };
+
+    await cacheOnlinePlayback(playback);
+
+    expect(invoke).toHaveBeenCalledWith("cache_online_playback", {
+      request: {
+        trackKey: track.key,
+        sourceUrl: "https://cdn.test/song.mp3",
+        providerName: "Source One",
+        candidate: playback.candidate,
+        audioSourceId: "source-1",
+        quality: "320k",
+      },
+    });
   });
 
   it("skips qualities that an Audio Source does not declare", async () => {

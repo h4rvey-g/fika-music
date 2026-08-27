@@ -87,6 +87,7 @@ export function createOnlineMusicSettings(
     layerTimeoutSeconds: 8,
     playbackTimeoutSeconds: 20,
     playbackQuality: "320k",
+    playbackCacheMaxMb: 500,
     downloadQuality: "320k",
     searchHistoryEnabled: true,
     downloadDirectory: null,

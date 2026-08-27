@@ -82,8 +82,10 @@ import {
   type SupportedLocale,
 } from "./i18n";
 import {
+  cacheOnlinePlayback,
   clearPreloadedMedia,
   clearOnlinePlaybackFailures,
+  invalidateCachedPlaybackUrl,
   invalidateOnlinePlaybackCaches,
   preloadMediaUrl,
   playbackAttemptKey,
@@ -2294,6 +2296,7 @@ async function applyOnlinePlayback(
     await audio.play();
     if (!ownsPlaybackRequest(generation)) return false;
     isPlaying.value = true;
+    void cacheOnlinePlayback(playback);
   }
   return true;
 }
@@ -2707,9 +2710,14 @@ function seekPlayback(event: Event) {
   seekPlaybackTo(Number((event.currentTarget as HTMLInputElement).value));
 }
 
-function onAudioError() {
+async function onAudioError() {
   isPlaying.value = false;
   isPlaybackWaiting.value = false;
+  const failedUrl = activeOnlineUrl.value;
+  if (failedUrl) {
+    await invalidateCachedPlaybackUrl(failedUrl);
+    if (activeOnlineUrl.value !== failedUrl) return;
+  }
   if (
     activeOnlineTrack.value
     && (remoteQueueActive.value || collectionQueueActive.value)

@@ -42,6 +42,7 @@ pub mod online_download;
 mod online_execution;
 pub mod online_music;
 mod online_settings_commands;
+mod playback_cache;
 mod playback_commands;
 pub mod plugin_system;
 mod registry_support;
@@ -76,7 +77,8 @@ pub use library::{
 };
 use library_watcher::{BatchDisposition, LibraryChangeBatch, LibraryWatcher};
 use online_settings_commands::{
-    clear_online_search_history, get_online_music_settings, select_online_download_directory,
+    cache_online_playback, clear_online_search_history, get_cached_online_playback,
+    get_online_music_settings, remove_cached_online_playback, select_online_download_directory,
     update_online_music_settings,
 };
 use playback_commands::{
@@ -141,6 +143,9 @@ macro_rules! with_tauri_commands {
             set_menu_bar_lyrics,
             get_online_music_settings,
             update_online_music_settings,
+            get_cached_online_playback,
+            cache_online_playback,
+            remove_cached_online_playback,
             get_audio_source_preferences,
             report_audio_source_route_success,
             list_online_music_channels,
@@ -268,6 +273,8 @@ enum AppError {
     OnlineDownload(#[from] online_download::OnlineDownloadError),
     #[error("online execution error: {0}")]
     OnlineExecution(#[from] online_execution::OnlineExecutionError),
+    #[error("playback cache error: {0}")]
+    PlaybackCache(#[from] playback_cache::PlaybackCacheError),
     #[error("yt-dlp sidecar error: {0}")]
     YtDlp(#[from] yt_dlp_sidecar::YtDlpSidecarError),
     #[error("LX V8 sidecar error: {0}")]
@@ -388,6 +395,7 @@ struct AppState {
     audio_source_preferences: Mutex<audio_source_preference::ChannelAudioSourcePreferences>,
     download_source_router: Mutex<download_source_router::DownloadSourceRouter>,
     online_music_cache: Arc<online_music::OnlineMusicCache>,
+    playback_cache: Arc<playback_cache::PlaybackCache>,
     online_executor: Arc<online_execution::OnlineExecutor>,
     yt_dlp_sidecar: Arc<yt_dlp_sidecar::YtDlpSidecar>,
     audio_source_registry: Mutex<AudioSourceRegistry>,
@@ -440,6 +448,7 @@ impl AppState {
             .unwrap_or_else(|| PathBuf::from("."));
         Self::new_with_plugin_dirs(
             db_path,
+            app_data_dir.join("playback-cache"),
             app_data_dir.join("plugins"),
             app_data_dir.join("bundled-plugins"),
         )
@@ -447,6 +456,7 @@ impl AppState {
 
     fn new_with_plugin_dirs(
         db_path: &Path,
+        playback_cache_dir: PathBuf,
         user_plugins_dir: PathBuf,
         bundled_plugins_dir: PathBuf,
     ) -> AppResult<Self> {
@@ -459,11 +469,19 @@ impl AppState {
         restrict_path_to_current_user(db_path, 0o600)?;
         database::initialize(&mut connection)?;
         let db = Arc::new(Mutex::new(connection));
-        let configured_music_folder = {
+        let (configured_music_folder, playback_cache_max_mb) = {
             let connection = db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
             online_download::recover_interrupted_tasks(&connection, now_timestamp())?;
-            load_library_folder(&connection)?
+            let settings = online_music::load_settings(&connection)?;
+            (
+                load_library_folder(&connection)?,
+                settings.playback_cache_max_mb,
+            )
         };
+        let playback_cache = Arc::new(playback_cache::PlaybackCache::new(
+            playback_cache_dir,
+            playback_cache_max_mb,
+        )?);
         let library = {
             let connection = db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
             library::LibraryService::load(&connection)?
@@ -573,6 +591,7 @@ impl AppState {
                 download_source_router::DownloadSourceRouter::default(),
             ),
             online_music_cache: Arc::new(online_music::OnlineMusicCache::default()),
+            playback_cache,
             online_executor,
             yt_dlp_sidecar,
             audio_source_registry: Mutex::new(audio_source_registry),
@@ -6198,8 +6217,19 @@ pub fn run() {
                 });
             },
         )
+        .register_asynchronous_uri_scheme_protocol(
+            playback_cache::PLAYBACK_CACHE_PROTOCOL,
+            |context, request, responder| {
+                let app = context.app_handle().clone();
+                let _task = tauri::async_runtime::spawn_blocking(move || {
+                    let state = app.state::<AppState>();
+                    responder.respond(state.playback_cache.protocol_response(request));
+                });
+            },
+        )
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
+            let playback_cache_dir = app.path().app_cache_dir()?.join("online-playback");
             let db_path = app_data_dir.join("fika-library.sqlite3");
             let resource_plugins_dir = app.path().resource_dir()?.join("plugins");
             let source_plugins_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins");
@@ -6210,6 +6240,7 @@ pub fn run() {
             };
             let state = AppState::new_with_plugin_dirs(
                 &db_path,
+                playback_cache_dir,
                 app_data_dir.join("plugins"),
                 bundled_plugins_dir,
             )?;

@@ -131,6 +131,7 @@ export const ZH_CN_MESSAGES: Readonly<Record<string, string>> = {
   "Playback mode: {mode}": "播放模式：{mode}",
   "Playback mode: {mode}. Change to {next}": "播放模式：{mode}。切换为{next}",
   "Playback quality": "播放音质",
+  "Playback cache limit (MB)": "播放缓存上限（MB）",
   "Play": "播放",
   "Play or pause": "播放或暂停",
   "Play playback": "开始播放",

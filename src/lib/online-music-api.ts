@@ -63,6 +63,7 @@ export const ONLINE_DOWNLOAD_COMPLETED_EVENT = "online-music:download-completed"
 export type OnlinePlayback = {
   track: OnlineTrack;
   url: string;
+  remoteUrl?: string;
   providerName: string;
   candidate: Pick<
     OnlineTrack["candidates"][number],
@@ -149,6 +150,12 @@ function artistSetKey(value: string) {
 
 const defaultAudioSourceRouter = new AudioSourceRouter();
 const preloadedMedia = new Map<string, HTMLAudioElement>();
+const cachedPlaybackIds = new Map<string, string>();
+const PLAYBACK_CACHE_PROTOCOL = "fika-cache";
+
+type CachedOnlinePlayback = Omit<OnlinePlayback, "track" | "url" | "remoteUrl"> & {
+  cacheId: string;
+};
 
 export function getOnlineMusicSettings() {
   return invoke<OnlineMusicSettings>(TAURI_COMMANDS.getOnlineMusicSettings);
@@ -160,6 +167,36 @@ export async function updateOnlineMusicSettings(settings: OnlineMusicSettings) {
   });
   invalidateOnlinePlaybackCaches();
   return updated;
+}
+
+export async function cacheOnlinePlayback(playback: OnlinePlayback): Promise<void> {
+  if (!playback.remoteUrl) return;
+  try {
+    await invoke<void>(TAURI_COMMANDS.cacheOnlinePlayback, {
+      request: {
+        trackKey: playback.track.key,
+        sourceUrl: playback.remoteUrl,
+        providerName: playback.providerName,
+        candidate: playback.candidate,
+        audioSourceId: playback.audioSourceId,
+        quality: playback.quality,
+      },
+    });
+  } catch {
+    // Playback caching is opportunistic and must never interrupt active audio.
+  }
+}
+
+export async function invalidateCachedPlaybackUrl(url: string): Promise<boolean> {
+  const cacheId = cachedPlaybackIds.get(url);
+  if (!cacheId) return false;
+  cachedPlaybackIds.delete(url);
+  try {
+    await invoke<void>(TAURI_COMMANDS.removeCachedOnlinePlayback, { cacheId });
+  } catch {
+    // A missing or already-pruned entry is equivalent to successful invalidation.
+  }
+  return true;
 }
 
 export function listOnlineMusicChannels(includeExcluded = false) {
@@ -373,6 +410,9 @@ export async function resolveOnlineTrack(
   options: ResolveOnlineTrackOptions,
 ): Promise<OnlinePlayback> {
   const qualities = qualityFallback(options.quality ?? options.settings.playbackQuality);
+  throwIfAborted(options.signal);
+  const cached = await cachedOnlinePlayback(options, qualities);
+  if (cached) return cached;
   const router = options.router ?? defaultAudioSourceRouter;
   const mode = options.settings.audioSourceSelectionMode ?? "automatic";
   const preferredAudioSources = mode === "automatic"
@@ -442,6 +482,64 @@ export async function resolveOnlineTrack(
   }
   throwIfAborted(options.signal);
   throw new OnlinePlaybackResolutionError(failures);
+}
+
+async function cachedOnlinePlayback(
+  options: ResolveOnlineTrackOptions,
+  qualities: SourceQuality[],
+): Promise<OnlinePlayback | null> {
+  let cached: unknown;
+  try {
+    cached = await invoke<unknown>(TAURI_COMMANDS.getCachedOnlinePlayback, {
+      trackKey: options.track.key,
+      qualities,
+    });
+  } catch {
+    return null;
+  }
+  throwIfAborted(options.signal);
+  if (!isCachedOnlinePlayback(cached) || !qualities.includes(cached.quality)) {
+    return null;
+  }
+  const url = convertFileSrc(cached.cacheId, PLAYBACK_CACHE_PROTOCOL);
+  if (options.excludedUrls?.has(url)) {
+    try {
+      await invoke<void>(TAURI_COMMANDS.removeCachedOnlinePlayback, {
+        cacheId: cached.cacheId,
+      });
+    } catch {
+      // Continue with remote resolution even if stale cache cleanup fails.
+    }
+    cachedPlaybackIds.delete(url);
+    throwIfAborted(options.signal);
+    return null;
+  }
+  cachedPlaybackIds.set(url, cached.cacheId);
+  return {
+    track: options.track,
+    url,
+    providerName: cached.providerName,
+    candidate: cached.candidate,
+    audioSourceId: cached.audioSourceId,
+    quality: cached.quality,
+  };
+}
+
+function isCachedOnlinePlayback(value: unknown): value is CachedOnlinePlayback {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const cached = value as Partial<CachedOnlinePlayback>;
+  const candidate = cached.candidate as Partial<OnlinePlayback["candidate"]> | undefined;
+  return typeof cached.cacheId === "string"
+    && cached.cacheId.length > 0
+    && typeof cached.providerName === "string"
+    && typeof cached.audioSourceId === "string"
+    && typeof cached.quality === "string"
+    && candidate !== undefined
+    && typeof candidate.id === "string"
+    && typeof candidate.pluginId === "string"
+    && typeof candidate.sourceId === "string"
+    && typeof candidate.channelId === "string"
+    && typeof candidate.channelName === "string";
 }
 
 async function loadAudioSourcePreferences(): Promise<Record<string, string>> {
@@ -733,6 +831,7 @@ async function raceCandidates(
           return { ...cached, track: options.track };
         }
         let mediaUrl: string | null = null;
+        let remoteUrl: string | null = null;
         for (let resolutionAttempt = 0; resolutionAttempt < 2; resolutionAttempt += 1) {
           const outcome = await dispatchAudioSourceRequest(
             options.audioSource.id,
@@ -769,6 +868,7 @@ async function raceCandidates(
               signal: branchAbort.signal,
             });
             mediaUrl = candidateMediaUrl;
+            remoteUrl = resolvedUrl;
             break;
           } catch (error) {
             const retryWithFreshUrl = resolutionAttempt === 0
@@ -779,9 +879,11 @@ async function raceCandidates(
           }
         }
         if (mediaUrl === null) throw new Error("Audio Source did not return a playable URL.");
+        if (remoteUrl === null) throw new Error("Audio Source did not return a cacheable URL.");
         const playback = {
           track: options.track,
           url: mediaUrl,
+          remoteUrl,
           providerName: options.audioSource.name,
           candidate: {
             id: candidate.id,
@@ -888,6 +990,7 @@ export function invalidateOnlinePlaybackCaches() {
   resolvedPlaybackCache.clear();
   failedPlaybackCache.clear();
   defaultAudioSourceRouter.reset();
+  cachedPlaybackIds.clear();
   clearPreloadedMedia();
 }
 

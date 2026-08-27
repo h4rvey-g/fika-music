@@ -55,4 +55,18 @@ describe("OnlineMusicSettings", () => {
       expect.objectContaining({ playbackQuality: "flac", downloadQuality: "128k" }),
     );
   });
+
+  it("persists the playback cache limit in megabytes", async () => {
+    const wrapper = mount(OnlineMusicSettings, {
+      props: { audioSources: [createAudioSourceRecord()] },
+    });
+    await flushPromises();
+
+    await wrapper.get('[data-testid="online-playback-cache-limit"]').setValue("750");
+    await flushPromises();
+
+    expect(api.updateOnlineMusicSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({ playbackCacheMaxMb: 750 }),
+    );
+  });
 });

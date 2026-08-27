@@ -140,7 +140,7 @@ export type OnlineDownloadState = "queued" | "running" | "paused" | "completed" 
 
 export type OnlineDownloadTask = { taskId: string, kind: string, title: string, state: OnlineDownloadState, destination: string, selectedAudioSourceId: string | null, totalItems: number, completedItems: number, skippedItems: number, failedItems: number, createdAt: number, updatedAt: number, items: Array<OnlineDownloadItem>, };
 
-export type OnlineMusicSettings = { excludedChannels: Array<string>, channelPriority: Array<string>, audioSourceSelectionMode: AudioSourceSelectionMode, audioSourcePriority: Array<string>, layerTimeoutSeconds: number, playbackTimeoutSeconds: number, playbackQuality: SourceQuality, downloadQuality: SourceQuality, searchHistoryEnabled: boolean, downloadDirectory: string | null, filenameTemplate: string, downloadConcurrency: number, batchNotifications: boolean, };
+export type OnlineMusicSettings = { excludedChannels: Array<string>, channelPriority: Array<string>, audioSourceSelectionMode: AudioSourceSelectionMode, audioSourcePriority: Array<string>, layerTimeoutSeconds: number, playbackTimeoutSeconds: number, playbackQuality: SourceQuality, playbackCacheMaxMb: number, downloadQuality: SourceQuality, searchHistoryEnabled: boolean, downloadDirectory: string | null, filenameTemplate: string, downloadConcurrency: number, batchNotifications: boolean, };
 
 export type OnlinePlaylist = { key: string, channelId: string, pluginId: string, sourceId: string, channelName: string, accountRef: string | null, id: string, name: string, description: string | null, coverUrl: string | null, trackCount: number | null, ownerName: string | null, canMutate: boolean, isFavorite: boolean, platformIds: Record<string, string | number>, rawInfo: Record<string, unknown>, rank: number, };
 
@@ -303,6 +303,9 @@ export const TAURI_COMMANDS = {
   setMenuBarLyrics: "set_menu_bar_lyrics",
   getOnlineMusicSettings: "get_online_music_settings",
   updateOnlineMusicSettings: "update_online_music_settings",
+  getCachedOnlinePlayback: "get_cached_online_playback",
+  cacheOnlinePlayback: "cache_online_playback",
+  removeCachedOnlinePlayback: "remove_cached_online_playback",
   getAudioSourcePreferences: "get_audio_source_preferences",
   reportAudioSourceRouteSuccess: "report_audio_source_route_success",
   listOnlineMusicChannels: "list_online_music_channels",
