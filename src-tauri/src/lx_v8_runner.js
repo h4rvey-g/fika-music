@@ -227,9 +227,13 @@ if (sourceError) {
   void emit({ type: 'log', level: 'warn', message: `LX source error after initialization: ${errorMessage(sourceError)}` });
 }
 
-let value = null;
-if (command.payload != null) value = await handlers[EVENT_NAMES.request](command.payload);
-await emit({ type: 'complete', ok: true, catalog: initializedCatalog, value });
+try {
+  let value = null;
+  if (command.payload != null) value = await handlers[EVENT_NAMES.request](command.payload);
+  await emit({ type: 'complete', ok: true, catalog: initializedCatalog, value });
+} catch (error) {
+  await emit({ type: 'complete', ok: false, error: errorMessage(error) });
+}
 await writeQueue;
 await stdinReader.cancel();
 await stdoutWriter.close();

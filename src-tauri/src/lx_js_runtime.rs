@@ -2,8 +2,9 @@
 
 use crate::lx_js_importer::LxJsMetadata;
 use crate::source_runtime::{
-    SourceCapability, SourceHttpMethod, SourceHttpRequest, SourceHttpResponse, SourceInfo,
-    SourceProvider, SourceRequest, SourceResponse, SourceRuntimeContext, SourceRuntimeError,
+    normalize_lx_music_info, SourceCapability, SourceHttpMethod, SourceHttpRequest,
+    SourceHttpResponse, SourceInfo, SourceProvider, SourceRequest, SourceResponse,
+    SourceRuntimeContext, SourceRuntimeError,
 };
 use aes::Aes128;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -551,6 +552,7 @@ impl SourceProvider for ImportedLxJsProvider {
             return Err(context.unsupported_action(request.source().to_owned(), request.action()));
         };
         context.require_capability(SourceCapability::NetworkAny, "execute imported LX musicUrl")?;
+        let music_info = normalize_lx_music_info(&source, music_info);
         let payload = json!({
             "source": source,
             "action": "musicUrl",
@@ -1287,6 +1289,28 @@ mod tests {
             json!({ "id": "track-hash", "quality": "128k" })
         );
         assert_eq!(requests[0].timeout, Some(Duration::from_millis(2500)));
+    }
+
+    #[test]
+    fn imported_script_should_receive_normalized_music_info_aliases() {
+        let source = r#"
+            const { EVENT_NAMES, on, send } = globalThis.lx;
+            on(EVENT_NAMES.request, ({ info }) => Promise.resolve(
+              info.musicInfo.songmid === 'track-hash'
+                ? 'https://cdn.example.test/song.mp3'
+                : 'file:///missing-songmid.mp3'
+            ));
+            send(EVENT_NAMES.inited, { sources: { kg: { type: 'music', actions: ['musicUrl'], qualitys: ['128k'] } } });
+        "#;
+        let runtime = SourceRuntime::with_granted_capabilities([SourceCapability::NetworkAny]);
+
+        let outcome = dispatch(&runtime, &provider(source))
+            .expect("LX request should expose normalized track aliases");
+
+        assert_eq!(
+            outcome.response,
+            SourceResponse::MusicUrl("https://cdn.example.test/song.mp3".to_owned())
+        );
     }
 
     #[test]

@@ -196,6 +196,39 @@ describe("AudioSourceManager", () => {
     wrapper.unmount();
   });
 
+  it("renders local music as not checked without a synthetic latency", async () => {
+    const localSource = {
+      ...createAudioSourceRecord().sources[0],
+      id: "local",
+      name: "Local Music",
+    };
+    apiMocks.listAudioSources.mockResolvedValue([
+      managerAudioSourceRecord({ sources: [localSource] }),
+    ]);
+    apiMocks.checkAudioSourceAvailability.mockResolvedValue([
+      {
+        audioSourceId: "imported-source",
+        sourceId: "local",
+        sourceName: "Local Music",
+        quality: "128k",
+        available: null,
+        latencyMs: 0,
+        message:
+          "Local Music requires track metadata and cannot be checked with a synthetic track.",
+      },
+    ]);
+    const wrapper = mount(AudioSourceManager);
+    await flushPromises();
+
+    await wrapper.get('button[aria-label="Inspect Imported Source"]').trigger("click");
+    await wrapper.get('button[aria-label="Check Local Music"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Not checked");
+    expect(wrapper.text()).not.toContain("0 ms");
+    wrapper.unmount();
+  });
+
   it("reviews permissions before enabling a source", async () => {
     const selected = managerAudioSourceRecord({
       grantedCapabilities: ["network:any"],

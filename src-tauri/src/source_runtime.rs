@@ -32,6 +32,70 @@ pub const LX_SOURCE_LOCAL: &str = "local";
 
 pub const SOURCE_RUNTIME_API_VERSION: SourceRuntimeApiVersion = SourceRuntimeApiVersion::new(1, 5);
 
+pub(crate) fn normalize_lx_music_info(source: &str, music_info: JsonValue) -> JsonValue {
+    let JsonValue::Object(mut info) = music_info else {
+        return music_info;
+    };
+    let preferred_keys: &[&str] = match source {
+        LX_SOURCE_KG => &["hash", "songmid", "id", "songId", "songid", "mid", "rid"],
+        LX_SOURCE_TX => &["songmid", "mid", "id", "songId", "songid", "rid"],
+        LX_SOURCE_WY => &["songmid", "id", "songId", "songid", "mid", "rid"],
+        LX_SOURCE_KW => &["songmid", "musicrid", "rid", "id", "mid", "songId"],
+        LX_SOURCE_MG => &[
+            "copyrightId",
+            "songmid",
+            "id",
+            "contentId",
+            "songId",
+            "songid",
+        ],
+        _ => &["songmid", "id", "songId", "songid", "hash", "rid", "mid"],
+    };
+    let Some((_, mut track_id)) = preferred_keys.iter().find_map(|key| {
+        let value = info.get(*key)?;
+        let valid = match value {
+            JsonValue::String(value) => !value.trim().is_empty(),
+            JsonValue::Number(_) => true,
+            _ => false,
+        };
+        valid.then(|| (*key, value.clone()))
+    }) else {
+        return JsonValue::Object(info);
+    };
+    if source == LX_SOURCE_KW {
+        if let Some(value) = track_id
+            .as_str()
+            .and_then(|value| value.strip_prefix("MUSIC_"))
+        {
+            track_id = JsonValue::String(value.to_owned());
+        }
+    }
+
+    for alias in ["id", "songmid", "songId", "songid", "mid", "rid"] {
+        info.entry(alias.to_owned())
+            .or_insert_with(|| track_id.clone());
+    }
+    match source {
+        LX_SOURCE_KG => {
+            info.entry("hash".to_owned()).or_insert(track_id);
+        }
+        LX_SOURCE_KW => {
+            if let Some(value) = track_id
+                .as_str()
+                .filter(|value| value.chars().all(|character| character.is_ascii_digit()))
+            {
+                info.entry("musicrid".to_owned())
+                    .or_insert_with(|| JsonValue::String(format!("MUSIC_{value}")));
+            }
+        }
+        LX_SOURCE_MG => {
+            info.entry("copyrightId".to_owned()).or_insert(track_id);
+        }
+        _ => {}
+    }
+    JsonValue::Object(info)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export_to = "bindings.ts")]
@@ -3019,6 +3083,47 @@ mod tests {
         ("nianxin-v1.0.1.js", "念心音源"),
         ("changqing-svip-v1.2.0.js", "长青SVIP音源"),
     ];
+
+    #[test]
+    fn music_info_normalization_should_preserve_a_qq_mid_distinct_from_numeric_id() {
+        let normalized = normalize_lx_music_info(
+            LX_SOURCE_TX,
+            json!({ "id": 4835784, "songmid": "001yS0N33yPm1B" }),
+        );
+
+        assert_eq!(
+            normalized,
+            json!({
+                "id": 4835784,
+                "songmid": "001yS0N33yPm1B",
+                "songId": "001yS0N33yPm1B",
+                "songid": "001yS0N33yPm1B",
+                "mid": "001yS0N33yPm1B",
+                "rid": "001yS0N33yPm1B"
+            })
+        );
+    }
+
+    #[test]
+    fn music_info_normalization_should_derive_kuwo_aliases_without_rewriting_musicrid() {
+        let normalized = normalize_lx_music_info(
+            LX_SOURCE_KW,
+            json!({ "id": "MUSIC_321946135", "musicrid": "MUSIC_321946135" }),
+        );
+
+        assert_eq!(
+            normalized,
+            json!({
+                "id": "MUSIC_321946135",
+                "musicrid": "MUSIC_321946135",
+                "songmid": "321946135",
+                "songId": "321946135",
+                "songid": "321946135",
+                "mid": "321946135",
+                "rid": "321946135"
+            })
+        );
+    }
 
     #[derive(Debug, Default)]
     struct RecordingHost {

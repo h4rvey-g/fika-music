@@ -4421,7 +4421,20 @@ fn check_audio_source_availability_inner(
         .online_executor
         .map(probes, |(source_id, source_name, quality)| {
             let started_at = Instant::now();
-            let request = audio_source_availability_request(&source_id, quality);
+            let Some(request) = audio_source_availability_request(&source_id, quality) else {
+                return AudioSourceAvailability {
+                    audio_source_id: audio_source_id.to_owned(),
+                    source_id,
+                    source_name,
+                    quality,
+                    available: None,
+                    latency_ms: 0,
+                    message: Some(
+                        "Local Music requires track metadata and cannot be checked with a synthetic track."
+                            .to_owned(),
+                    ),
+                };
+            };
             let (available, message) = match dispatch_audio_source_request_inner(
                 state,
                 audio_source_id,
@@ -4449,7 +4462,7 @@ fn check_audio_source_availability_inner(
                 source_id,
                 source_name,
                 quality,
-                available,
+                available: Some(available),
                 latency_ms: started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
                 message,
             }
@@ -4464,7 +4477,7 @@ fn check_audio_source_availability_inner(
                 source_id,
                 source_name,
                 quality,
-                available: false,
+                available: Some(false),
                 latency_ms: 0,
                 message: Some(message),
             })
@@ -4475,14 +4488,24 @@ fn check_audio_source_availability_inner(
 fn audio_source_availability_request(
     source_id: &str,
     quality: source_runtime::SourceQuality,
-) -> source_runtime::SourceRequest {
+) -> Option<source_runtime::SourceRequest> {
+    if source_id == source_runtime::LX_SOURCE_LOCAL {
+        return None;
+    }
     let (track_id, title, artist) = match source_id {
         source_runtime::LX_SOURCE_KG => (
             "4D766DEC7A90A011D730ED939D158131",
             "Under My Skin",
             "Andrew Cui",
         ),
-        source_runtime::LX_SOURCE_WY => ("347230", "Test Track", "Test Artist"),
+        source_runtime::LX_SOURCE_KW => {
+            ("321946135", "海阔天空 (Live)-时光音乐会", "G.E.M. 邓紫棋")
+        }
+        source_runtime::LX_SOURCE_TX => {
+            ("001IKZC317ahOb", "Circling Under My Skin", "joshchupp123")
+        }
+        source_runtime::LX_SOURCE_WY => ("347230", "海阔天空", "Beyond"),
+        source_runtime::LX_SOURCE_MG => ("6005752DXKE", "海阔天空", "Beyond"),
         youtube_music::YOUTUBE_MUSIC_SOURCE_ID => ("ZrOKjDZOtkA", "Test Track", "Test Artist"),
         _ => ("347230", "Test Track", "Test Artist"),
     };
@@ -4501,11 +4524,11 @@ fn audio_source_availability_request(
     if source_id == youtube_music::YOUTUBE_MUSIC_SOURCE_ID {
         music_info.insert("videoId".to_owned(), JsonValue::String(track_id.to_owned()));
     }
-    source_runtime::SourceRequest::MusicUrl {
+    Some(source_runtime::SourceRequest::MusicUrl {
         source: source_id.to_owned(),
         music_info: JsonValue::Object(music_info),
         quality,
-    }
+    })
 }
 
 #[tauri::command]
@@ -6304,7 +6327,8 @@ mod tests {
         let request = audio_source_availability_request(
             source_runtime::LX_SOURCE_WY,
             source_runtime::SourceQuality::K128,
-        );
+        )
+        .expect("NetEase should have a synthetic availability track");
         let source_runtime::SourceRequest::MusicUrl { music_info, .. } = request else {
             panic!("availability request should resolve music URLs");
         };
@@ -6314,10 +6338,10 @@ mod tests {
             serde_json::json!({
                 "id": "347230",
                 "songId": "347230",
-                "title": "Test Track",
-                "name": "Test Track",
-                "artist": "Test Artist",
-                "singer": "Test Artist"
+                "title": "海阔天空",
+                "name": "海阔天空",
+                "artist": "Beyond",
+                "singer": "Beyond"
             })
         );
     }
@@ -6327,7 +6351,8 @@ mod tests {
         let request = audio_source_availability_request(
             source_runtime::LX_SOURCE_KG,
             source_runtime::SourceQuality::K320,
-        );
+        )
+        .expect("Kugou should have a synthetic availability track");
         let source_runtime::SourceRequest::MusicUrl { music_info, .. } = request else {
             panic!("availability request should resolve music URLs");
         };
@@ -6336,6 +6361,46 @@ mod tests {
             music_info.get("hash"),
             Some(&serde_json::json!("4D766DEC7A90A011D730ED939D158131"))
         );
+    }
+
+    #[test]
+    fn availability_request_should_use_a_kuwo_track_identifier() {
+        let request = audio_source_availability_request(
+            source_runtime::LX_SOURCE_KW,
+            source_runtime::SourceQuality::K128,
+        )
+        .expect("Kuwo should have a synthetic availability track");
+        let source_runtime::SourceRequest::MusicUrl { music_info, .. } = request else {
+            panic!("availability request should resolve music URLs");
+        };
+
+        assert_eq!(music_info.get("id"), Some(&serde_json::json!("321946135")));
+    }
+
+    #[test]
+    fn availability_request_should_use_a_free_qq_track_mid() {
+        let request = audio_source_availability_request(
+            source_runtime::LX_SOURCE_TX,
+            source_runtime::SourceQuality::K128,
+        )
+        .expect("QQ Music should have a synthetic availability track");
+        let source_runtime::SourceRequest::MusicUrl { music_info, .. } = request else {
+            panic!("availability request should resolve music URLs");
+        };
+
+        assert_eq!(
+            music_info.get("id"),
+            Some(&serde_json::json!("001IKZC317ahOb"))
+        );
+    }
+
+    #[test]
+    fn availability_request_should_not_synthesize_a_local_track() {
+        assert!(audio_source_availability_request(
+            source_runtime::LX_SOURCE_LOCAL,
+            source_runtime::SourceQuality::K128,
+        )
+        .is_none());
     }
 
     #[test]

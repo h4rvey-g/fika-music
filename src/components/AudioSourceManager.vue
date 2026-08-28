@@ -273,8 +273,13 @@ function availabilityFor(audioSourceId: string, sourceId: string) {
 }
 
 function availabilityClass(result: AudioSourceAvailability | null) {
-  if (!result) return "text-muted";
+  if (!result || result.available === null) return "text-muted";
   return result.available ? "text-success" : "text-error";
+}
+
+function availabilityLabel(result: AudioSourceAvailability | null) {
+  if (!result || result.available === null) return "Not checked";
+  return result.available ? "Available" : "Unavailable";
 }
 
 function isCheckingAvailability(audioSourceId: string, sourceId?: string) {
@@ -689,9 +694,10 @@ function formatTimestamp(timestamp: number) {
                     </div>
                     <div
                       v-if="availabilityFor(audioSource.id, source.id)?.message"
-                      class="mt-1 break-words text-xs text-error"
+                      class="mt-1 break-words text-xs"
+                      :class="availabilityFor(audioSource.id, source.id)?.available === null ? 'text-muted' : 'text-error'"
                     >
-                      {{ availabilityFor(audioSource.id, source.id)?.message }}
+                      {{ t(availabilityFor(audioSource.id, source.id)?.message ?? "") }}
                     </div>
                   </div>
                   <div class="flex shrink-0 items-center gap-3">
@@ -701,14 +707,22 @@ function formatTimestamp(timestamp: number) {
                       :class="availabilityClass(availabilityFor(audioSource.id, source.id))"
                     >
                       <CircleCheck
-                        v-if="availabilityFor(audioSource.id, source.id)?.available"
+                        v-if="availabilityFor(audioSource.id, source.id)?.available === true"
                         :size="14"
                         aria-hidden="true"
                       />
-                      <CircleX v-else :size="14" aria-hidden="true" />
-                      {{ t(availabilityFor(audioSource.id, source.id)?.available ? "Available" : "Unavailable") }}
+                      <CircleX
+                        v-else-if="availabilityFor(audioSource.id, source.id)?.available === false"
+                        :size="14"
+                        aria-hidden="true"
+                      />
+                      <AlertCircle v-else :size="14" aria-hidden="true" />
+                      {{ t(availabilityLabel(availabilityFor(audioSource.id, source.id))) }}
                     </span>
-                    <span v-if="availabilityFor(audioSource.id, source.id)" class="text-xs text-muted">
+                    <span
+                      v-if="availabilityFor(audioSource.id, source.id) && availabilityFor(audioSource.id, source.id)?.available !== null"
+                      class="text-xs text-muted"
+                    >
                       {{ availabilityFor(audioSource.id, source.id)?.latencyMs }} ms
                     </span>
                     <button

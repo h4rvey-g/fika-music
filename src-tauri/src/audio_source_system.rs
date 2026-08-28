@@ -319,7 +319,7 @@ pub struct AudioSourceAvailability {
     pub source_id: String,
     pub source_name: String,
     pub quality: SourceQuality,
-    pub available: bool,
+    pub available: Option<bool>,
     pub latency_ms: u64,
     pub message: Option<String>,
 }

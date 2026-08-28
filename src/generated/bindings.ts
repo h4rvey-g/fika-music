@@ -10,7 +10,7 @@ export type AlbumCoverResult = { groupId: string, status: AlbumCoverStatus, data
 
 export type AlbumCoverStatus = "embedded" | "downloaded" | "placeholder" | "authorizationRequired" | "needsReview" | "pending" | "failed";
 
-export type AudioSourceAvailability = { audioSourceId: string, sourceId: string, sourceName: string, quality: SourceQuality, available: boolean, latencyMs: number, message: string | null, };
+export type AudioSourceAvailability = { audioSourceId: string, sourceId: string, sourceName: string, quality: SourceQuality, available: boolean | null, latencyMs: number, message: string | null, };
 
 export type AudioSourceCommandError = { message: string, diagnostics: Array<AudioSourceDiagnostic>, };
 

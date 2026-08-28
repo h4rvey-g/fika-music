@@ -2,8 +2,8 @@ use crate::lx_js_importer::LxJsMetadata;
 use crate::lx_js_runtime::{build_http_request, resolve_webview_media_url, LxHttpOptions};
 use crate::registry_support::operation_nonce;
 use crate::source_runtime::{
-    lx_music_source, SourceAction, SourceCapability, SourceHttpResponse, SourceInfo,
-    SourceProvider, SourceQuality, SourceRequest, SourceResponse, SourceRuntimeContext,
+    lx_music_source, normalize_lx_music_info, SourceAction, SourceCapability, SourceHttpResponse,
+    SourceInfo, SourceProvider, SourceQuality, SourceRequest, SourceResponse, SourceRuntimeContext,
     SourceRuntimeError, LX_SOURCE_KG, LX_SOURCE_KIND_MUSIC, LX_SOURCE_KW, LX_SOURCE_LOCAL,
     LX_SOURCE_MG, LX_SOURCE_TX, LX_SOURCE_WY,
 };
@@ -501,6 +501,7 @@ impl SourceProvider for ImportedLxV8Provider {
             return Err(context.unsupported_action(request.source().to_owned(), request.action()));
         };
         context.require_capability(SourceCapability::NetworkAny, "execute LX V8 musicUrl")?;
+        let music_info = normalize_lx_music_info(&source, music_info);
         let payload = json!({
             "source": source,
             "action": "musicUrl",
@@ -966,14 +967,18 @@ fn terminate_child(child: &mut Child) {
 
 fn sidecar_error_summary(stderr: &[u8]) -> String {
     let message = String::from_utf8_lossy(stderr);
-    sanitize_message(
-        message
-            .lines()
-            .rev()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .unwrap_or("the V8 process exited unsuccessfully"),
-    )
+    let line = message
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("error:"))
+        .or_else(|| message.lines().map(str::trim).find(|line| !line.is_empty()))
+        .unwrap_or("the V8 process exited unsuccessfully");
+    let detail = line
+        .rsplit_once(" Error: ")
+        .map(|(_, detail)| detail)
+        .or_else(|| line.strip_prefix("error: "))
+        .unwrap_or(line);
+    sanitize_message(detail)
 }
 
 fn sanitize_message(value: &str) -> String {
@@ -1026,6 +1031,16 @@ mod tests {
             catalog[LX_SOURCE_KG].qualities,
             [SourceQuality::K128, SourceQuality::Flac]
         );
+    }
+
+    #[test]
+    fn process_error_summary_should_prefer_the_deno_error_over_stack_frames() {
+        let stderr = br#"error: Uncaught (in promise) Error: get music url failed
+    at Array.eval (<anonymous>:13:4700)
+    at Generator.next (<anonymous>:13:7965)
+"#;
+
+        assert_eq!(sidecar_error_summary(stderr), "get music url failed");
     }
 
     #[test]
@@ -1106,6 +1121,32 @@ mod tests {
             source_catalog,
         );
         let runtime = SourceRuntime::with_granted_capabilities([SourceCapability::NetworkAny]);
+        let source_id =
+            std::env::var("FIKA_LX_V8_LIVE_SOURCE_ID").unwrap_or_else(|_| LX_SOURCE_KG.to_owned());
+        let music_info = if source_id == LX_SOURCE_KG {
+            json!({
+                "id": "04DE99837D367481C2CD07C107003E1D",
+                "hash": "04DE99837D367481C2CD07C107003E1D",
+                "songmid": "04DE99837D367481C2CD07C107003E1D",
+                "name": "无烟区",
+                "singer": "陈粒",
+                "interval": 322,
+            })
+        } else {
+            let track_id = match source_id.as_str() {
+                LX_SOURCE_TX => "001IKZC317ahOb",
+                LX_SOURCE_KW => "321946135",
+                LX_SOURCE_MG => "6005752DXKE",
+                _ => "347230",
+            };
+            json!({
+                "id": track_id,
+                "title": "海阔天空",
+                "name": "海阔天空",
+                "artist": "Beyond",
+                "singer": "Beyond",
+            })
+        };
 
         let initialized = runtime
             .initialize_provider(&provider)
@@ -1114,15 +1155,8 @@ mod tests {
             .dispatch_request(
                 &provider,
                 SourceRequest::MusicUrl {
-                    source: LX_SOURCE_KG.to_owned(),
-                    music_info: json!({
-                        "id": "04DE99837D367481C2CD07C107003E1D",
-                        "hash": "04DE99837D367481C2CD07C107003E1D",
-                        "songmid": "04DE99837D367481C2CD07C107003E1D",
-                        "name": "无烟区",
-                        "singer": "陈粒",
-                        "interval": 322,
-                    }),
+                    source: source_id,
+                    music_info,
                     quality: SourceQuality::K128,
                 },
             )

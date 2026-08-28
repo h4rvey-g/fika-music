@@ -640,6 +640,8 @@ export const ZH_CN_MESSAGES: Readonly<Record<string, string>> = {
   "Unrated": "未评分",
   "Track properties": "歌曲属性",
   "Unavailable": "不可用",
+  "Not checked": "未检查",
+  "Local Music requires track metadata and cannot be checked with a synthetic track.": "本地音乐需要真实歌曲元数据，无法使用合成歌曲进行检查。",
   "Unavailable track": "不可用的歌曲",
   "Ungrouped tracks": "未分组歌曲",
   "Unknown album": "未知专辑",
