@@ -813,8 +813,17 @@ impl AudioSourceRegistry {
 
         let transaction = connection.unchecked_transaction()?;
         let installed = match self.refresh(&transaction).and_then(|_| {
-            self.record(&manifest.id)
-                .ok_or_else(|| AudioSourceSystemError::NotFound(manifest.id.clone()))
+            let installed = self
+                .record(&manifest.id)
+                .ok_or_else(|| AudioSourceSystemError::NotFound(manifest.id.clone()))?;
+            // Importing is the trust decision: grant the source's declared capabilities,
+            // while leaving activation as a separate user action.
+            self.set_capabilities(
+                &transaction,
+                &manifest.id,
+                installed.declared_capabilities,
+                true,
+            )
         }) {
             Ok(installed) => installed,
             Err(error) => {
@@ -2600,7 +2609,14 @@ mod tests {
             .import_file(&connection, &reference_source())
             .expect("reference source should import");
 
-        assert_eq!(imported.state, AudioSourceState::NeedsReview);
+        assert_eq!(imported.state, AudioSourceState::Disabled);
+        assert!(imported.permissions_reviewed);
+        assert_eq!(
+            imported.granted_capabilities,
+            BTreeSet::from([SourceCapability::NetworkAny])
+        );
+        assert!(imported.can_enable);
+        assert!(!imported.enabled);
         assert_eq!(imported.adapter.as_deref(), Some("quickjs"));
         assert!(imported
             .description
@@ -2621,19 +2637,42 @@ mod tests {
             .join(crate::plugin_system::PLUGIN_MANIFEST_FILE)
             .exists());
 
-        registry
-            .set_capabilities(
-                &connection,
-                &imported.id,
-                [SourceCapability::NetworkAny],
-                true,
-            )
-            .expect("network access should be reviewed");
         let enabled = registry
             .set_enabled(&connection, &imported.id, true)
-            .expect("reviewed source should enable");
+            .expect("trusted imported source should enable directly");
         assert_eq!(enabled.state, AudioSourceState::Enabled);
         assert!(enabled.enabled);
+    }
+
+    #[test]
+    fn remove_should_delete_an_enabled_imported_source() {
+        let root = tempfile::tempdir().expect("test directory should exist");
+        let audio_sources_dir = root.path().join("audio-sources");
+        let connection = database();
+        let mut registry =
+            AudioSourceRegistry::new(&audio_sources_dir, Arc::new(SourceRuntime::new()));
+        registry
+            .refresh(&connection)
+            .expect("empty registry should refresh");
+        let imported = registry
+            .import_file(&connection, &reference_source())
+            .expect("reference source should import");
+        registry
+            .set_enabled(&connection, &imported.id, true)
+            .expect("trusted source should enable before removal");
+
+        let records = registry
+            .remove(&connection, &imported.id)
+            .expect("imported source should be removable");
+
+        assert!(records.is_empty());
+        assert!(!Path::new(&imported.path).exists());
+        let mut restarted =
+            AudioSourceRegistry::new(&audio_sources_dir, Arc::new(SourceRuntime::new()));
+        assert!(restarted
+            .refresh(&connection)
+            .expect("registry should refresh after removal")
+            .is_empty());
     }
 
     #[test]

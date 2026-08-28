@@ -51,10 +51,19 @@ describe("AudioSourceManager", () => {
     wrapper.unmount();
   });
 
-  it("imports a local source without using Plugin APIs", async () => {
-    const imported = managerAudioSourceRecord({ id: "new-source", name: "New Source" });
+  it("imports a local source ready for direct enablement", async () => {
+    const imported = managerAudioSourceRecord({
+      id: "new-source",
+      name: "New Source",
+      state: "disabled",
+      permissionsReviewed: true,
+      grantedCapabilities: ["network:any"],
+      canEnable: true,
+    });
+    const enabled = { ...imported, state: "enabled" as const, enabled: true };
     apiMocks.selectAudioSourceFile.mockResolvedValue("/downloads/source.js");
     apiMocks.importAudioSource.mockResolvedValue(imported);
+    apiMocks.setAudioSourceEnabled.mockResolvedValue(enabled);
     const wrapper = mount(AudioSourceManager);
     await flushPromises();
 
@@ -66,9 +75,49 @@ describe("AudioSourceManager", () => {
 
     expect(apiMocks.selectAudioSourceFile).toHaveBeenCalledOnce();
     expect(apiMocks.importAudioSource).toHaveBeenCalledWith("/downloads/source.js");
-    expect(wrapper.text()).toContain("New Source imported");
+    expect(wrapper.text()).toContain("New Source imported.");
+    expect(wrapper.text()).not.toContain("Review its permissions before enabling it");
+    expect(wrapper.find('input[aria-label="Grant Any network host"]').exists()).toBe(false);
     const changes = wrapper.emitted("sourcesChanged") ?? [];
     expect(changes[changes.length - 1]).toEqual([[managerAudioSourceRecord(), imported]]);
+
+    await wrapper.get<HTMLInputElement>('input[aria-label="Enable New Source"]').setValue(true);
+    await flushPromises();
+    expect(apiMocks.setAudioSourceCapabilities).not.toHaveBeenCalled();
+    expect(apiMocks.setAudioSourceEnabled).toHaveBeenCalledWith("new-source", true);
+    wrapper.unmount();
+  });
+
+  it("removes an imported audio source after confirmation", async () => {
+    apiMocks.removeAudioSource.mockResolvedValue([]);
+    const wrapper = mount(AudioSourceManager);
+    await flushPromises();
+
+    await wrapper.get('button[aria-label="Remove Imported Source"]').trigger("click");
+    expect(apiMocks.removeAudioSource).not.toHaveBeenCalled();
+    expect(wrapper.get('[role="alertdialog"]').text()).toContain(
+      "Remove Imported Source?",
+    );
+
+    await wrapper.get('button[aria-label="Confirm remove Imported Source"]').trigger("click");
+    await flushPromises();
+
+    expect(apiMocks.removeAudioSource).toHaveBeenCalledWith("imported-source");
+    expect(wrapper.text()).not.toContain("Audio source manager fixture");
+    expect(wrapper.text()).toContain("Imported Source removed.");
+    wrapper.unmount();
+  });
+
+  it("keeps an audio source when removal is cancelled", async () => {
+    const wrapper = mount(AudioSourceManager);
+    await flushPromises();
+
+    await wrapper.get('button[aria-label="Remove Imported Source"]').trigger("click");
+    await wrapper.get('[role="alertdialog"] button[type="button"]').trigger("click");
+
+    expect(apiMocks.removeAudioSource).not.toHaveBeenCalled();
+    expect(wrapper.find('[role="alertdialog"]').exists()).toBe(false);
+    expect(wrapper.text()).toContain("Audio source manager fixture");
     wrapper.unmount();
   });
 

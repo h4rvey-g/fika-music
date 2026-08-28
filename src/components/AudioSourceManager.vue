@@ -46,6 +46,8 @@ const isUrlDialogOpen = ref(false);
 const sourceUrl = ref("");
 const sourceUrlError = ref<string | null>(null);
 const sourceUrlInput = ref<HTMLInputElement | null>(null);
+const sourceToRemove = ref<AudioSourceRecord | null>(null);
+const removeConfirmButton = ref<HTMLButtonElement | null>(null);
 const busySourceId = ref<string | null>(null);
 const sourceError = ref<string | null>(null);
 const sourceNotice = ref<string | null>(null);
@@ -140,11 +142,7 @@ async function importFromUrl() {
 
 function finishImport(imported: AudioSourceRecord) {
   replaceAudioSource(imported);
-  expandedSourceId.value = imported.id;
-  sourceNotice.value = t(
-    "{name} imported. Review its permissions before enabling it.",
-    { name: imported.name },
-  );
+  sourceNotice.value = t("{name} imported.", { name: imported.name });
 }
 
 async function toggleEnabled(audioSource: AudioSourceRecord) {
@@ -202,10 +200,23 @@ async function saveCapabilities(
   }
 }
 
-async function removeSource(audioSource: AudioSourceRecord) {
-  if (!window.confirm(t("Remove {name}?", { name: audioSource.name }))) {
+async function requestRemoveSource(audioSource: AudioSourceRecord) {
+  sourceToRemove.value = audioSource;
+  await nextTick();
+  removeConfirmButton.value?.focus();
+}
+
+function closeRemoveDialog() {
+  if (sourceToRemove.value?.id === busySourceId.value) {
     return;
   }
+  sourceToRemove.value = null;
+}
+
+async function removeSource() {
+  const audioSource = sourceToRemove.value;
+  if (!audioSource) return;
+
   busySourceId.value = audioSource.id;
   sourceError.value = null;
   sourceNotice.value = null;
@@ -220,6 +231,7 @@ async function removeSource(audioSource: AudioSourceRecord) {
     await loadAudioSources();
   } finally {
     busySourceId.value = null;
+    sourceToRemove.value = null;
   }
 }
 
@@ -460,6 +472,58 @@ function formatTimestamp(timestamp: number) {
       </form>
       <form method="dialog" class="modal-backdrop" @submit.prevent="closeUrlDialog">
         <button type="submit" :disabled="importMode === 'url'">{{ t("Close") }}</button>
+      </form>
+    </dialog>
+
+    <dialog
+      v-if="sourceToRemove"
+      open
+      class="modal"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="audio-source-remove-title"
+      aria-describedby="audio-source-remove-description"
+      @cancel.prevent="closeRemoveDialog"
+    >
+      <div class="modal-box max-w-md">
+        <h3 id="audio-source-remove-title" class="text-base font-semibold">
+          {{ t("Remove audio source") }}
+        </h3>
+        <p id="audio-source-remove-description" class="mt-3 text-sm text-muted">
+          {{ t("Remove {name}?", { name: sourceToRemove.name }) }}
+        </p>
+        <div class="modal-action">
+          <button
+            class="btn"
+            type="button"
+            :disabled="busySourceId === sourceToRemove.id"
+            @click="closeRemoveDialog"
+          >
+            {{ t("Cancel") }}
+          </button>
+          <button
+            ref="removeConfirmButton"
+            class="btn btn-error"
+            type="button"
+            :disabled="busySourceId === sourceToRemove.id"
+            :aria-label="t('Confirm remove {name}', { name: sourceToRemove.name })"
+            @click="removeSource"
+          >
+            <RefreshCw
+              v-if="busySourceId === sourceToRemove.id"
+              class="animate-spin"
+              :size="16"
+              aria-hidden="true"
+            />
+            <Trash2 v-else :size="16" aria-hidden="true" />
+            {{ t("Remove") }}
+          </button>
+        </div>
+      </div>
+      <form method="dialog" class="modal-backdrop" @submit.prevent="closeRemoveDialog">
+        <button type="submit" :disabled="busySourceId === sourceToRemove.id">
+          {{ t("Cancel") }}
+        </button>
       </form>
     </dialog>
 
@@ -734,7 +798,7 @@ function formatTimestamp(timestamp: number) {
             :disabled="busySourceId === audioSource.id"
             :aria-label="t('Remove {name}', { name: audioSource.name })"
             :title="t('Remove audio source')"
-            @click="removeSource(audioSource)"
+            @click="requestRemoveSource(audioSource)"
           >
             <Trash2 :size="16" aria-hidden="true" />
           </button>

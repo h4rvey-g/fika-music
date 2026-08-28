@@ -125,9 +125,12 @@ Sources keep the configured per-layer timeout.
 
 ## Lifecycle and permissions
 
-An imported or bundled source that declares `network:any` starts in
-`NeedsReview`. The user chooses grants and explicitly confirms the review
-before enabling it.
+Importing a local file or URL is the trust decision for that package. Fika
+automatically grants all capabilities declared by the imported manifest and
+stores it as permission-reviewed, but leaves the source `Disabled` until the
+user enables it. Bundled sources that declare `network:any` still start in
+`NeedsReview`, and a managed package whose manifest changes outside the import
+flow requires review again.
 Revocation updates the Source Runtime provider policy immediately. Enabled
 sources are initialized again on application startup and registry refresh.
 
