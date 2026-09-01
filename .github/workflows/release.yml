@@ -298,8 +298,7 @@ jobs:
     env:
       ANDROID_BUILD_TOOLS_VERSION: 36.0.0
       ANDROID_NDK_VERSION: 28.2.13676358
-      BUNDLETOOL_VERSION: 1.18.3
-      BUNDLETOOL_SHA256: a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29
+      CARGO_PROFILE_RELEASE_STRIP: symbols
       GRADLE_OPTS: -Dorg.gradle.caching=true
     steps:
       - name: Check out repository
@@ -366,23 +365,6 @@ jobs:
             echo "BINDGEN_EXTRA_CLANG_ARGS=--sysroot=$bindgen_sysroot"
           } >> "$GITHUB_ENV"
 
-      - name: Install bundletool
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          bundletool="$RUNNER_TEMP/bundletool-${BUNDLETOOL_VERSION}.jar"
-          curl \
-            --fail \
-            --location \
-            --retry 3 \
-            --show-error \
-            --silent \
-            --output "$bundletool" \
-            "https://github.com/google/bundletool/releases/download/${BUNDLETOOL_VERSION}/bundletool-all-${BUNDLETOOL_VERSION}.jar"
-          echo "${BUNDLETOOL_SHA256}  ${bundletool}" | sha256sum --check
-          echo "BUNDLETOOL_JAR=$bundletool" >> "$GITHUB_ENV"
-
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
@@ -434,14 +416,16 @@ jobs:
           chmod 600 "$properties"
 
       - name: Build signed Android bundles
-        run: npm run tauri android build -- --ci --aab
+        run: |
+          set -euo pipefail
 
-      - name: Generate, verify and stage Android bundles
+          npm run tauri android build -- --ci --aab
+          npm run tauri android build -- --ci --apk --split-per-abi
+
+      - name: Verify and stage Android bundles
         id: android-bundles
         shell: bash
         env:
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
@@ -452,28 +436,38 @@ jobs:
             exit 1
           fi
 
-          keystore="$RUNNER_TEMP/android-release.jks"
-          password_file="$RUNNER_TEMP/android-keystore-password"
-          apks="$RUNNER_TEMP/fika-music.apks"
-          printf '%s' "$ANDROID_KEY_PASSWORD" > "$password_file"
-          chmod 600 "$password_file"
-
-          java -jar "$BUNDLETOOL_JAR" build-apks \
-            --bundle="$aab" \
-            --output="$apks" \
-            --mode=universal \
-            --overwrite \
-            --ks="$keystore" \
-            --ks-pass="file:$password_file" \
-            --ks-key-alias="$ANDROID_KEY_ALIAS"
-
           mkdir -p android-release
-          unzip -j "$apks" universal.apk -d android-release
-          apk=android-release/Fika-Music_${VERSION}_universal.apk
-          mv android-release/universal.apk "$apk"
+          apk_specs=(
+            "arm64:arm64-v8a"
+            "arm:armeabi-v7a"
+            "x86:x86"
+            "x86_64:x86_64"
+          )
+          for spec in "${apk_specs[@]}"; do
+            tauri_abi="${spec%%:*}"
+            android_abi="${spec#*:}"
+            apk="src-tauri/gen/android/app/build/outputs/apk/${tauri_abi}/release/app-${tauri_abi}-release.apk"
+            if [[ ! -f "$apk" ]]; then
+              echo "::error file=${apk}::Expected Android ${android_abi} APK was not generated"
+              exit 1
+            fi
 
-          "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/apksigner" \
-            verify --verbose --print-certs "$apk"
+            packaged_abis="$(
+              unzip -Z1 "$apk" \
+                | sed -n 's#^lib/\([^/]*\)/.*\.so$#\1#p' \
+                | sort -u \
+                | paste -sd, -
+            )"
+            if [[ "$packaged_abis" != "$android_abi" ]]; then
+              echo "::error file=${apk}::Expected only ${android_abi} native libraries, found: ${packaged_abis:-none}"
+              exit 1
+            fi
+
+            "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/apksigner" \
+              verify --verbose --print-certs "$apk"
+            cp "$apk" "android-release/Fika-Music_${VERSION}_${android_abi}.apk"
+          done
+
           jarsigner_output="$(jarsigner -verify "$aab" 2>&1)"
           printf '%s\n' "$jarsigner_output"
           if ! grep -q '^jar verified' <<< "$jarsigner_output"; then

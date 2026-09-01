@@ -92,9 +92,9 @@ release workflow. Keep the version synchronized in:
 - `src-tauri/tauri.conf.json`
 
 The workflow publishes Windows and Linux x86_64 bundles, Intel and Apple
-silicon macOS bundles, and signed universal Android APK and AAB bundles after
-every build succeeds. It can also be started manually from GitHub Actions to
-retry an unpublished version.
+silicon macOS bundles, signed Android APKs split by ABI, and a universal Android
+AAB after every build succeeds. It can also be started manually from GitHub
+Actions to retry an unpublished version.
 
 ### Android signing
 
@@ -108,10 +108,10 @@ before running a release:
 | `ANDROID_KEY_ALIAS` | Alias of the key in the keystore |
 | `ANDROID_KEY_PASSWORD` | Password shared by the keystore and key |
 
-The workflow generates the Android project from the locked Tauri CLI, signs the
-APK and AAB, verifies both signatures, and uploads them to the draft GitHub
-Release. Keep the keystore backed up: future Android releases must use the same
-key so installed copies can be upgraded.
+The workflow generates the Android project from the locked Tauri CLI, signs and
+verifies each ABI-specific APK and the universal AAB, and uploads them to the
+draft GitHub Release. Keep the keystore backed up: future Android releases must
+use the same key so installed copies can be upgraded.
 
 ### macOS ad-hoc signing
 
