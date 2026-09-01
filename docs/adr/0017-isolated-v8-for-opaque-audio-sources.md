@@ -24,9 +24,10 @@ Fika adds an isolated V8 fallback for opaque imported Audio Sources.
   LX contract gate fails, and the obfuscation report identifies an opaque or
   minified source.
 - Import does not execute the opaque script or contact its network endpoints.
-  The initial manifest declares the six standard LX source IDs, `musicUrl`, and
-  standard qualities. The real runtime catalog must match this manifest when
-  the user enables the source after reviewing `network:any`.
+  The initial manifest declares the five remote LX source IDs, `musicUrl`, and
+  standard qualities. Local tracks do not use an Audio Source. The real runtime
+  catalog must match this manifest when the user enables the source after
+  reviewing `network:any`; any `local` entry published by a script is ignored.
 - V8 runs in a fresh Deno subprocess for each initialization and playback
   request. Fika pins Deno `2.9.5`, downloads the official platform ZIP on first
   enablement, checks the archive size and SHA-256 digest, extracts only the

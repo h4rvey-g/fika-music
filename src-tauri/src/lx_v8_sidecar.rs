@@ -4,7 +4,7 @@ use crate::registry_support::operation_nonce;
 use crate::source_runtime::{
     lx_music_source, normalize_lx_music_info, SourceAction, SourceCapability, SourceHttpResponse,
     SourceInfo, SourceProvider, SourceQuality, SourceRequest, SourceResponse, SourceRuntimeContext,
-    SourceRuntimeError, LX_SOURCE_KG, LX_SOURCE_KIND_MUSIC, LX_SOURCE_KW, LX_SOURCE_LOCAL,
+    SourceRuntimeError, LX_REMOTE_SOURCE_IDS, LX_SOURCE_KG, LX_SOURCE_KIND_MUSIC, LX_SOURCE_KW,
     LX_SOURCE_MG, LX_SOURCE_TX, LX_SOURCE_WY,
 };
 use reqwest::blocking::Client;
@@ -664,15 +664,8 @@ fn parse_catalog(
 ) -> Result<BTreeMap<String, SourceInfo>, LxV8SidecarError> {
     let mut catalog = BTreeMap::new();
     for (source_id, source) in raw.ok_or(LxV8SidecarError::InvalidCatalog)? {
-        if !matches!(
-            source_id.as_str(),
-            LX_SOURCE_WY
-                | LX_SOURCE_TX
-                | LX_SOURCE_KW
-                | LX_SOURCE_KG
-                | LX_SOURCE_MG
-                | LX_SOURCE_LOCAL
-        ) || source.kind != LX_SOURCE_KIND_MUSIC
+        if !LX_REMOTE_SOURCE_IDS.contains(&source_id.as_str())
+            || source.kind != LX_SOURCE_KIND_MUSIC
             || !source.actions.iter().any(|action| action == "musicUrl")
         {
             continue;
@@ -711,7 +704,6 @@ fn canonical_source_name(source_id: &str) -> &str {
         LX_SOURCE_KW => "Kuwo",
         LX_SOURCE_KG => "Kugou",
         LX_SOURCE_MG => "Migu",
-        LX_SOURCE_LOCAL => "Local Music",
         _ => source_id,
     }
 }
@@ -1011,7 +1003,7 @@ fn is_http_url(value: &str) -> bool {
 mod tests {
     use super::*;
     use crate::lx_js_importer::analyze_lx_js_source;
-    use crate::source_runtime::SourceRuntime;
+    use crate::source_runtime::{SourceRuntime, LX_SOURCE_LOCAL};
 
     #[test]
     fn runtime_catalog_should_accept_music_url_sources() {
@@ -1030,6 +1022,27 @@ mod tests {
         assert_eq!(
             catalog[LX_SOURCE_KG].qualities,
             [SourceQuality::K128, SourceQuality::Flac]
+        );
+    }
+
+    #[test]
+    fn runtime_catalog_should_ignore_local_source() {
+        let source = || RawSourceInfo {
+            _name: None,
+            kind: LX_SOURCE_KIND_MUSIC.to_owned(),
+            actions: vec!["musicUrl".to_owned()],
+            qualitys: vec!["128k".to_owned()],
+        };
+        let raw = BTreeMap::from([
+            (LX_SOURCE_KG.to_owned(), source()),
+            (LX_SOURCE_LOCAL.to_owned(), source()),
+        ]);
+
+        let catalog = parse_catalog(Some(&raw)).expect("remote catalog should parse");
+
+        assert_eq!(
+            catalog.keys().map(String::as_str).collect::<Vec<_>>(),
+            [LX_SOURCE_KG]
         );
     }
 

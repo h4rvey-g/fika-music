@@ -2078,27 +2078,20 @@ fn imported_javascript_source_catalog(report: &LxJsImportReport) -> BTreeMap<Str
 }
 
 fn opaque_v8_source_catalog() -> BTreeMap<String, SourceInfo> {
-    [
-        source_runtime::LX_SOURCE_WY,
-        source_runtime::LX_SOURCE_TX,
-        source_runtime::LX_SOURCE_KW,
-        source_runtime::LX_SOURCE_KG,
-        source_runtime::LX_SOURCE_MG,
-        source_runtime::LX_SOURCE_LOCAL,
-    ]
-    .into_iter()
-    .map(|source_id| {
-        (
-            source_id.to_owned(),
-            source_runtime::lx_music_source(
-                source_id,
-                imported_source_name(source_id),
-                vec![SourceAction::MusicUrl],
-                source_runtime::standard_lx_qualities(),
-            ),
-        )
-    })
-    .collect()
+    source_runtime::LX_REMOTE_SOURCE_IDS
+        .into_iter()
+        .map(|source_id| {
+            (
+                source_id.to_owned(),
+                source_runtime::lx_music_source(
+                    source_id,
+                    imported_source_name(source_id),
+                    vec![SourceAction::MusicUrl],
+                    source_runtime::standard_lx_qualities(),
+                ),
+            )
+        })
+        .collect()
 }
 
 fn imported_source_name(source_id: &str) -> &str {
@@ -2205,11 +2198,22 @@ fn upgrade_legacy_execution_manifest(
     package_path: &Path,
     manifest: &mut AudioSourceManifest,
 ) -> Result<(), AudioSourceSystemError> {
-    if matches!(
-        LxJsImportAdapter::parse(&manifest.adapter),
-        Some(LxJsImportAdapter::QuickJs | LxJsImportAdapter::V8Sidecar)
-    ) {
-        return Ok(());
+    match LxJsImportAdapter::parse(&manifest.adapter) {
+        Some(LxJsImportAdapter::V8Sidecar) => {
+            if manifest
+                .source_catalog
+                .remove(source_runtime::LX_SOURCE_LOCAL)
+                .is_some()
+            {
+                fs::write(
+                    package_path.join(AUDIO_SOURCE_MANIFEST_FILE),
+                    serde_json::to_vec_pretty(manifest)?,
+                )?;
+            }
+            return Ok(());
+        }
+        Some(LxJsImportAdapter::QuickJs) => return Ok(()),
+        _ => {}
     }
     let (_, report) = read_verified_source(manifest, package_path)?;
     let source_catalog = imported_javascript_source_catalog(&report);
@@ -2700,7 +2704,53 @@ mod tests {
             .expect("opaque source should prepare for isolated V8 validation");
 
         assert_eq!(manifest.adapter, LxJsImportAdapter::V8Sidecar.as_str());
-        assert_eq!(manifest.source_catalog.len(), 6);
+        assert_eq!(
+            manifest
+                .source_catalog
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                source_runtime::LX_SOURCE_KG,
+                source_runtime::LX_SOURCE_KW,
+                source_runtime::LX_SOURCE_MG,
+                source_runtime::LX_SOURCE_TX,
+                source_runtime::LX_SOURCE_WY,
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_v8_manifest_should_drop_local_source_during_upgrade() {
+        let root = tempfile::tempdir().expect("test directory should exist");
+        let source = format!(
+            "/** @name Opaque Source */\nconst bytecode = '{}';",
+            "a".repeat(1_500)
+        );
+        let (mut manifest, _, _) = prepare_import_contents(Path::new("opaque.js"), source, true)
+            .expect("opaque source should prepare for isolated V8 validation");
+        manifest.source_catalog.insert(
+            source_runtime::LX_SOURCE_LOCAL.to_owned(),
+            source_runtime::lx_music_source(
+                source_runtime::LX_SOURCE_LOCAL,
+                "Local Music",
+                vec![SourceAction::MusicUrl],
+                source_runtime::standard_lx_qualities(),
+            ),
+        );
+        fs::write(
+            root.path().join(AUDIO_SOURCE_MANIFEST_FILE),
+            serde_json::to_vec_pretty(&manifest).expect("legacy manifest should serialize"),
+        )
+        .expect("legacy manifest should write");
+
+        upgrade_legacy_execution_manifest(root.path(), &mut manifest)
+            .expect("legacy V8 manifest should upgrade");
+        let upgraded = read_manifest(root.path()).expect("upgraded manifest should read");
+
+        assert!(!upgraded
+            .source_catalog
+            .contains_key(source_runtime::LX_SOURCE_LOCAL));
     }
 
     #[test]

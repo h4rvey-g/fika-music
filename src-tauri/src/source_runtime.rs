@@ -29,6 +29,13 @@ pub const LX_SOURCE_TX: &str = "tx";
 pub const LX_SOURCE_WY: &str = "wy";
 pub const LX_SOURCE_MG: &str = "mg";
 pub const LX_SOURCE_LOCAL: &str = "local";
+pub const LX_REMOTE_SOURCE_IDS: [&str; 5] = [
+    LX_SOURCE_KG,
+    LX_SOURCE_KW,
+    LX_SOURCE_MG,
+    LX_SOURCE_TX,
+    LX_SOURCE_WY,
+];
 
 pub const SOURCE_RUNTIME_API_VERSION: SourceRuntimeApiVersion = SourceRuntimeApiVersion::new(1, 5);
 
