@@ -129,6 +129,18 @@ vi.mock("./components/LibraryBrowser.vue", () => ({
     name: "LibraryBrowser",
     emits: ["playbackQueue", "queueTracks", "addToCollection", "createCollection", "summary", "error"],
     setup(_, { emit, expose }) {
+      function playFirst() {
+        emit(
+          "playbackQueue",
+          {
+            queueId: "library-queue-from-first",
+            total: 3,
+            currentIndex: 0,
+            track: createLocalTrack({ title: "Local Current" }),
+          },
+          true,
+        );
+      }
       function playSecond() {
         emit(
           "playbackQueue",
@@ -155,9 +167,12 @@ vi.mock("./components/LibraryBrowser.vue", () => ({
         startRandomTrack: libraryBrowserMocks.startRandomTrack,
         updatePlayCount: vi.fn(),
       });
-      return { playSecond };
+      return { playFirst, playSecond };
     },
-    template: '<button type="button" aria-label="Play Second" @click="playSecond">Library browser</button>',
+    template: `<div>
+      <button type="button" aria-label="Play First" @click="playFirst">Play first</button>
+      <button type="button" aria-label="Play Second" @click="playSecond">Library browser</button>
+    </div>`,
   }),
 }));
 
@@ -1987,6 +2002,95 @@ describe("application shell", () => {
 
     expect(wrapper.get('button[data-testid="playback-queue-toggle"]').text()).not.toContain("1");
     expect(wrapper.get('footer[aria-label="Playback bar"]').text()).toContain("Queued First");
+    wrapper.unmount();
+  });
+
+  it("shows the remaining local library tracks in the playback queue", async () => {
+    const upcomingTracks = [
+      { index: 1, track: createLocalTrack({ id: 2, title: "Local Next" }) },
+      { index: 2, track: createLocalTrack({ id: 3, title: "Local Last" }) },
+    ];
+    const defaultInvoke = tauriMocks.invoke.getMockImplementation();
+    tauriMocks.invoke.mockImplementation((command: string, payload?: Record<string, unknown>) => {
+      if (command === "local_library_queue_tracks") {
+        return Promise.resolve(upcomingTracks);
+      }
+      if (command === "local_track_media_source") {
+        return Promise.resolve({ filePath: `/music/${payload?.trackId ?? 1}.mp3` });
+      }
+      if (command === "local_track_playback_details") {
+        return Promise.resolve({ coverDataUrl: null, lyrics: null, lyricsError: null });
+      }
+      return defaultInvoke?.(command, payload);
+    });
+
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get('button[aria-label="Play First"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="playback-queue-toggle"]').trigger("click");
+
+    expect(wrapper.findAll("[data-playback-queue-index]").map((row) => row.text()))
+      .toEqual([
+        expect.stringContaining("Local Next"),
+        expect.stringContaining("Local Last"),
+      ]);
+    wrapper.unmount();
+  });
+
+  it("shows the remaining remote tracks in the playback queue", async () => {
+    listedAudioSources = [createAudioSourceRecord({ id: "source-one", name: "Source One" })];
+    const tracks = [
+      createOnlineTrack({ key: "remote-current", title: "Remote Current" }),
+      createOnlineTrack({ key: "remote-next", title: "Remote Next" }),
+      createOnlineTrack({ key: "remote-last", title: "Remote Last" }),
+    ];
+    const defaultInvoke = tauriMocks.invoke.getMockImplementation();
+    tauriMocks.invoke.mockImplementation((command: string, payload?: unknown) => {
+      if (command === "list_online_music_channels") {
+        return Promise.resolve([{
+          id: "netease",
+          pluginId: "fika.netease",
+          pluginName: "NetEase",
+          providerId: "netease",
+          sourceId: "wy",
+          sourceName: "NetEase",
+          excluded: false,
+          actions: ["musicUrl"],
+        }]);
+      }
+      if (command === "dispatch_audio_source_request") {
+        return Promise.resolve({
+          response: { action: "musicUrl", data: "https://cdn.example.test/track.mp3" },
+          diagnostics: [],
+        });
+      }
+      if (command === "resolve_remote_track_lyrics") return Promise.resolve(null);
+      return defaultInvoke?.(command, payload);
+    });
+    vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(function (
+      this: HTMLMediaElement,
+    ) {
+      queueMicrotask(() => this.dispatchEvent(new Event("canplay")));
+    });
+
+    const wrapper = mount(App);
+    await flushPromises();
+    wrapper.getComponent({ name: "OnlineMusic" }).vm.$emit(
+      "playRequest",
+      tracks[0],
+      tracks,
+      0,
+      false,
+    );
+    await flushPromises();
+    await wrapper.get('[data-testid="playback-queue-toggle"]').trigger("click");
+
+    expect(wrapper.findAll("[data-playback-queue-index]").map((row) => row.text()))
+      .toEqual([
+        expect.stringContaining("Remote Next"),
+        expect.stringContaining("Remote Last"),
+      ]);
     wrapper.unmount();
   });
 

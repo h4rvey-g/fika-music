@@ -135,6 +135,7 @@ macro_rules! with_tauri_commands {
             pause_local_metadata_lookup,
             create_local_library_playback_queue,
             local_library_queue_track,
+            local_library_queue_tracks,
             increment_local_track_play_count,
             set_local_track_rating,
             local_track_media_source,
@@ -5227,6 +5228,22 @@ fn local_library_queue_track(
         .map_err(|_| AppError::StatePoisoned("library").to_string())?;
     library
         .queue_track(queue_id.trim(), index)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn local_library_queue_tracks(
+    state: State<'_, AppState>,
+    queue_id: String,
+    offset: usize,
+    limit: usize,
+) -> CommandResult<Vec<LibraryQueueTrack>> {
+    let library = state
+        .library
+        .lock()
+        .map_err(|_| AppError::StatePoisoned("library").to_string())?;
+    library
+        .queue_tracks(queue_id.trim(), offset, limit)
         .map_err(|error| error.to_string())
 }
 

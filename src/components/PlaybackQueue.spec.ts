@@ -36,4 +36,29 @@ describe("PlaybackQueue", () => {
 
     expect(wrapper.emitted("move")?.[0]).toEqual([0, 1]);
   });
+
+  it("keeps playback context tracks read-only and loads more on request", async () => {
+    const wrapper = mount(PlaybackQueue, {
+      props: {
+        open: true,
+        items: [{
+          ...items[0],
+          context: { kind: "local" as const, index: 1 },
+        }],
+        total: 3,
+        canLoadMore: true,
+      },
+    });
+
+    expect(wrapper.text()).toContain("3 tracks in queue");
+    expect(wrapper.find('button[aria-label^="Remove "]').exists()).toBe(false);
+
+    await wrapper.get('button[aria-label="Play Local song"]').trigger("click");
+    const loadMoreButton = wrapper.findAll("button")
+      .find((button) => button.text().includes("Load more"));
+    await loadMoreButton!.trigger("click");
+
+    expect(wrapper.emitted("play")?.[0]).toEqual([0]);
+    expect(wrapper.emitted("loadMore")?.[0]).toEqual([]);
+  });
 });

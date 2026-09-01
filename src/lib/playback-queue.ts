@@ -3,17 +3,26 @@ import type { OnlineTrack } from "./online-music-api";
 
 export type PlaybackQueuePlacement = "next" | "last";
 
-export type PlaybackQueueItem =
+export type PlaybackQueueContext = {
+  kind: "local" | "online" | "collection";
+  index: number;
+};
+
+type PlaybackQueueItemBase = {
+  id: string;
+  context?: PlaybackQueueContext;
+};
+
+export type PlaybackQueueItem = PlaybackQueueItemBase & (
   | {
-      id: string;
       kind: "local";
       track: LocalTrack;
     }
   | {
-      id: string;
       kind: "online";
       track: OnlineTrack;
-    };
+    }
+);
 
 export type PlaybackQueueTrack = LocalTrack | OnlineTrack;
 

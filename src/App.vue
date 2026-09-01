@@ -309,6 +309,7 @@ type CollectionNameDialog =
 
 const MOUSE_BACK_BUTTON = 3;
 const MOUSE_FORWARD_BUTTON = 4;
+const LOCAL_QUEUE_PAGE_SIZE = 200;
 
 const savedUiPreferences = loadUiPreferences();
 setLocale(savedUiPreferences.locale);
@@ -427,6 +428,8 @@ const localQueueTotal = ref(0);
 const localQueueIndex = ref(-1);
 const queuedLocalTrack = ref<LocalTrack | null>(null);
 const localQueueActive = ref(false);
+const localQueueTracks = ref<LibraryQueueTrack[]>([]);
+const localQueueTracksLoading = ref(false);
 const remoteQueue = ref<OnlineTrack[]>([]);
 const remoteQueueIndex = ref(-1);
 const remoteQueueActive = ref(false);
@@ -456,6 +459,7 @@ let audioSourceSelectionModeGeneration = 0;
 let sourceChangeMessageTimer: ReturnType<typeof setTimeout> | null = null;
 let collectionNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 let playbackQueueSequence = 0;
+let localQueueTracksGeneration = 0;
 let sidebarPlaybackGeneration = 0;
 let dynamicThemeGeneration = 0;
 let volumeBeforeMute = savedUiPreferences.volume > 0 ? savedUiPreferences.volume : 0.8;
@@ -541,6 +545,63 @@ const currentPlaybackQuality = computed(() =>
     ? activeRemoteQuality.value
     : playbackQuality.value,
 );
+const contextPlaybackQueue = computed<PlaybackQueueItem[]>(() => {
+  if (collectionQueue.value.length && collectionQueueIndex.value >= 0) {
+    return collectionQueue.value.flatMap((item, index) => {
+      if (index <= collectionQueueIndex.value) return [];
+      const queueItem = playbackQueueItemFromCollectionItem(
+        item,
+        `collection-context-${item.id}-${index}`,
+      );
+      if (!queueItem) return [];
+      queueItem.context = { kind: "collection", index };
+      return [queueItem];
+    });
+  }
+  if (remoteQueue.value.length && remoteQueueIndex.value >= 0) {
+    return remoteQueue.value.flatMap((track, index) => index > remoteQueueIndex.value
+      ? [{
+          id: `online-context-${index}-${track.key}`,
+          kind: "online" as const,
+          track,
+          context: { kind: "online" as const, index },
+        }]
+      : []);
+  }
+  if (localQueueId.value && localQueueIndex.value >= 0) {
+    return localQueueTracks.value.flatMap((item) => item.index > localQueueIndex.value
+      ? [{
+          id: `local-context-${localQueueId.value}-${item.index}`,
+          kind: "local" as const,
+          track: item.track,
+          context: { kind: "local" as const, index: item.index },
+        }]
+      : []);
+  }
+  return [];
+});
+const displayedPlaybackQueue = computed(() => [
+  ...playbackQueue.value,
+  ...contextPlaybackQueue.value,
+]);
+const playbackQueueTotal = computed(() => {
+  if (collectionQueue.value.length && collectionQueueIndex.value >= 0) {
+    return playbackQueue.value.length + contextPlaybackQueue.value.length;
+  }
+  if (remoteQueue.value.length && remoteQueueIndex.value >= 0) {
+    return playbackQueue.value.length + contextPlaybackQueue.value.length;
+  }
+  if (localQueueId.value && localQueueIndex.value >= 0) {
+    return playbackQueue.value.length
+      + Math.max(0, localQueueTotal.value - localQueueIndex.value - 1);
+  }
+  return playbackQueue.value.length;
+});
+const canLoadMoreLocalQueueTracks = computed(() => {
+  if (!localQueueId.value || localQueueIndex.value < 0) return false;
+  const lastLoadedIndex = lastLoadedLocalQueueIndex();
+  return lastLoadedIndex < localQueueTotal.value - 1;
+});
 const canGoPrevious = computed(() => {
   if (collectionQueueActive.value && collectionQueueIndex.value >= 0) {
     return playbackMode.value !== "sequential" || collectionQueueIndex.value > 0;
@@ -1750,6 +1811,25 @@ async function playPlaybackQueueItem(index: number) {
   await playManualPlaybackItem(item);
 }
 
+async function playDisplayedPlaybackQueueItem(index: number) {
+  const item = displayedPlaybackQueue.value[index];
+  if (!item) return;
+  if (!item.context) {
+    const manualIndex = playbackQueue.value.findIndex((candidate) => candidate.id === item.id);
+    if (manualIndex >= 0) await playPlaybackQueueItem(manualIndex);
+    return;
+  }
+  if (item.context.kind === "local") {
+    await playLocalQueueTrack(item.context.index);
+    return;
+  }
+  if (item.context.kind === "online") {
+    await playOnlineQueueTrack(item.context.index);
+    return;
+  }
+  await playCollectionQueueTrack(item.context.index);
+}
+
 async function playNextPlaybackQueueItem() {
   const [item, ...remaining] = playbackQueue.value;
   if (!item) return false;
@@ -1769,6 +1849,56 @@ async function playManualPlaybackItem(item: PlaybackQueueItem) {
     return;
   }
   await playStandaloneOnlineTrack(item.track, true);
+}
+
+function lastLoadedLocalQueueIndex() {
+  return localQueueTracks.value[localQueueTracks.value.length - 1]?.index
+    ?? localQueueIndex.value;
+}
+
+function resetLocalQueueTracks() {
+  localQueueTracksGeneration += 1;
+  localQueueTracks.value = [];
+  localQueueTracksLoading.value = false;
+}
+
+async function loadMoreLocalQueueTracks() {
+  const queueId = localQueueId.value;
+  if (!queueId || localQueueTracksLoading.value || !canLoadMoreLocalQueueTracks.value) return;
+  const lastLoadedIndex = lastLoadedLocalQueueIndex();
+  const generation = localQueueTracksGeneration;
+  localQueueTracksLoading.value = true;
+  try {
+    const tracks = await invoke<LibraryQueueTrack[]>(TAURI_COMMANDS.localLibraryQueueTracks, {
+      queueId,
+      offset: lastLoadedIndex + 1,
+      limit: LOCAL_QUEUE_PAGE_SIZE,
+    });
+    if (generation !== localQueueTracksGeneration || queueId !== localQueueId.value) return;
+    localQueueTracks.value = [...localQueueTracks.value, ...tracks];
+  } catch (error) {
+    if (generation === localQueueTracksGeneration && queueId === localQueueId.value) {
+      appError.value = normalizeError(error);
+    }
+  } finally {
+    if (generation === localQueueTracksGeneration && queueId === localQueueId.value) {
+      localQueueTracksLoading.value = false;
+    }
+  }
+}
+
+function updateLocalQueueTracksForCurrentIndex() {
+  const nextIndex = localQueueIndex.value + 1;
+  const firstLoadedIndex = localQueueTracks.value[0]?.index;
+  const lastLoadedIndex = lastLoadedLocalQueueIndex();
+  if (
+    firstLoadedIndex === undefined
+    || firstLoadedIndex > nextIndex
+    || lastLoadedIndex < nextIndex
+  ) {
+    resetLocalQueueTracks();
+    void loadMoreLocalQueueTracks();
+  }
 }
 
 type LocalPlaybackOptions = {
@@ -1822,17 +1952,20 @@ async function playTrack(track: LocalTrack, options: LocalPlaybackOptions = {}) 
 async function handleLibraryPlaybackQueue(queue: LibraryPlaybackQueue, autoplay: boolean) {
   clearPlaybackQueue();
   clearCollectionPlaybackQueue();
+  resetLocalQueueTracks();
   localQueueId.value = queue.queueId;
   localQueueTotal.value = queue.total;
   localQueueIndex.value = queue.currentIndex;
   queuedLocalTrack.value = queue.track;
   localQueueActive.value = autoplay;
+  void loadMoreLocalQueueTracks();
   if (autoplay) {
     await playTrack(queue.track);
   }
 }
 
 function clearLocalPlaybackQueue() {
+  resetLocalQueueTracks();
   localQueueId.value = null;
   localQueueTotal.value = 0;
   localQueueIndex.value = -1;
@@ -1868,6 +2001,19 @@ function clearRemotePlaybackQueue() {
     clearTimeout(sourceChangeMessageTimer);
     sourceChangeMessageTimer = null;
   }
+}
+
+function clearUpcomingPlaybackQueue() {
+  clearPlaybackQueue();
+  clearLocalPlaybackQueue();
+  clearCollectionPlaybackQueue();
+  remoteQueueGeneration += 1;
+  cancelOnlinePreload();
+  remoteQueue.value = [];
+  remoteQueueIndex.value = -1;
+  remoteQueueActive.value = false;
+  remoteQueueLoadMore.value = null;
+  pendingRemoteQueueLoad = null;
 }
 
 function updateLibrarySummary(summary: { libraryTotal: number }) {
@@ -2502,6 +2648,7 @@ async function playLocalQueueTrack(index: number) {
     localQueueIndex.value = queuedTrack.index;
     queuedLocalTrack.value = queuedTrack.track;
     localQueueActive.value = true;
+    updateLocalQueueTracksForCurrentIndex();
     await playTrack(queuedTrack.track);
   } catch (error) {
     appError.value = normalizeError(error);
@@ -3430,12 +3577,16 @@ function trackSubtitle(track: LocalTrack) {
 
       <PlaybackQueue
         :open="playbackQueueOpen"
-        :items="playbackQueue"
+        :items="displayedPlaybackQueue"
+        :total="playbackQueueTotal"
+        :loading="localQueueTracksLoading"
+        :can-load-more="canLoadMoreLocalQueueTracks"
         @close="playbackQueueOpen = false"
-        @clear="playbackQueue = []"
-        @play="playPlaybackQueueItem"
+        @clear="clearUpcomingPlaybackQueue"
+        @play="playDisplayedPlaybackQueueItem"
         @remove="removePlaybackQueueItem"
         @move="movePlaybackQueueItem"
+        @load-more="loadMoreLocalQueueTracks"
       />
 
       <footer
@@ -3567,11 +3718,11 @@ function trackSubtitle(track: LocalTrack) {
               >
                 <ListMusic :size="17" aria-hidden="true" />
                 <span
-                  v-if="playbackQueue.length"
+                  v-if="playbackQueueTotal"
                   class="badge badge-primary badge-xs indicator-item"
                   aria-hidden="true"
                 >
-                  {{ playbackQueue.length > 99 ? "99+" : playbackQueue.length }}
+                  {{ playbackQueueTotal > 99 ? "99+" : playbackQueueTotal }}
                 </span>
               </button>
             </div>

@@ -685,6 +685,33 @@ impl LibraryService {
         Ok(LibraryQueueTrack { index, track })
     }
 
+    pub fn queue_tracks(
+        &self,
+        queue_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<LibraryQueueTrack>, LibraryError> {
+        let queue = self
+            .playback_queues
+            .iter()
+            .find(|queue| queue.id == queue_id)
+            .ok_or(LibraryError::QueueExpired)?;
+        queue
+            .track_ids
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(limit.clamp(1, MAX_PAGE_SIZE))
+            .map(|(index, track_id)| {
+                let track = self
+                    .track(*track_id)
+                    .cloned()
+                    .ok_or(LibraryError::TrackMissing)?;
+                Ok(LibraryQueueTrack { index, track })
+            })
+            .collect()
+    }
+
     pub fn update_play_count(&mut self, track_id: i64, play_count: i64) {
         if let Some(index) = self.track_by_id.get(&track_id).copied() {
             self.tracks[index].track.play_count = play_count;
@@ -1733,6 +1760,31 @@ mod tests {
             .expect("queue should resolve through the reloaded id index");
         assert_eq!(queued_track.track.id, 2);
         assert_eq!(queued_track.track.title, "Updated 2");
+    }
+
+    #[test]
+    fn playback_queue_range_should_return_tracks_after_the_current_index() {
+        let mut service = service(vec![
+            track(1, "Track 1", "Artist", "Album"),
+            track(2, "Track 2", "Artist", "Album"),
+            track(3, "Track 3", "Artist", "Album"),
+        ]);
+        let page = service.query(request(""));
+        let queue = service
+            .create_playback_queue(&page.snapshot_id, 0, None)
+            .expect("query should create a playback queue");
+
+        let queued_tracks = service
+            .queue_tracks(&queue.queue_id, queue.current_index + 1, 200)
+            .expect("queue range should resolve");
+
+        assert_eq!(
+            queued_tracks
+                .iter()
+                .map(|item| (item.index, item.track.id))
+                .collect::<Vec<_>>(),
+            vec![(1, 2), (2, 3)],
+        );
     }
 
     #[test]

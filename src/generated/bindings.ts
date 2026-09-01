@@ -295,6 +295,7 @@ export const TAURI_COMMANDS = {
   pauseLocalMetadataLookup: "pause_local_metadata_lookup",
   createLocalLibraryPlaybackQueue: "create_local_library_playback_queue",
   localLibraryQueueTrack: "local_library_queue_track",
+  localLibraryQueueTracks: "local_library_queue_tracks",
   incrementLocalTrackPlayCount: "increment_local_track_play_count",
   setLocalTrackRating: "set_local_track_rating",
   localTrackMediaSource: "local_track_media_source",

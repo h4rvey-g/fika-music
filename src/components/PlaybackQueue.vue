@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { GripVertical, ListMusic, Trash2, X } from "@lucide/vue";
+import { GripVertical, ListMusic, LoaderCircle, Trash2, X } from "@lucide/vue";
 import { formatNumber, t } from "../i18n";
 import {
   playbackQueueItemSubtitle,
@@ -11,6 +11,9 @@ import {
 const props = defineProps<{
   open: boolean;
   items: PlaybackQueueItem[];
+  total?: number;
+  loading?: boolean;
+  canLoadMore?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -19,15 +22,18 @@ const emit = defineEmits<{
   play: [index: number];
   remove: [index: number];
   move: [from: number, to: number];
+  loadMore: [];
 }>();
 
 const draggedIndex = ref<number | null>(null);
+const queueCount = computed(() => props.total ?? props.items.length);
 const queueCountLabel = computed(() => t(
-  props.items.length === 1 ? "{count} track in queue" : "{count} tracks in queue",
-  { count: formatNumber(props.items.length) },
+  queueCount.value === 1 ? "{count} track in queue" : "{count} tracks in queue",
+  { count: formatNumber(queueCount.value) },
 ));
 
 function startDrag(event: DragEvent, index: number) {
+  if (props.items[index]?.context) return;
   draggedIndex.value = index;
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = "move";
@@ -37,6 +43,7 @@ function startDrag(event: DragEvent, index: number) {
 
 function dropItem(event: DragEvent, index: number) {
   event.preventDefault();
+  if (props.items[index]?.context) return;
   const from = draggedIndex.value;
   draggedIndex.value = null;
   if (from === null || from === index || from < 0 || from >= props.items.length) return;
@@ -78,23 +85,26 @@ function finishDrag() {
 
       <div class="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
         <div v-if="!items.length" class="flex min-h-40 flex-col items-center justify-center gap-2 px-4 text-center text-sm text-muted">
-          <ListMusic :size="28" aria-hidden="true" />
-          <span>{{ t("Queue is empty") }}</span>
+          <LoaderCircle v-if="loading" class="animate-spin" :size="28" aria-hidden="true" />
+          <ListMusic v-else :size="28" aria-hidden="true" />
+          <span>{{ t(loading ? "Loading queue" : "Queue is empty") }}</span>
         </div>
 
         <ul v-else class="list divide-y divide-base-300" :aria-label="t('Up next')">
           <li
             v-for="(item, index) in items"
             :key="item.id"
-            class="list-row min-w-0 cursor-grab items-center gap-2 px-2 py-2 active:cursor-grabbing"
-            draggable="true"
+            class="list-row min-w-0 items-center gap-2 px-2 py-2"
+            :class="{ 'cursor-grab active:cursor-grabbing': !item.context }"
+            :draggable="!item.context"
             :data-playback-queue-index="index"
             @dragstart="startDrag($event, index)"
             @dragover.prevent
             @drop="dropItem($event, index)"
             @dragend="finishDrag"
           >
-            <GripVertical class="shrink-0 text-muted" :size="16" aria-hidden="true" />
+            <GripVertical v-if="!item.context" class="shrink-0 text-muted" :size="16" aria-hidden="true" />
+            <span v-else class="w-4 shrink-0" aria-hidden="true"></span>
             <div class="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded bg-base-200">
               <img
                 v-if="item.kind === 'online' && item.track.coverUrl"
@@ -114,6 +124,7 @@ function finishDrag() {
               <span class="block truncate text-xs text-muted">{{ playbackQueueItemSubtitle(item) }}</span>
             </button>
             <button
+              v-if="!item.context"
               class="btn btn-square btn-ghost btn-sm shrink-0"
               type="button"
               :aria-label="t('Remove {title} from queue', { title: playbackQueueItemTitle(item) })"
@@ -128,9 +139,19 @@ function finishDrag() {
 
       <div class="modal-action m-0 flex justify-end border-t border-base-300 px-5 py-3">
         <button
+          v-if="canLoadMore"
+          class="btn btn-ghost btn-sm"
+          type="button"
+          :disabled="loading"
+          @click="emit('loadMore')"
+        >
+          <LoaderCircle v-if="loading" class="animate-spin" :size="16" aria-hidden="true" />
+          {{ t("Load more") }}
+        </button>
+        <button
           class="btn btn-sm"
           type="button"
-          :disabled="!items.length"
+          :disabled="!queueCount"
           @click="emit('clear')"
         >
           <Trash2 :size="16" aria-hidden="true" />

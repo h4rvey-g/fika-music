@@ -105,6 +105,7 @@ export const ZH_CN_MESSAGES: Readonly<Record<string, string>> = {
   "Add to queue": "加入播放队列",
   "Playback queue": "播放队列",
   "Up next": "接下来播放",
+  "Loading queue": "正在加载播放队列",
   "Queue is empty": "播放队列为空",
   "Clear queue": "清空队列",
   "Remove from queue": "从队列移除",
