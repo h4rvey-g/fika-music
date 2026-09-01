@@ -69,4 +69,21 @@ describe("OnlineMusicSettings", () => {
       expect.objectContaining({ playbackCacheMaxMb: 750 }),
     );
   });
+
+  it("persists whether downloads are added to My Favorite Music", async () => {
+    const wrapper = mount(OnlineMusicSettings, {
+      props: { audioSources: [createAudioSourceRecord()] },
+    });
+    await flushPromises();
+
+    const toggle = wrapper.get('[data-testid="auto-favorite-on-download"]');
+    expect((toggle.element as HTMLInputElement).checked).toBe(true);
+
+    await toggle.setValue(false);
+    await flushPromises();
+
+    expect(api.updateOnlineMusicSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({ autoFavoriteOnDownload: false }),
+    );
+  });
 });

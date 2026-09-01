@@ -82,6 +82,8 @@ pub struct OnlineMusicSettings {
     pub playback_cache_max_mb: u32,
     #[serde(default = "default_quality")]
     pub download_quality: SourceQuality,
+    #[serde(default = "default_auto_favorite_on_download")]
+    pub auto_favorite_on_download: bool,
     pub search_history_enabled: bool,
     pub download_directory: Option<String>,
     pub filename_template: String,
@@ -101,6 +103,7 @@ impl Default for OnlineMusicSettings {
             playback_quality: default_quality(),
             playback_cache_max_mb: default_playback_cache_max_mb(),
             download_quality: default_quality(),
+            auto_favorite_on_download: default_auto_favorite_on_download(),
             search_history_enabled: true,
             download_directory: None,
             filename_template: "{artist} - {title}[ \\[{album}\\]]".to_owned(),
@@ -116,6 +119,10 @@ fn default_quality() -> SourceQuality {
 
 fn default_playback_cache_max_mb() -> u32 {
     crate::playback_cache::DEFAULT_PLAYBACK_CACHE_MAX_MB
+}
+
+fn default_auto_favorite_on_download() -> bool {
+    true
 }
 
 impl OnlineMusicSettings {
@@ -1377,6 +1384,28 @@ mod tests {
         let settings: OnlineMusicSettings = serde_json::from_value(value).unwrap();
 
         assert_eq!(settings.playback_cache_max_mb, 500);
+    }
+
+    #[test]
+    fn settings_without_auto_favorite_on_download_should_default_to_enabled() {
+        let value = serde_json::json!({
+            "excludedChannels": [],
+            "channelPriority": [],
+            "audioSourcePriority": [],
+            "layerTimeoutSeconds": 8,
+            "playbackTimeoutSeconds": 20,
+            "playbackQuality": "320k",
+            "downloadQuality": "320k",
+            "searchHistoryEnabled": true,
+            "downloadDirectory": null,
+            "filenameTemplate": "{artist} - {title}",
+            "downloadConcurrency": 2,
+            "batchNotifications": true
+        });
+
+        let settings: OnlineMusicSettings = serde_json::from_value(value).unwrap();
+
+        assert!(settings.auto_favorite_on_download);
     }
 
     #[test]

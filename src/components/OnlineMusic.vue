@@ -1091,8 +1091,14 @@ async function addToFavorites(track: OnlineTrack) {
     globalError.value ??= t("Could not load your playlists.");
     return;
   }
-  const targets = playlistTargetsForTrack(track, true);
+  await loadFavoriteTrackIdentities(library);
+  const targets = playlistTargetsForTrack(track, true).filter((target) => {
+    const identity = trackIdentity(target.candidate);
+    return !favoriteTrackIdentities.value.has(identity)
+      && !optimisticFavoriteTrackIdentities.value.has(identity);
+  });
   if (!targets.length) {
+    if (isTrackFavorite(track)) return;
     globalError.value = t("No matching My Favorite Music playlist is available.");
     return;
   }
@@ -1935,12 +1941,18 @@ async function downloadAllRecommendation() {
 }
 
 async function downloadTrack(track: OnlineTrack, artwork: HTMLElement | null = null) {
-  await createDownload(
+  const started = await createDownload(
     "track",
     track.title,
     [track],
     captureDownloadFlightOrigin(track, artwork),
   );
+  if (
+    started
+    && settings.value?.autoFavoriteOnDownload !== false
+  ) {
+    await addToFavorites(track);
+  }
 }
 
 async function downloadTracks(tracks: OnlineTrack[]) {
@@ -1981,18 +1993,18 @@ async function createDownload(
   title: string,
   tracks: OnlineTrack[],
   flightOrigin: DownloadFlightOrigin | null = null,
-) {
+): Promise<boolean> {
   if (settings.value && !settings.value.downloadDirectory) {
     try {
       const directory = await selectOnlineDownloadDirectory(props.localMusicFolder);
-      if (!directory) return;
+      if (!directory) return false;
       settings.value = await updateOnlineMusicSettings({
         ...settings.value,
         downloadDirectory: directory,
       });
     } catch (error) {
       globalError.value = normalizeError(error);
-      return;
+      return false;
     }
   }
   downloadActionId.value = "create";
@@ -2007,11 +2019,17 @@ async function createDownload(
     upsertDownloadTask(task);
     playDownloadFlight(flightOrigin);
     upsertDownloadTask(await startOnlineDownloadTask(task.taskId));
+    return true;
   } catch (error) {
     globalError.value = normalizeError(error);
+    return false;
   } finally {
     downloadActionId.value = null;
   }
+}
+
+function updateSettings(updatedSettings: OnlineMusicSettings) {
+  settings.value = updatedSettings;
 }
 
 function captureDownloadFlightOrigin(
@@ -2467,6 +2485,7 @@ defineExpose({
   isTrackFavorite,
   openPlaylistPicker,
   showHome,
+  updateSettings,
 });
 
 </script>

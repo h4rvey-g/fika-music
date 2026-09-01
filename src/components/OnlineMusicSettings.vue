@@ -401,6 +401,21 @@ function previewTemplate(template: string, values: Record<string, string>) {
           </div>
           <div class="mt-1 truncate text-xs" :class="templateError ? 'text-error' : 'text-muted'">{{ templateError || templatePreview }}</div>
         </div>
+        <label class="flex items-center justify-between gap-3 px-4 py-4">
+          <span class="min-w-0">
+            <span class="block text-sm font-medium">{{ t("Add downloads to My Favorite Music") }}</span>
+            <span class="block text-xs text-muted">{{ t("Automatically favorite each online song after its download starts") }}</span>
+          </span>
+          <input
+            data-testid="auto-favorite-on-download"
+            class="toggle toggle-md shrink-0"
+            type="checkbox"
+            :checked="settings.autoFavoriteOnDownload"
+            :disabled="Boolean(saving)"
+            :aria-label="t('Add downloads to My Favorite Music')"
+            @change="persist({ autoFavoriteOnDownload: ($event.currentTarget as HTMLInputElement).checked }, 'auto-favorite-on-download')"
+          />
+        </label>
         <div class="grid gap-4 px-4 py-4 sm:grid-cols-3">
           <label class="form-control">
             <span class="label-text text-sm">{{ t("Download quality") }}</span>

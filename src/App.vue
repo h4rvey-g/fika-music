@@ -223,6 +223,7 @@ type OnlineMusicInstance = {
   isTrackFavorite: (track: OnlineTrack) => boolean;
   openPlaylistPicker: (track: OnlineTrack) => Promise<void>;
   showHome: () => void;
+  updateSettings: (settings: OnlineMusicSettings) => void;
 };
 
 type OnlineQueueLoadMore = () => Promise<OnlineTrack[]>;
@@ -2297,6 +2298,7 @@ function handleOnlineMusicSettingsChanged(
   playbackQuality.value = settings.playbackQuality;
   cancelOnlinePreload();
   onlineMusicConfig.updateSettings(settings);
+  onlineMusic.value?.updateSettings(settings);
 }
 
 function nextRemoteQueueIndexForPreload() {

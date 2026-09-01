@@ -1632,6 +1632,139 @@ describe("Online Music workspace", () => {
     expect(document.body.querySelector("[data-online-download-flight]")).toBeNull();
   });
 
+  it("adds a downloaded song to My Favorite Music when the setting is enabled", async () => {
+    const downloadedTrack = track(1);
+    const task: OnlineDownloadTask = {
+      taskId: "favorite-download-task",
+      kind: "track",
+      title: downloadedTrack.title,
+      state: "queued",
+      destination: "/downloads",
+      selectedAudioSourceId: null,
+      totalItems: 1,
+      completedItems: 0,
+      skippedItems: 0,
+      failedItems: 0,
+      createdAt: 1,
+      updatedAt: 1,
+      items: [],
+    };
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "get_online_music_settings") {
+        return Promise.resolve({ ...settings, downloadDirectory: "/downloads" });
+      }
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "start_online_music_search") return Promise.resolve("search-1");
+      if (command === "online_music_playlists") {
+        return Promise.resolve({
+          items: [libraryPlaylist],
+          failures: [],
+          supportedChannels: 1,
+          completedChannels: 1,
+        });
+      }
+      if (command === "online_music_playlist_tracks") {
+        return Promise.resolve({ items: [], hasMore: false, total: 0 });
+      }
+      if (command === "create_online_download_task") return Promise.resolve(task);
+      if (command === "start_online_download_task") {
+        return Promise.resolve({ ...task, state: "running", updatedAt: 2 });
+      }
+      if (command === "dispatch_plugin_request") {
+        return Promise.resolve({
+          response: {
+            action: "playlistAddTrack",
+            data: {
+              auditId: 0,
+              operation: "add",
+              playlistId: libraryPlaylist.id,
+              trackId: "1",
+              occurredAt: 1,
+            },
+          },
+          diagnostics: [],
+        });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+    await search(wrapper, "Song", "songs", [downloadedTrack]);
+
+    await wrapper.get('button[aria-label="Download Song 1"]').trigger("click");
+    await flushPromises();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith(
+      "dispatch_plugin_request",
+      expect.objectContaining({
+        pluginId: "fika.netease",
+        request: expect.objectContaining({
+          action: "playlistAddTrack",
+          playlistId: libraryPlaylist.id,
+          track: { id: "1", source: "wy" },
+        }),
+      }),
+    );
+    wrapper.unmount();
+  });
+
+  it("does not favorite a downloaded song when the setting is disabled", async () => {
+    const downloadedTrack = track(1);
+    const task: OnlineDownloadTask = {
+      taskId: "download-without-favorite-task",
+      kind: "track",
+      title: downloadedTrack.title,
+      state: "queued",
+      destination: "/downloads",
+      selectedAudioSourceId: null,
+      totalItems: 1,
+      completedItems: 0,
+      skippedItems: 0,
+      failedItems: 0,
+      createdAt: 1,
+      updatedAt: 1,
+      items: [],
+    };
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === "get_online_music_settings") {
+        return Promise.resolve({
+          ...settings,
+          autoFavoriteOnDownload: false,
+          downloadDirectory: "/downloads",
+        });
+      }
+      if (command === "list_online_download_tasks") return Promise.resolve([]);
+      if (command === "start_online_music_search") return Promise.resolve("search-1");
+      if (command === "online_music_playlists") {
+        return Promise.resolve({
+          items: [libraryPlaylist],
+          failures: [],
+          supportedChannels: 1,
+          completedChannels: 1,
+        });
+      }
+      if (command === "online_music_playlist_tracks") {
+        return Promise.resolve({ items: [], hasMore: false, total: 0 });
+      }
+      if (command === "create_online_download_task") return Promise.resolve(task);
+      if (command === "start_online_download_task") {
+        return Promise.resolve({ ...task, state: "running", updatedAt: 2 });
+      }
+      return Promise.resolve(null);
+    });
+    const wrapper = mountOnlineMusic();
+    await flushPromises();
+    await search(wrapper, "Song", "songs", [downloadedTrack]);
+
+    await wrapper.get('button[aria-label="Download Song 1"]').trigger("click");
+    await flushPromises();
+
+    expect(
+      tauriMocks.invoke.mock.calls.some(([command]) => command === "dispatch_plugin_request"),
+    ).toBe(false);
+    wrapper.unmount();
+  });
+
   it("creates one download task for a multi-selection without leaving search", async () => {
     const tracks = [track(1), track(2)];
     const task: OnlineDownloadTask = {

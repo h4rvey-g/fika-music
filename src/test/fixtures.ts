@@ -89,6 +89,7 @@ export function createOnlineMusicSettings(
     playbackQuality: "320k",
     playbackCacheMaxMb: 500,
     downloadQuality: "320k",
+    autoFavoriteOnDownload: true,
     searchHistoryEnabled: true,
     downloadDirectory: null,
     filenameTemplate: "{artist} - {title}[ \\[{album}\\]]",
