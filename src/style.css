@@ -11,14 +11,114 @@
   color: color-mix(in oklab, var(--color-base-content) 85%, transparent);
 }
 
+:root {
+  --safe-area-top: env(safe-area-inset-top, 0px);
+  --safe-area-right: env(safe-area-inset-right, 0px);
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-left: env(safe-area-inset-left, 0px);
+}
+
 html,
 body,
 #app {
+  width: 100%;
+  height: 100%;
   min-height: 100%;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 body {
   margin: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+.app-shell {
+  box-sizing: border-box;
+  height: 100vh;
+  padding-inline: var(--safe-area-left) var(--safe-area-right);
+}
+
+.app-header {
+  min-height: calc(4rem + var(--safe-area-top));
+  padding-top: calc(0.5rem + var(--safe-area-top));
+}
+
+.app-footer {
+  padding-bottom: var(--safe-area-bottom);
+}
+
+.app-sidebar-panel {
+  box-sizing: border-box;
+  padding-block: var(--safe-area-top) var(--safe-area-bottom);
+  padding-left: var(--safe-area-left);
+}
+
+.app-update-notification {
+  right: calc(1rem + var(--safe-area-right));
+  bottom: calc(7rem + var(--safe-area-bottom));
+  left: calc(1rem + var(--safe-area-left));
+}
+
+.viewport-menu {
+  max-width: calc(100vw - var(--safe-area-left) - var(--safe-area-right) - 1rem);
+  max-height: calc(100vh - var(--safe-area-top) - var(--safe-area-bottom) - 1rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.modal {
+  box-sizing: border-box;
+  padding: var(--safe-area-top) var(--safe-area-right) var(--safe-area-bottom)
+    var(--safe-area-left);
+}
+
+.modal > .modal-box {
+  max-width: calc(100vw - var(--safe-area-left) - var(--safe-area-right));
+  max-height: min(
+    var(--app-modal-max-height, 100vh),
+    calc(100vh - var(--safe-area-top) - var(--safe-area-bottom))
+  );
+}
+
+.playback-queue-box {
+  --app-modal-max-height: min(42rem, calc(100vh - 2rem));
+}
+
+[data-online-comments-dialog] {
+  --app-modal-max-height: min(88vh, 48rem);
+}
+
+@supports (height: 100dvh) {
+  .app-shell {
+    height: 100dvh;
+  }
+
+  .viewport-menu {
+    max-height: calc(100dvh - var(--safe-area-top) - var(--safe-area-bottom) - 1rem);
+  }
+
+  .modal > .modal-box {
+    max-height: min(
+      var(--app-modal-max-height, 100dvh),
+      calc(100dvh - var(--safe-area-top) - var(--safe-area-bottom))
+    );
+  }
+
+  .playback-queue-box {
+    --app-modal-max-height: min(42rem, calc(100dvh - 2rem));
+  }
+}
+
+@media (min-width: 640px) {
+  .app-update-notification {
+    right: calc(1rem + var(--safe-area-right));
+    left: auto;
+  }
 }
 
 html.desktop-lyrics-root,

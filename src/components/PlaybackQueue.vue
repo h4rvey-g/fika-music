@@ -63,7 +63,7 @@ function finishDrag() {
     aria-labelledby="playback-queue-title"
     @cancel.prevent="emit('close')"
   >
-    <div class="modal-box flex max-h-[min(42rem,calc(100vh-2rem))] w-full max-w-lg flex-col gap-4 rounded p-0">
+    <div class="modal-box playback-queue-box flex max-h-[min(42rem,calc(100vh-2rem))] w-full max-w-lg flex-col gap-4 rounded p-0">
       <div class="flex items-start gap-3 border-b border-base-300 px-5 py-4">
         <div class="flex min-w-0 flex-1 items-start gap-3">
           <ListMusic class="mt-0.5 shrink-0" :size="20" aria-hidden="true" />

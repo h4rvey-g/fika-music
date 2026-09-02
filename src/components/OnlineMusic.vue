@@ -3082,7 +3082,7 @@ defineExpose({
           v-for="entry in recommendationEntries"
           :key="entry.id"
           data-online-recommendation-entry
-          class="card card-border card-sm group relative isolate h-36 w-full overflow-hidden bg-base-100 text-left transition-colors hover:bg-base-200/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+          class="card card-border card-sm group relative isolate min-h-36 w-full overflow-hidden bg-base-100 text-left transition-colors hover:bg-base-200/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
           type="button"
           :aria-label="t(entry.label)"
           @click="openRecommendation(entry.id)"

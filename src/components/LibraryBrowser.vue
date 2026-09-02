@@ -68,6 +68,7 @@ import {
   writeCollectionDragPayload,
   type LocalCollectionSelection,
 } from "../lib/collection-api";
+import { viewportMenuPosition } from "../lib/viewport-layout";
 import TrackRating from "./TrackRating.vue";
 
 type ColumnDefinition = {
@@ -203,7 +204,7 @@ let unlistenMetadata: (() => void) | null = null;
 let unlistenLibraryChanged: (() => void) | null = null;
 let libraryInitialization: Promise<void> | null = null;
 
-const rowHeight = 34;
+const rowHeight = 40;
 const albumCoverSize = rowHeight * 2 - 8;
 const visibleColumns = computed(() =>
   columns.value
@@ -590,7 +591,7 @@ function openColumnMenu(event: MouseEvent) {
   event.preventDefault();
   rowMenu.value = null;
   groupMenu.value = null;
-  columnMenu.value = menuPosition(event.clientX, event.clientY, 260, 520);
+  columnMenu.value = viewportMenuPosition(event.clientX, event.clientY, 260, 520);
 }
 
 function toggleColumn(columnId: LibraryColumnId) {
@@ -800,7 +801,11 @@ function openRowMenu(event: MouseEvent, trackIndex: number, track: LocalTrack) {
   }
   columnMenu.value = null;
   groupMenu.value = null;
-  rowMenu.value = { ...menuPosition(event.clientX, event.clientY, 240, 410), track, trackIndex };
+  rowMenu.value = {
+    ...viewportMenuPosition(event.clientX, event.clientY, 240, 410),
+    track,
+    trackIndex,
+  };
 }
 
 function openGroupMenu(event: MouseEvent, virtualIndex: number, group: LibraryAlbumGroup) {
@@ -817,7 +822,7 @@ function openGroupMenu(event: MouseEvent, virtualIndex: number, group: LibraryAl
   rowMenu.value = null;
   columnMenu.value = null;
   groupMenu.value = {
-    ...menuPosition(event.clientX, event.clientY, 250, 420),
+    ...viewportMenuPosition(event.clientX, event.clientY, 250, 420),
     group,
     virtualIndex,
   };
@@ -1547,13 +1552,6 @@ function visualTextWidth(value: string) {
   );
 }
 
-function menuPosition(x: number, y: number, width: number, height: number): MenuPosition {
-  return {
-    x: Math.max(8, Math.min(x, window.innerWidth - width - 8)),
-    y: Math.max(8, Math.min(y, window.innerHeight - height - 8)),
-  };
-}
-
 function normalizedRange(first: number, second: number): LibrarySelectionRange {
   return { start: Math.min(first, second), end: Math.max(first, second) };
 }
@@ -1788,7 +1786,7 @@ defineExpose({
       @contextmenu="openColumnMenu"
     >
       <div
-        class="sticky top-0 z-30 grid h-8 border-b border-base-300 bg-base-200 text-xs font-medium"
+        class="sticky top-0 z-30 grid min-h-9 border-b border-base-300 bg-base-200 text-xs font-medium"
         :style="tableGridStyle"
         role="row"
         @contextmenu="openColumnMenu"
@@ -2051,7 +2049,7 @@ defineExpose({
       </div>
     </div>
 
-    <div class="flex h-7 shrink-0 items-center gap-3 border-t border-base-300 bg-base-200 px-3 text-xs">
+    <div class="flex min-h-8 shrink-0 items-center gap-3 border-t border-base-300 bg-base-200 px-3 py-1 text-xs">
       <span class="min-w-0 flex-1 truncate">{{ queueStatus || resultSummary }}</span>
       <span v-if="selectionCount" class="shrink-0 tabular-nums">{{ t("{count} selected", { count: formatNumber(selectionCount) }) }}</span>
       <span v-if="searchInput.trim()" class="hidden shrink-0 text-muted xl:inline">{{ activeSortLabel }}</span>
@@ -2060,7 +2058,7 @@ defineExpose({
 
   <ul
     v-if="rowMenu"
-    class="menu fixed z-50 w-60 border border-base-300 bg-base-100 p-2 shadow-xl"
+    class="menu viewport-menu fixed z-50 w-60 border border-base-300 bg-base-100 p-2 shadow-xl"
     :style="{ left: `${rowMenu.x}px`, top: `${rowMenu.y}px` }"
     data-menu-surface
     :aria-label="t('Track actions')"
@@ -2080,7 +2078,7 @@ defineExpose({
 
   <ul
     v-if="groupMenu"
-    class="menu fixed z-50 w-64 border border-base-300 bg-base-100 p-2 shadow-xl"
+    class="menu viewport-menu fixed z-50 w-64 border border-base-300 bg-base-100 p-2 shadow-xl"
     :style="{ left: `${groupMenu.x}px`, top: `${groupMenu.y}px` }"
     data-menu-surface
     :aria-label="t('Album actions')"
@@ -2097,7 +2095,7 @@ defineExpose({
 
   <div
     v-if="columnMenu"
-    class="fixed z-50 max-h-[70vh] w-64 overflow-y-auto border border-base-300 bg-base-100 shadow-xl"
+    class="viewport-menu fixed z-50 max-h-[70vh] w-64 overflow-y-auto border border-base-300 bg-base-100 shadow-xl"
     :style="{ left: `${columnMenu.x}px`, top: `${columnMenu.y}px` }"
     data-menu-surface
     :aria-label="t('Library columns')"

@@ -8,6 +8,7 @@ import {
   nowPlayingLyricsFontFamily,
   type NowPlayingLyricsPreferences,
 } from "../lib/now-playing-lyrics";
+import { viewportMenuPosition } from "../lib/viewport-layout";
 import { t } from "../i18n";
 
 const props = withDefaults(defineProps<{
@@ -158,10 +159,7 @@ function openLyricsContextMenu(event: MouseEvent) {
   resetLyricDrag();
   const width = 224;
   const height = props.canRetry ? 80 : 48;
-  lyricsContextMenu.value = {
-    x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
-    y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
-  };
+  lyricsContextMenu.value = viewportMenuPosition(event.clientX, event.clientY, width, height);
   void nextTick(() => {
     const action = props.canRetry && !props.lyricsLoading
       ? lyricsRetryMenuAction.value
@@ -386,7 +384,7 @@ watch(activeLyricIndex, async (index) => {
       ></div>
       <ul
         v-if="lyricsContextMenu"
-        class="menu menu-sm fixed z-50 w-56 rounded border border-base-300 bg-base-100 p-2 text-base-content shadow-xl"
+        class="menu menu-sm viewport-menu fixed z-50 w-56 rounded border border-base-300 bg-base-100 p-2 text-base-content shadow-xl"
         :style="{
           left: `${lyricsContextMenu.x}px`,
           top: `${lyricsContextMenu.y}px`,

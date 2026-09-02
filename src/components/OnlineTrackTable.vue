@@ -18,6 +18,7 @@ import {
 } from "../lib/online-music-api";
 import { writeCollectionDragPayload } from "../lib/collection-api";
 import { formatNumber, t } from "../i18n";
+import { viewportMenuPosition } from "../lib/viewport-layout";
 
 const props = defineProps<{
   tracks: OnlineTrack[];
@@ -122,7 +123,7 @@ function openContextMenu(event: MouseEvent, index: number) {
     selectedKeys.value = new Set([track.key]);
     selectionAnchor.value = index;
   }
-  contextMenu.value = menuPosition(event.clientX, event.clientY);
+  contextMenu.value = viewportMenuPosition(event.clientX, event.clientY, 240, 340);
 }
 
 function closeContextMenu() {
@@ -189,15 +190,6 @@ function viewComments() {
   const [track] = selectedTracks.value;
   if (selectionSupportsComments.value && track) emit("viewComments", track);
   closeContextMenu();
-}
-
-function menuPosition(x: number, y: number) {
-  const width = 240;
-  const height = 340;
-  return {
-    x: Math.max(8, Math.min(x, window.innerWidth - width - 8)),
-    y: Math.max(8, Math.min(y, window.innerHeight - height - 8)),
-  };
 }
 
 function duration(seconds: number | null) {
@@ -398,7 +390,7 @@ function artistActionId(track: OnlineTrack, artist: string) {
 
     <ul
       v-if="contextMenu"
-      class="menu fixed z-50 w-60 border border-base-300 bg-base-100 p-2 text-base-content shadow-xl"
+      class="menu viewport-menu fixed z-50 w-60 border border-base-300 bg-base-100 p-2 text-base-content shadow-xl"
       :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
       data-online-track-menu
       :aria-label="t('Selected online track actions')"

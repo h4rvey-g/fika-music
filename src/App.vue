@@ -199,6 +199,7 @@ import {
   smartCollectionOperators,
   smartCollectionRulesAreComplete,
 } from "./lib/smart-collection-model";
+import { viewportMenuPosition } from "./lib/viewport-layout";
 
 type LibraryBrowserInstance = {
   refresh: () => Promise<void>;
@@ -1433,14 +1434,14 @@ function showCollectionNotice(message: string) {
 function openLocalMusicContextMenu(event: MouseEvent) {
   event.preventDefault();
   collectionContextMenu.value = null;
-  localMusicContextMenu.value = appMenuPosition(event.clientX, event.clientY, 220, 96);
+  localMusicContextMenu.value = viewportMenuPosition(event.clientX, event.clientY, 220, 96);
 }
 
 function openCollectionContextMenu(event: MouseEvent, collectionId: string) {
   event.preventDefault();
   localMusicContextMenu.value = null;
   collectionContextMenu.value = {
-    ...appMenuPosition(event.clientX, event.clientY, 220, 128),
+    ...viewportMenuPosition(event.clientX, event.clientY, 220, 128),
     collectionId,
   };
 }
@@ -1448,13 +1449,6 @@ function openCollectionContextMenu(event: MouseEvent, collectionId: string) {
 function closeSidebarContextMenus() {
   localMusicContextMenu.value = null;
   collectionContextMenu.value = null;
-}
-
-function appMenuPosition(x: number, y: number, width: number, height: number) {
-  return {
-    x: Math.max(8, Math.min(x, window.innerWidth - width - 8)),
-    y: Math.max(8, Math.min(y, window.innerHeight - height - 8)),
-  };
 }
 
 function collectionForContextMenu() {
@@ -2967,11 +2961,11 @@ function trackSubtitle(track: LocalTrack) {
 </script>
 
 <template>
-  <div class="drawer h-screen overflow-hidden bg-base-200 text-base-content min-[1200px]:drawer-open">
+  <div class="drawer app-shell overflow-hidden bg-base-200 text-base-content min-[1200px]:drawer-open">
     <input id="app-sidebar" v-model="sidebarOpen" type="checkbox" class="drawer-toggle" />
 
-    <div class="drawer-content flex h-screen min-h-0 min-w-0 flex-col">
-      <header class="navbar z-30 min-h-16 shrink-0 border-b border-base-300 bg-base-100 px-3 sm:px-4 lg:px-6">
+    <div class="drawer-content flex h-full min-h-0 min-w-0 flex-col">
+      <header class="navbar app-header z-30 shrink-0 border-b border-base-300 bg-base-100 px-3 sm:px-4 lg:px-6">
         <div class="navbar-start min-w-0 flex-1 gap-2 sm:gap-3">
           <label
             for="app-sidebar"
@@ -3000,7 +2994,7 @@ function trackSubtitle(track: LocalTrack) {
             @click="chooseFolder"
           >
             <FolderOpen :size="16" aria-hidden="true" />
-            {{ t("Folder") }}
+            <span class="hidden sm:inline">{{ t("Folder") }}</span>
           </button>
         </div>
 
@@ -3028,7 +3022,7 @@ function trackSubtitle(track: LocalTrack) {
         <div v-else-if="activeSection === 'settings'" class="navbar-end w-auto">
           <button class="btn btn-ghost btn-sm" type="button" @click="resetUiPreferences">
             <RotateCcw :size="16" aria-hidden="true" />
-            {{ t("Reset") }}
+            <span class="hidden sm:inline">{{ t("Reset") }}</span>
           </button>
         </div>
       </header>
@@ -3552,7 +3546,7 @@ function trackSubtitle(track: LocalTrack) {
 
       <div
         v-if="appUpdater.notificationVisible.value && appUpdater.availableUpdate.value && activeSection !== 'settings'"
-        class="fixed bottom-28 left-4 right-4 z-50 sm:left-auto sm:w-96"
+        class="app-update-notification fixed z-50 sm:w-96"
       >
         <div role="alert" class="alert alert-info alert-soft shadow-lg">
           <Download class="shrink-0" :size="19" aria-hidden="true" />
@@ -3592,7 +3586,7 @@ function trackSubtitle(track: LocalTrack) {
       />
 
       <footer
-        class="z-30 shrink-0 border-t border-base-300 bg-base-100/95 backdrop-blur"
+        class="app-footer z-30 shrink-0 border-t border-base-300 bg-base-100/95 backdrop-blur"
         :aria-label="t('Playback bar')"
       >
         <div
@@ -3730,7 +3724,7 @@ function trackSubtitle(track: LocalTrack) {
             </div>
 
             <div
-              class="tooltip tooltip-top"
+              class="tooltip tooltip-top hidden sm:block"
               :data-tip="desktopLyricsPreferences.enabled ? t('Hide desktop lyrics') : t('Show desktop lyrics')"
             >
               <button
@@ -3939,7 +3933,7 @@ function trackSubtitle(track: LocalTrack) {
 
     <div class="drawer-side z-40">
       <label for="app-sidebar" :aria-label="t('Close navigation')" class="drawer-overlay"></label>
-      <aside class="flex min-h-full w-60 flex-col border-r border-base-300 bg-base-100">
+      <aside class="app-sidebar-panel flex min-h-full w-60 flex-col border-r border-base-300 bg-base-100">
         <div class="flex min-h-16 items-center gap-3 border-b border-base-300 px-4">
           <img class="size-9 shrink-0" :src="fikaLogoUrl" alt="" />
           <div class="min-w-0 truncate text-base font-semibold leading-tight">Fika Music</div>
@@ -4104,7 +4098,7 @@ function trackSubtitle(track: LocalTrack) {
       ></div>
       <ul
         v-if="localMusicContextMenu"
-        class="menu menu-sm fixed z-[60] w-56 rounded border border-base-300 bg-base-100 p-2 shadow-xl"
+        class="menu menu-sm viewport-menu fixed z-[60] w-56 rounded border border-base-300 bg-base-100 p-2 shadow-xl"
         :style="{ left: `${localMusicContextMenu.x}px`, top: `${localMusicContextMenu.y}px` }"
         data-sidebar-context-menu
         :aria-label="t('Local Music actions')"
@@ -4129,7 +4123,7 @@ function trackSubtitle(track: LocalTrack) {
 
       <ul
         v-if="collectionContextMenu && collectionForContextMenu()"
-        class="menu menu-sm fixed z-[60] w-56 rounded border border-base-300 bg-base-100 p-2 shadow-xl"
+        class="menu menu-sm viewport-menu fixed z-[60] w-56 rounded border border-base-300 bg-base-100 p-2 shadow-xl"
         :style="{ left: `${collectionContextMenu.x}px`, top: `${collectionContextMenu.y}px` }"
         data-sidebar-context-menu
         :aria-label="t('Collection actions')"
