@@ -335,10 +335,11 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-          cache: gradle
-          cache-dependency-path: |
-            package-lock.json
-            src-tauri/Cargo.lock
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          add-job-summary: on-failure
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -415,12 +416,19 @@ jobs:
           } > "$properties"
           chmod 600 "$properties"
 
-      - name: Build signed Android bundles
-        run: |
-          set -euo pipefail
+      # Keep dist unchanged between Tauri invocations so Cargo can reuse every ABI build.
+      - name: Build frontend for Android
+        run: npm run build
 
+      - name: Build signed Android app bundle
+        run: >-
           npm run tauri android build -- --ci --aab
+          --config '{"build":{"beforeBuildCommand":""}}'
+
+      - name: Build signed per-ABI Android APKs
+        run: >-
           npm run tauri android build -- --ci --apk --split-per-abi
+          --config '{"build":{"beforeBuildCommand":""}}'
 
       - name: Verify and stage Android bundles
         id: android-bundles
