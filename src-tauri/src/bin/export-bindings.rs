@@ -5,10 +5,13 @@ use std::path::{Path, PathBuf};
 use fika_music_lib::audio_source_system::{
     AudioSourceAvailability, AudioSourceCommandError, AudioSourceRecord,
 };
-use fika_music_lib::kugou::{KugouAccount, KugouQrLoginPoll, KugouQrLoginStart};
+use fika_music_lib::kugou::{
+    KugouAccount, KugouPhoneLoginStart, KugouQrLoginPoll, KugouQrLoginStart,
+};
 use fika_music_lib::lyrics::{LocalTrackPlaybackDetails, TrackLyricsQuery};
 use fika_music_lib::netease::{
-    NeteaseAccount, NeteaseMutationAudit, NeteaseQrLoginPoll, NeteaseQrLoginStart,
+    NeteaseAccount, NeteaseMutationAudit, NeteasePhoneLoginStart, NeteaseQrLoginPoll,
+    NeteaseQrLoginStart,
 };
 use fika_music_lib::online_download::{
     OnlineDownloadItem, OnlineDownloadItemState, OnlineDownloadProgressEvent, OnlineDownloadState,
@@ -124,10 +127,12 @@ fn generate(output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     export_all::<SourceRequest>(&config)?;
     export_all::<SourceRequestOutcome>(&config)?;
     export_all::<NeteaseAccount>(&config)?;
+    export_all::<NeteasePhoneLoginStart>(&config)?;
     export_all::<NeteaseQrLoginStart>(&config)?;
     export_all::<NeteaseQrLoginPoll>(&config)?;
     export_all::<NeteaseMutationAudit>(&config)?;
     export_all::<KugouAccount>(&config)?;
+    export_all::<KugouPhoneLoginStart>(&config)?;
     export_all::<KugouQrLoginStart>(&config)?;
     export_all::<KugouQrLoginPoll>(&config)?;
     export_all::<AudioSourceSelectionMode>(&config)?;

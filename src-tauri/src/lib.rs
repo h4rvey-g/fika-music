@@ -54,9 +54,11 @@ pub mod youtube_music_playback;
 mod yt_dlp_sidecar;
 
 use account_commands::{
-    cancel_kugou_qr_login, cancel_netease_qr_login, disconnect_kugou_account,
-    disconnect_netease_account, list_kugou_accounts, list_netease_accounts,
-    list_netease_mutation_audit, poll_kugou_qr_login, poll_netease_qr_login, start_kugou_qr_login,
+    cancel_kugou_phone_login, cancel_kugou_qr_login, cancel_netease_phone_login,
+    cancel_netease_qr_login, complete_kugou_phone_login, complete_netease_phone_login,
+    disconnect_kugou_account, disconnect_netease_account, list_kugou_accounts,
+    list_netease_accounts, list_netease_mutation_audit, poll_kugou_qr_login, poll_netease_qr_login,
+    start_kugou_phone_login, start_kugou_qr_login, start_netease_phone_login,
     start_netease_qr_login,
 };
 pub use account_commands::{KugouCommandError, NeteaseCommandError};
@@ -196,12 +198,18 @@ macro_rules! with_tauri_commands {
             start_netease_qr_login,
             poll_netease_qr_login,
             cancel_netease_qr_login,
+            start_netease_phone_login,
+            complete_netease_phone_login,
+            cancel_netease_phone_login,
             list_netease_accounts,
             disconnect_netease_account,
             list_netease_mutation_audit,
             start_kugou_qr_login,
             poll_kugou_qr_login,
             cancel_kugou_qr_login,
+            start_kugou_phone_login,
+            complete_kugou_phone_login,
+            cancel_kugou_phone_login,
             list_kugou_accounts,
             disconnect_kugou_account,
         }

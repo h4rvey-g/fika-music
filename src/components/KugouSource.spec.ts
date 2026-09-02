@@ -10,13 +10,16 @@ const pluginApiMocks = vi.hoisted(() => ({
 }));
 
 const kugouApiMocks = vi.hoisted(() => ({
+  cancelKugouPhoneLogin: vi.fn(),
   cancelKugouQrLogin: vi.fn(),
+  completeKugouPhoneLogin: vi.fn(),
   disconnectKugouAccount: vi.fn(),
   getKugouPlaylist: vi.fn(),
   getKugouPlaylists: vi.fn(),
   getKugouRecommendations: vi.fn(),
   listKugouAccounts: vi.fn(),
   pollKugouQrLogin: vi.fn(),
+  startKugouPhoneLogin: vi.fn(),
   startKugouQrLogin: vi.fn(),
 }));
 
@@ -72,6 +75,7 @@ describe("KugouSource", () => {
       createSourceAccount({ accountRef }),
     ]);
     kugouApiMocks.cancelKugouQrLogin.mockResolvedValue(undefined);
+    kugouApiMocks.cancelKugouPhoneLogin.mockResolvedValue(undefined);
   });
 
   it("shows login and audio source controls without loading music content", async () => {
@@ -129,8 +133,56 @@ describe("KugouSource", () => {
       .find((button) => button.text().trim() === "Connect");
     await connect?.trigger("click");
     await flushPromises();
+    const qrTab = wrapper
+      .findAll('[role="tab"]')
+      .find((tab) => tab.text().includes("QR code"));
+    await qrTab?.trigger("click");
+    const createQr = wrapper
+      .findAll("button")
+      .find((button) => button.text().trim() === "Create QR code");
+    await createQr?.trigger("click");
+    await flushPromises();
     wrapper.unmount();
 
     expect(kugouApiMocks.cancelKugouQrLogin).toHaveBeenCalledWith("qr-session");
+  });
+
+  it("connects with an SMS verification code on one device", async () => {
+    const phoneAccount = createSourceAccount({
+      accountRef: "kugou-account:00000000-0000-4000-8000-000000000002",
+      displayName: "Phone User",
+    });
+    kugouApiMocks.listKugouAccounts
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([phoneAccount]);
+    kugouApiMocks.startKugouPhoneLogin.mockResolvedValue({
+      sessionId: "phone-session",
+      expiresAt: 600,
+    });
+    kugouApiMocks.completeKugouPhoneLogin.mockResolvedValue(phoneAccount);
+    const wrapper = mountKugouSource();
+    await flushPromises();
+
+    const connect = wrapper
+      .findAll("button")
+      .find((button) => button.text().trim() === "Connect");
+    await connect?.trigger("click");
+    await wrapper.get('input[aria-label="KuGou phone number"]').setValue("13800138000");
+    const sendCode = wrapper
+      .findAll("button")
+      .find((button) => button.text().trim() === "Send code");
+    await sendCode?.trigger("click");
+    await flushPromises();
+    await wrapper.get('input[aria-label="KuGou verification code"]').setValue("123456");
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+
+    expect(kugouApiMocks.startKugouPhoneLogin).toHaveBeenCalledWith("13800138000");
+    expect(kugouApiMocks.completeKugouPhoneLogin).toHaveBeenCalledWith(
+      "phone-session",
+      "123456",
+    );
+    expect(wrapper.text()).toContain("Phone User connected.");
+    wrapper.unmount();
   });
 });

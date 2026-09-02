@@ -30,6 +30,8 @@ export type KugouAccountStatus = "active" | "expired";
 
 export type KugouCommandError = { code: string, message: string, };
 
+export type KugouPhoneLoginStart = { sessionId: string, expiresAt: number, };
+
 export type KugouQrLoginPoll = { status: KugouQrLoginStatus, account: KugouAccount | null, };
 
 export type KugouQrLoginStart = { sessionId: string, qrImageDataUrl: string, expiresAt: number, };
@@ -105,6 +107,8 @@ export type NeteaseAccountStatus = "active" | "expired";
 export type NeteaseCommandError = { code: string, message: string, };
 
 export type NeteaseMutationAudit = { id: number, accountRef: string, operation: SourcePlaylistMutationKind, playlistId: string, trackId: string, outcome: string, message: string | null, occurredAt: number, };
+
+export type NeteasePhoneLoginStart = { sessionId: string, expiresAt: number, };
 
 export type NeteaseQrLoginPoll = { status: NeteaseQrLoginStatus, account: NeteaseAccount | null, };
 
@@ -356,12 +360,18 @@ export const TAURI_COMMANDS = {
   startNeteaseQrLogin: "start_netease_qr_login",
   pollNeteaseQrLogin: "poll_netease_qr_login",
   cancelNeteaseQrLogin: "cancel_netease_qr_login",
+  startNeteasePhoneLogin: "start_netease_phone_login",
+  completeNeteasePhoneLogin: "complete_netease_phone_login",
+  cancelNeteasePhoneLogin: "cancel_netease_phone_login",
   listNeteaseAccounts: "list_netease_accounts",
   disconnectNeteaseAccount: "disconnect_netease_account",
   listNeteaseMutationAudit: "list_netease_mutation_audit",
   startKugouQrLogin: "start_kugou_qr_login",
   pollKugouQrLogin: "poll_kugou_qr_login",
   cancelKugouQrLogin: "cancel_kugou_qr_login",
+  startKugouPhoneLogin: "start_kugou_phone_login",
+  completeKugouPhoneLogin: "complete_kugou_phone_login",
+  cancelKugouPhoneLogin: "cancel_kugou_phone_login",
   listKugouAccounts: "list_kugou_accounts",
   disconnectKugouAccount: "disconnect_kugou_account",
 } as const;

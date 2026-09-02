@@ -2,10 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SourceRequestOutcome } from "./plugin-api";
 import {
   addNeteasePlaylistTrack,
+  cancelNeteasePhoneLogin,
   cancelNeteaseQrLogin,
+  completeNeteasePhoneLogin,
   getNeteaseRecommendations,
   pollNeteaseQrLogin,
   resolveNeteaseTrack,
+  startNeteasePhoneLogin,
 } from "./netease-api";
 import { createNeteaseTrack } from "../test/fixtures";
 
@@ -38,6 +41,23 @@ describe("NetEase API", () => {
     expect(invokeMock).toHaveBeenLastCalledWith("cancel_netease_qr_login", {
       sessionId: "qr-session",
     });
+  });
+
+  it("uses an opaque session for verification-code login", async () => {
+    invokeMock.mockResolvedValue({ sessionId: "phone-session", expiresAt: 600 });
+
+    await startNeteasePhoneLogin("13800138000");
+    await completeNeteasePhoneLogin("phone-session", "123456");
+    await cancelNeteasePhoneLogin("phone-session");
+
+    expect(invokeMock.mock.calls).toEqual([
+      ["start_netease_phone_login", { phone: "13800138000" }],
+      ["complete_netease_phone_login", {
+        sessionId: "phone-session",
+        verificationCode: "123456",
+      }],
+      ["cancel_netease_phone_login", { sessionId: "phone-session" }],
+    ]);
   });
 
   it("dispatches recommendation requests through the bundled Plugin", async () => {

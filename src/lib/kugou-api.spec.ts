@@ -2,11 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SourceRequestOutcome } from "./plugin-api";
 import {
   addKugouPlaylistTrack,
+  cancelKugouPhoneLogin,
   cancelKugouQrLogin,
+  completeKugouPhoneLogin,
   getKugouPlaylist,
   getKugouRecommendations,
   pollKugouQrLogin,
   resolveKugouTrack,
+  startKugouPhoneLogin,
 } from "./kugou-api";
 import { createKugouTrack } from "../test/fixtures";
 
@@ -35,6 +38,23 @@ describe("KuGou API", () => {
     expect(invokeMock.mock.calls).toEqual([
       ["poll_kugou_qr_login", { sessionId: "qr-session" }],
       ["cancel_kugou_qr_login", { sessionId: "qr-session" }],
+    ]);
+  });
+
+  it("uses an opaque session for verification-code login", async () => {
+    invokeMock.mockResolvedValue({ sessionId: "phone-session", expiresAt: 600 });
+
+    await startKugouPhoneLogin("13800138000");
+    await completeKugouPhoneLogin("phone-session", "123456");
+    await cancelKugouPhoneLogin("phone-session");
+
+    expect(invokeMock.mock.calls).toEqual([
+      ["start_kugou_phone_login", { phone: "13800138000" }],
+      ["complete_kugou_phone_login", {
+        sessionId: "phone-session",
+        verificationCode: "123456",
+      }],
+      ["cancel_kugou_phone_login", { sessionId: "phone-session" }],
     ]);
   });
 

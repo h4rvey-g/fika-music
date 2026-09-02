@@ -9,12 +9,18 @@ use crate::source_runtime::{
     SourceRuntimeContext, SourceRuntimeError, SourceSearchResponse, SourceSuggestionsResponse,
     SourceTrackRef,
 };
+use aes::Aes256;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
+use cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use qrcode::render::svg;
 use qrcode::QrCode;
+use rand::Rng;
 use reqwest::blocking::Client;
 use reqwest::Method;
+use rsa::pkcs8::DecodePublicKey;
+use rsa::traits::PublicKeyParts;
+use rsa::RsaPublicKey;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
@@ -36,6 +42,7 @@ const ACCOUNT_REF_PREFIX: &str = "kugou-account:";
 const GATEWAY_BASE_URL: &str = "https://gateway.kugou.com";
 const SONG_SEARCH_BASE_URL: &str = "https://songsearch.kugou.com";
 const LOGIN_BASE_URL: &str = "https://login-user.kugou.com";
+const LOGIN_SERVICE_BASE_URL: &str = "https://loginserviceretry.kugou.com";
 const WEB_SIGNATURE_SALT: &str = "NVPh5oo715z5DIWAeQlhMDsWXXQV4hwt";
 const ANDROID_SIGNATURE_SALT: &str = "OIlwieks28dk2k092lksi2UIkp";
 const APP_ID: u32 = 1005;
@@ -47,6 +54,10 @@ const TRACK_URL_PAGE_ID: u32 = 151369488;
 const TRACK_URL_KEY_SALT: &str = "57ae12eb6890223e355ccfcb74edf70d";
 const QR_SESSION_TTL_SECONDS: i64 = 300;
 const MAX_PENDING_QR_SESSIONS: usize = 8;
+const PHONE_LOGIN_SESSION_TTL_SECONDS: i64 = 600;
+const MAX_PENDING_PHONE_LOGIN_SESSIONS: usize = 8;
+const LOGIN_USER_AGENT: &str = "Android16-1070-11440-130-0-LOGIN-wifi";
+const LOGIN_RSA_PUBLIC_KEY_DER: &str = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDIAG7QOELSYoIJvTFJhMpe1s/gbjDJX51HBNnEl5HXqTW6lQ7LC8jr9fWZTwusknp+sVGzwd40MwP6U5yDE27M/X1+UR4tvOGOqp94TJtQ1EPnWGWXngpeIW5GxoQGao1rmYWAu6oi1z9XkChrsUdC6DJE5E221wf/4WLFxwAtRQIDAQAB";
 const API_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_API_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const PLAYLIST_PAGE_SIZE: u64 = 200;
@@ -89,6 +100,13 @@ struct StoredSession {
 #[derive(Debug, Clone)]
 struct PendingQrSession {
     key: String,
+    device: KugouDevice,
+    expires_at: i64,
+}
+
+#[derive(Debug, Clone)]
+struct PendingPhoneLoginSession {
+    phone: String,
     device: KugouDevice,
     expires_at: i64,
 }
@@ -137,6 +155,14 @@ impl KugouAccountStatus {
 pub struct KugouQrLoginStart {
     pub session_id: String,
     pub qr_image_data_url: String,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct KugouPhoneLoginStart {
+    pub session_id: String,
     pub expires_at: i64,
 }
 
@@ -189,6 +215,12 @@ pub enum KugouBridgeError {
     AccountNotFound,
     #[error("KuGou QR login session was not found or has expired")]
     QrSessionExpired,
+    #[error("enter a valid 11-digit mainland China phone number")]
+    InvalidPhone,
+    #[error("enter the verification code from the SMS message")]
+    InvalidVerificationCode,
+    #[error("KuGou verification-code login session was not found or has expired")]
+    PhoneLoginSessionExpired,
     #[error("KuGou API rejected {operation} (code {code}): {message}")]
     Api {
         operation: &'static str,
@@ -219,6 +251,9 @@ impl KugouBridgeError {
             Self::CredentialExpired => "credential-expired",
             Self::AccountNotFound => "account-not-found",
             Self::QrSessionExpired => "qr-session-expired",
+            Self::InvalidPhone => "invalid-phone",
+            Self::InvalidVerificationCode => "invalid-verification-code",
+            Self::PhoneLoginSessionExpired => "phone-login-session-expired",
             Self::Api { .. } => "api-failure",
             Self::RateLimited => "rate-limited",
             Self::InvalidPlaylist => "invalid-playlist",
@@ -383,6 +418,17 @@ trait KugouApi: Send + Sync {
     fn start_qr_login(&self, device: &KugouDevice) -> Result<JsonValue, KugouBridgeError>;
     fn poll_qr_login(&self, device: &KugouDevice, key: &str)
         -> Result<JsonValue, KugouBridgeError>;
+    fn send_phone_login_code(
+        &self,
+        device: &KugouDevice,
+        phone: &str,
+    ) -> Result<JsonValue, KugouBridgeError>;
+    fn login_with_phone_code(
+        &self,
+        device: &KugouDevice,
+        phone: &str,
+        verification_code: &str,
+    ) -> Result<JsonValue, KugouBridgeError>;
     fn recommendations(&self, session: &StoredSession) -> Result<JsonValue, KugouBridgeError>;
     fn track_url(
         &self,
@@ -449,6 +495,39 @@ impl KugouHttpApi {
         signature_kind: SignatureKind,
         router: Option<&str>,
     ) -> Result<JsonValue, KugouBridgeError> {
+        self.request_json_with_user_agent(
+            operation,
+            base_url,
+            path,
+            method,
+            device,
+            session,
+            query,
+            body,
+            signature_kind,
+            router,
+            "Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi",
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "request signing and login identity need all upstream fields together"
+    )]
+    fn request_json_with_user_agent(
+        &self,
+        operation: &'static str,
+        base_url: &str,
+        path: &str,
+        method: Method,
+        device: &KugouDevice,
+        session: Option<&StoredSession>,
+        query: BTreeMap<String, String>,
+        body: Option<JsonValue>,
+        signature_kind: SignatureKind,
+        router: Option<&str>,
+        user_agent: &str,
+    ) -> Result<JsonValue, KugouBridgeError> {
         let mut params = default_params(device, session);
         params.extend(query);
         let body = body
@@ -466,10 +545,7 @@ impl KugouHttpApi {
             .client
             .request(method, format!("{base_url}{path}"))
             .query(&params)
-            .header(
-                "User-Agent",
-                "Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi",
-            )
+            .header("User-Agent", user_agent)
             .header("dfid", &device.dfid)
             .header("clienttime", clienttime)
             .header("mid", &device.mid)
@@ -755,6 +831,54 @@ impl KugouApi for KugouHttpApi {
         )
     }
 
+    fn send_phone_login_code(
+        &self,
+        device: &KugouDevice,
+        phone: &str,
+    ) -> Result<JsonValue, KugouBridgeError> {
+        self.request_json(
+            "send verification code",
+            LOGIN_BASE_URL,
+            "/v7/send_mobile_code",
+            Method::POST,
+            device,
+            None,
+            BTreeMap::new(),
+            Some(json!({
+                "businessid": 5,
+                "mobile": phone,
+                "plat": 3,
+            })),
+            SignatureKind::Android,
+            None,
+        )
+    }
+
+    fn login_with_phone_code(
+        &self,
+        device: &KugouDevice,
+        phone: &str,
+        verification_code: &str,
+    ) -> Result<JsonValue, KugouBridgeError> {
+        let clienttime_ms = now_timestamp_millis();
+        let encrypted = kugou_phone_login_payload(phone, verification_code, clienttime_ms)?;
+        let mut body = self.request_json_with_user_agent(
+            "log in with verification code",
+            LOGIN_SERVICE_BASE_URL,
+            "/v7/login_by_verifycode",
+            Method::POST,
+            device,
+            None,
+            BTreeMap::new(),
+            Some(encrypted.body),
+            SignatureKind::Android,
+            None,
+            LOGIN_USER_AGENT,
+        )?;
+        decrypt_kugou_login_response(&mut body, &encrypted.key)?;
+        Ok(body)
+    }
+
     fn recommendations(&self, session: &StoredSession) -> Result<JsonValue, KugouBridgeError> {
         self.request_json(
             "fetch recommendations",
@@ -943,6 +1067,7 @@ pub struct KugouServiceBridge {
     source_host: Arc<source_runtime::DefaultSourceHost>,
     api: Arc<dyn KugouApi>,
     qr_sessions: Mutex<BTreeMap<String, PendingQrSession>>,
+    phone_login_sessions: Mutex<BTreeMap<String, PendingPhoneLoginSession>>,
 }
 
 impl fmt::Debug for KugouServiceBridge {
@@ -952,10 +1077,19 @@ impl fmt::Debug for KugouServiceBridge {
             .lock()
             .map(|sessions| sessions.len())
             .unwrap_or_default();
+        let pending_phone_login_sessions = self
+            .phone_login_sessions
+            .lock()
+            .map(|sessions| sessions.len())
+            .unwrap_or_default();
         formatter
             .debug_struct("KugouServiceBridge")
             .field("api_basis_version", &KUGOU_API_BASIS_VERSION)
             .field("pending_qr_sessions", &pending_sessions)
+            .field(
+                "pending_phone_login_sessions",
+                &pending_phone_login_sessions,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -981,6 +1115,7 @@ impl KugouServiceBridge {
             source_host,
             api,
             qr_sessions: Mutex::new(BTreeMap::new()),
+            phone_login_sessions: Mutex::new(BTreeMap::new()),
         };
         bridge.restore_account_refs()?;
         Ok(bridge)
@@ -1032,6 +1167,82 @@ impl KugouServiceBridge {
         })
     }
 
+    pub fn start_phone_login(&self, phone: &str) -> Result<KugouPhoneLoginStart, KugouBridgeError> {
+        let phone = validate_phone(phone)?;
+        let device = KugouDevice::generate();
+        self.api.send_phone_login_code(&device, &phone)?;
+
+        let session_id = Uuid::new_v4().to_string();
+        let expires_at = now_timestamp() + PHONE_LOGIN_SESSION_TTL_SECONDS;
+        let mut sessions = self.phone_login_sessions.lock().map_err(|_| {
+            KugouBridgeError::Bridge("phone login session lock was poisoned".to_owned())
+        })?;
+        sessions.retain(|_, session| session.expires_at > now_timestamp());
+        if sessions.len() >= MAX_PENDING_PHONE_LOGIN_SESSIONS {
+            if let Some(oldest_id) = sessions
+                .iter()
+                .min_by_key(|(_, session)| session.expires_at)
+                .map(|(id, _)| id.clone())
+            {
+                sessions.remove(&oldest_id);
+            }
+        }
+        sessions.insert(
+            session_id.clone(),
+            PendingPhoneLoginSession {
+                phone,
+                device,
+                expires_at,
+            },
+        );
+        Ok(KugouPhoneLoginStart {
+            session_id,
+            expires_at,
+        })
+    }
+
+    pub fn complete_phone_login(
+        &self,
+        session_id: &str,
+        verification_code: &str,
+    ) -> Result<KugouAccount, KugouBridgeError> {
+        let verification_code = validate_verification_code(verification_code)?;
+        let session = self
+            .phone_login_sessions
+            .lock()
+            .map_err(|_| {
+                KugouBridgeError::Bridge("phone login session lock was poisoned".to_owned())
+            })?
+            .get(session_id)
+            .cloned()
+            .ok_or(KugouBridgeError::PhoneLoginSessionExpired)?;
+        if session.expires_at <= now_timestamp() {
+            self.remove_phone_login_session(session_id)?;
+            return Err(KugouBridgeError::PhoneLoginSessionExpired);
+        }
+
+        let body =
+            self.api
+                .login_with_phone_code(&session.device, &session.phone, &verification_code)?;
+        let data = body
+            .get("data")
+            .ok_or_else(|| KugouBridgeError::InvalidResponse {
+                operation: "log in with verification code",
+                message: "response did not include account data".to_owned(),
+            })?;
+        let account =
+            self.persist_login_account(data, &session.device, "log in with verification code")?;
+        self.remove_phone_login_session(session_id)?;
+        Ok(account)
+    }
+
+    pub fn cancel_phone_login(&self, session_id: &str) -> Result<(), KugouBridgeError> {
+        if session_id.trim().is_empty() {
+            return Err(KugouBridgeError::PhoneLoginSessionExpired);
+        }
+        self.remove_phone_login_session(session_id)
+    }
+
     pub fn poll_qr_login(&self, session_id: &str) -> Result<KugouQrLoginPoll, KugouBridgeError> {
         let session = self
             .qr_sessions
@@ -1072,30 +1283,7 @@ impl KugouServiceBridge {
                         operation: "poll QR login",
                         message: "connected response did not include account data".to_owned(),
                     })?;
-                let token = json_string(data.get("token")).filter(|value| !value.is_empty());
-                let user_id = json_string(data.get("userid")).filter(|value| value != "0");
-                let (Some(token), Some(user_id)) = (token, user_id) else {
-                    return Err(KugouBridgeError::InvalidResponse {
-                        operation: "poll QR login",
-                        message: "connected response did not include a token and user id"
-                            .to_owned(),
-                    });
-                };
-                let display_name =
-                    first_json_string(data, &["nickname", "username", "user_name", "name"])
-                        .filter(|name| !name.trim().is_empty())
-                        .unwrap_or_else(|| format!("KuGou {user_id}"));
-                let avatar_url =
-                    first_json_string(data, &["pic", "avatar", "user_pic", "headimgurl"])
-                        .and_then(|url| normalize_image_url(&url));
-                let stored = StoredSession {
-                    token,
-                    user_id: user_id.clone(),
-                    device: session.device,
-                };
-                let secret = serde_json::to_string(&stored)
-                    .map_err(|error| KugouBridgeError::Persistence(error.to_string()))?;
-                let account = self.persist_account(user_id, display_name, avatar_url, &secret)?;
+                let account = self.persist_login_account(data, &session.device, "poll QR login")?;
                 self.remove_qr_session(session_id)?;
                 Ok(KugouQrLoginPoll {
                     status: KugouQrLoginStatus::Connected,
@@ -1161,6 +1349,35 @@ impl KugouServiceBridge {
             .lock()
             .map_err(|_| KugouBridgeError::Persistence("database lock was poisoned".to_owned()))?;
         find_account(&db, account_ref)?.ok_or(KugouBridgeError::AccountNotFound)
+    }
+
+    fn persist_login_account(
+        &self,
+        data: &JsonValue,
+        device: &KugouDevice,
+        operation: &'static str,
+    ) -> Result<KugouAccount, KugouBridgeError> {
+        let token = json_string(data.get("token")).filter(|value| !value.is_empty());
+        let user_id = json_string(data.get("userid")).filter(|value| value != "0");
+        let (Some(token), Some(user_id)) = (token, user_id) else {
+            return Err(KugouBridgeError::InvalidResponse {
+                operation,
+                message: "connected response did not include a token and user id".to_owned(),
+            });
+        };
+        let display_name = first_json_string(data, &["nickname", "username", "user_name", "name"])
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| format!("KuGou {user_id}"));
+        let avatar_url = first_json_string(data, &["pic", "avatar", "user_pic", "headimgurl"])
+            .and_then(|url| normalize_image_url(&url));
+        let stored = StoredSession {
+            token,
+            user_id: user_id.clone(),
+            device: device.clone(),
+        };
+        let secret = serde_json::to_string(&stored)
+            .map_err(|error| KugouBridgeError::Persistence(error.to_string()))?;
+        self.persist_account(user_id, display_name, avatar_url, &secret)
     }
 
     fn session_for_account(&self, account_ref: &str) -> Result<StoredSession, KugouBridgeError> {
@@ -1295,6 +1512,16 @@ impl KugouServiceBridge {
         self.qr_sessions
             .lock()
             .map_err(|_| KugouBridgeError::Bridge("QR session lock was poisoned".to_owned()))?
+            .remove(session_id);
+        Ok(())
+    }
+
+    fn remove_phone_login_session(&self, session_id: &str) -> Result<(), KugouBridgeError> {
+        self.phone_login_sessions
+            .lock()
+            .map_err(|_| {
+                KugouBridgeError::Bridge("phone login session lock was poisoned".to_owned())
+            })?
             .remove(session_id);
         Ok(())
     }
@@ -2684,6 +2911,192 @@ fn json_u64(value: Option<&JsonValue>) -> Option<u64> {
     })
 }
 
+#[derive(Debug)]
+struct KugouPhoneLoginPayload {
+    body: JsonValue,
+    key: String,
+}
+
+fn kugou_phone_login_payload(
+    phone: &str,
+    verification_code: &str,
+    clienttime_ms: i64,
+) -> Result<KugouPhoneLoginPayload, KugouBridgeError> {
+    let key = random_login_key();
+    let encrypted_params = aes_encrypt_hex(
+        &json!({ "mobile": phone, "code": verification_code }).to_string(),
+        &key,
+    )?;
+    let public_key_payload = json!({
+        "clienttime_ms": clienttime_ms,
+        "key": key,
+    })
+    .to_string();
+    let public_key = rsa_raw_encrypt_hex(public_key_payload.as_bytes())?.to_ascii_uppercase();
+
+    Ok(KugouPhoneLoginPayload {
+        body: json!({
+            "plat": 1,
+            "support_multi": 1,
+            "t1": 0,
+            "t2": 0,
+            "t3": "MCwwLDAsMCwwLDAsMCwwLDA=",
+            "clienttime_ms": clienttime_ms,
+            "mobile": mask_phone(phone),
+            "key": sign_params_key(clienttime_ms),
+            "pk": public_key,
+            "params": encrypted_params,
+        }),
+        key,
+    })
+}
+
+fn decrypt_kugou_login_response(body: &mut JsonValue, key: &str) -> Result<(), KugouBridgeError> {
+    let encrypted = body
+        .pointer("/data/secu_params")
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned);
+    let Some(encrypted) = encrypted else {
+        return Ok(());
+    };
+    let decrypted = aes_decrypt_json(&encrypted, key)?;
+    let data = body
+        .get_mut("data")
+        .and_then(JsonValue::as_object_mut)
+        .ok_or_else(|| KugouBridgeError::InvalidResponse {
+            operation: "log in with verification code",
+            message: "response did not include account data".to_owned(),
+        })?;
+    if let Some(values) = decrypted.as_object() {
+        data.extend(values.clone());
+    } else if let Some(token) = decrypted.as_str() {
+        data.insert("token".to_owned(), JsonValue::String(token.to_owned()));
+    } else {
+        return Err(KugouBridgeError::InvalidResponse {
+            operation: "log in with verification code",
+            message: "encrypted account data was invalid".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn aes_encrypt_hex(value: &str, seed: &str) -> Result<String, KugouBridgeError> {
+    let digest = format!("{:x}", md5::compute(seed));
+    let key = digest.as_bytes();
+    let iv = &key[key.len() - 16..];
+    let encryptor = cbc::Encryptor::<Aes256>::new_from_slices(key, iv)
+        .map_err(|_| KugouBridgeError::Bridge("create KuGou login cipher".to_owned()))?;
+    Ok(hex_encode(
+        &encryptor.encrypt_padded_vec_mut::<Pkcs7>(value.as_bytes()),
+    ))
+}
+
+fn aes_decrypt_json(value: &str, seed: &str) -> Result<JsonValue, KugouBridgeError> {
+    let digest = format!("{:x}", md5::compute(seed));
+    let key = digest.as_bytes();
+    let iv = &key[key.len() - 16..];
+    let encrypted = hex_decode(value)?;
+    let decryptor = cbc::Decryptor::<Aes256>::new_from_slices(key, iv).map_err(|_| {
+        KugouBridgeError::InvalidResponse {
+            operation: "log in with verification code",
+            message: "encrypted account data used an invalid cipher".to_owned(),
+        }
+    })?;
+    let decrypted = decryptor
+        .decrypt_padded_vec_mut::<Pkcs7>(&encrypted)
+        .map_err(|_| KugouBridgeError::InvalidResponse {
+            operation: "log in with verification code",
+            message: "encrypted account data could not be decrypted".to_owned(),
+        })?;
+    if let Ok(value) = serde_json::from_slice(&decrypted) {
+        Ok(value)
+    } else {
+        String::from_utf8(decrypted)
+            .map(JsonValue::String)
+            .map_err(|_| KugouBridgeError::InvalidResponse {
+                operation: "log in with verification code",
+                message: "encrypted account data was not valid text".to_owned(),
+            })
+    }
+}
+
+fn rsa_raw_encrypt_hex(value: &[u8]) -> Result<String, KugouBridgeError> {
+    let key_der = BASE64_STANDARD
+        .decode(LOGIN_RSA_PUBLIC_KEY_DER)
+        .map_err(|_| KugouBridgeError::Bridge("decode KuGou login public key".to_owned()))?;
+    let key = RsaPublicKey::from_public_key_der(&key_der)
+        .map_err(|_| KugouBridgeError::Bridge("parse KuGou login public key".to_owned()))?;
+    if value.len() > key.size() {
+        return Err(KugouBridgeError::Bridge(
+            "KuGou login public-key payload is too large".to_owned(),
+        ));
+    }
+    let mut padded = vec![0; key.size()];
+    padded[..value.len()].copy_from_slice(value);
+    let encrypted = rsa::BigUint::from_bytes_be(&padded).modpow(key.e(), key.n());
+    let encrypted = encrypted.to_bytes_be();
+    let mut output = vec![0; key.size()];
+    output[key.size() - encrypted.len()..].copy_from_slice(&encrypted);
+    Ok(hex_encode(&output))
+}
+
+fn hex_encode(value: &[u8]) -> String {
+    value.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn hex_decode(value: &str) -> Result<Vec<u8>, KugouBridgeError> {
+    if !value.len().is_multiple_of(2) {
+        return Err(KugouBridgeError::InvalidResponse {
+            operation: "log in with verification code",
+            message: "encrypted account data was not valid hexadecimal".to_owned(),
+        });
+    }
+    (0..value.len())
+        .step_by(2)
+        .map(|index| {
+            u8::from_str_radix(&value[index..index + 2], 16).map_err(|_| {
+                KugouBridgeError::InvalidResponse {
+                    operation: "log in with verification code",
+                    message: "encrypted account data was not valid hexadecimal".to_owned(),
+                }
+            })
+        })
+        .collect()
+}
+
+fn random_login_key() -> String {
+    const CHARACTERS: &[u8] = b"1234567890abcdefghijklmnopqrstuvwxyz";
+    let mut rng = rand::thread_rng();
+    (0..16)
+        .map(|_| CHARACTERS[rng.gen_range(0..CHARACTERS.len())] as char)
+        .collect()
+}
+
+fn mask_phone(phone: &str) -> String {
+    format!("{}*****{}", &phone[..2], &phone[phone.len() - 1..])
+}
+
+fn validate_phone(phone: &str) -> Result<String, KugouBridgeError> {
+    let phone = phone.trim();
+    if phone.len() == 11
+        && phone.starts_with('1')
+        && phone.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        Ok(phone.to_owned())
+    } else {
+        Err(KugouBridgeError::InvalidPhone)
+    }
+}
+
+fn validate_verification_code(code: &str) -> Result<String, KugouBridgeError> {
+    let code = code.trim();
+    if (4..=8).contains(&code.len()) && code.bytes().all(|byte| byte.is_ascii_digit()) {
+        Ok(code.to_owned())
+    } else {
+        Err(KugouBridgeError::InvalidVerificationCode)
+    }
+}
+
 fn qr_data_url(key: &str) -> Result<String, KugouBridgeError> {
     let url = format!("https://h5.kugou.com/apps/loginQRCode/html/index.html?qrcode={key}");
     let code = QrCode::new(url.as_bytes()).map_err(|error| {
@@ -2826,12 +3239,71 @@ fn now_timestamp() -> i64 {
         .unwrap_or_default()
 }
 
+fn now_timestamp_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::source_runtime::{DefaultSourceHost, SourceHost, SourceRuntime};
 
     const TEST_ACCOUNT_REF: &str = "kugou-account:00000000-0000-4000-8000-000000000001";
+
+    #[test]
+    fn phone_login_crypto_should_match_upstream_fixtures() {
+        let seed = "abc123abc123abc1";
+        let encrypted = aes_encrypt_hex(r#"{"mobile":"13800138000","code":"123456"}"#, seed)
+            .expect("login payload should encrypt");
+        let public_key_payload = br#"{"clienttime_ms":1700000000000,"key":"abc123abc123abc1"}"#;
+        let public_key = rsa_raw_encrypt_hex(public_key_payload)
+            .expect("login key should encrypt")
+            .to_ascii_uppercase();
+        let sign_key = sign_params_key(1_700_000_000_000);
+
+        assert_eq!(
+            (
+                encrypted.as_str(),
+                public_key.as_str(),
+                sign_key.as_str(),
+            ),
+            (
+                "1e74798f0987f7ede6a115dad19f04820bbd5a805628e510e3d37340e6bbcd1d851b657b34cd73a09bc4d1f9ae2dafc6",
+                "96030CF83D2B484A814ADF68F53CDC7ED20DBCFBF3503965934D866AB1C63973EF6B47BF2C3B3CF3E32B5EE15BDE241638C14C4B9437A3304F56ADEEAA6858D0125C7748F76522807CBCD43974819242025E93FAD3805E71C3926E55CE43053C5E9948B52D26784CA5270FA23E19A6332FEFD95D9528EE06F57D6343FEA41A41",
+                "a16d61ca1308a00264f488e64029b29a",
+            )
+        );
+    }
+
+    #[test]
+    fn phone_login_crypto_should_decrypt_account_data() {
+        let decrypted = aes_decrypt_json(
+            "1e74798f0987f7ede6a115dad19f04820bbd5a805628e510e3d37340e6bbcd1d851b657b34cd73a09bc4d1f9ae2dafc6",
+            "abc123abc123abc1",
+        )
+        .expect("login payload should decrypt");
+
+        assert_eq!(
+            decrypted,
+            json!({ "mobile": "13800138000", "code": "123456" })
+        );
+    }
+
+    #[test]
+    fn phone_login_input_should_reject_invalid_values() {
+        assert!(matches!(
+            validate_phone("1380013800"),
+            Err(KugouBridgeError::InvalidPhone)
+        ));
+        assert!(matches!(
+            validate_verification_code("12ab"),
+            Err(KugouBridgeError::InvalidVerificationCode)
+        ));
+    }
 
     #[derive(Debug, Default)]
     struct FakeProviderBridge;

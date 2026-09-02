@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { TAURI_COMMANDS } from "../generated/bindings";
 import type {
   KugouAccount,
+  KugouPhoneLoginStart,
   KugouQrLoginPoll,
   KugouQrLoginStart,
 } from "../generated/bindings";
@@ -21,7 +22,12 @@ import {
 export const KUGOU_PLUGIN_ID = "fika.kugou";
 export const KUGOU_SOURCE_ID = "kg";
 
-export type { KugouAccount, KugouQrLoginPoll, KugouQrLoginStart } from "../generated/bindings";
+export type {
+  KugouAccount,
+  KugouPhoneLoginStart,
+  KugouQrLoginPoll,
+  KugouQrLoginStart,
+} from "../generated/bindings";
 
 export type KugouOperationResult<T> = {
   data: T;
@@ -45,6 +51,21 @@ export function pollKugouQrLogin(sessionId: string) {
 
 export function cancelKugouQrLogin(sessionId: string) {
   return invoke<void>(TAURI_COMMANDS.cancelKugouQrLogin, { sessionId });
+}
+
+export function startKugouPhoneLogin(phone: string) {
+  return invoke<KugouPhoneLoginStart>(TAURI_COMMANDS.startKugouPhoneLogin, { phone });
+}
+
+export function completeKugouPhoneLogin(sessionId: string, verificationCode: string) {
+  return invoke<KugouAccount>(TAURI_COMMANDS.completeKugouPhoneLogin, {
+    sessionId,
+    verificationCode,
+  });
+}
+
+export function cancelKugouPhoneLogin(sessionId: string) {
+  return invoke<void>(TAURI_COMMANDS.cancelKugouPhoneLogin, { sessionId });
 }
 
 export function listKugouAccounts() {

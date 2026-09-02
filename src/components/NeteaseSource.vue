@@ -6,7 +6,9 @@ import {
   CircleCheck,
   Clock3,
   ListMusic,
+  LogIn,
   LogOut,
+  MessageSquareText,
   Power,
   QrCode,
   RefreshCw,
@@ -14,7 +16,7 @@ import {
   X,
 } from "@lucide/vue";
 import { listPlugins } from "../lib/plugin-api";
-import { useQrLoginSession } from "../composables/source-workspace";
+import { usePhoneLoginSession, useQrLoginSession } from "../composables/source-workspace";
 import { normalizeError, queryError } from "../lib/errors";
 import { t } from "../i18n";
 import type {
@@ -23,10 +25,13 @@ import type {
 } from "../lib/audio-source-api";
 import {
   NETEASE_PLUGIN_ID,
+  cancelNeteasePhoneLogin,
   cancelNeteaseQrLogin,
+  completeNeteasePhoneLogin,
   disconnectNeteaseAccount,
   listNeteaseAccounts,
   pollNeteaseQrLogin,
+  startNeteasePhoneLogin,
   startNeteaseQrLogin,
 } from "../lib/netease-api";
 
@@ -46,6 +51,10 @@ const activeAccountRef = ref("");
 const manualError = ref<string | null>(null);
 const dismissedQueryError = ref("");
 const sourceNotice = ref<string | null>(null);
+const showLogin = ref(false);
+const loginMode = ref<"phone" | "qr">("phone");
+const phone = ref("");
+const verificationCode = ref("");
 
 const pluginsQuery = useQuery({
   queryKey: ["plugins"],
@@ -112,9 +121,28 @@ const qrSession = useQrLoginSession({
 });
 const qrLogin = qrSession.login;
 const qrStatus = qrSession.status;
-const isConnecting = qrSession.isConnecting;
+const isConnectingQr = qrSession.isConnecting;
 const isPollingQr = qrSession.isPolling;
 const cancelQrLogin = qrSession.cancel;
+
+const phoneSession = usePhoneLoginSession({
+  start: startNeteasePhoneLogin,
+  complete: completeNeteasePhoneLogin,
+  cancel: cancelNeteasePhoneLogin,
+  onConnected: connectAccount,
+  onError: (error) => {
+    sourceError.value = normalizeError(error);
+  },
+});
+const phoneLogin = phoneSession.login;
+const isSendingCode = phoneSession.isSending;
+const isCompletingPhoneLogin = phoneSession.isCompleting;
+const resendSeconds = phoneSession.resendSeconds;
+const isPhoneValid = computed(() => /^1\d{10}$/.test(phone.value.trim()));
+const isVerificationCodeValid = computed(() => /^\d{4,8}$/.test(verificationCode.value.trim()));
+const maskedPhone = computed(() =>
+  phone.value.trim().replace(/^(\d{3})\d{4}(\d{4})$/, "$1****$2"),
+);
 
 watch(
   () => accountsQuery.data.value,
@@ -141,10 +169,11 @@ watch(queryErrorMessage, (message, previousMessage) => {
 
 onBeforeUnmount(() => {
   qrSession.cancel();
+  phoneSession.cancel();
 });
 
 async function startQrLogin() {
-  if (!isPluginReady.value || isConnecting.value) {
+  if (!isPluginReady.value || isConnectingQr.value) {
     return;
   }
   sourceError.value = null;
@@ -152,9 +181,67 @@ async function startQrLogin() {
   await qrSession.start();
 }
 
+function openLogin() {
+  if (!isPluginReady.value) return;
+  sourceError.value = null;
+  sourceNotice.value = null;
+  showLogin.value = true;
+  loginMode.value = "phone";
+}
+
+function closeLogin() {
+  qrSession.cancel();
+  phoneSession.cancel();
+  showLogin.value = false;
+  loginMode.value = "phone";
+  phone.value = "";
+  verificationCode.value = "";
+}
+
+function selectLoginMode(mode: "phone" | "qr") {
+  if (loginMode.value === mode) return;
+  if (mode === "phone") {
+    qrSession.cancel();
+  } else {
+    phoneSession.cancel();
+    verificationCode.value = "";
+  }
+  sourceError.value = null;
+  sourceNotice.value = null;
+  loginMode.value = mode;
+}
+
+async function sendVerificationCode() {
+  if (!isPhoneValid.value) return;
+  sourceError.value = null;
+  sourceNotice.value = null;
+  await phoneSession.sendCode(phone.value.trim());
+  if (phoneLogin.value) {
+    sourceNotice.value = t("Verification code sent to +86 {phone}.", {
+      phone: maskedPhone.value,
+    });
+  }
+}
+
+async function submitPhoneLogin() {
+  if (!isVerificationCodeValid.value) return;
+  sourceError.value = null;
+  sourceNotice.value = null;
+  await phoneSession.complete(verificationCode.value.trim());
+}
+
+function changePhoneNumber() {
+  phoneSession.cancel();
+  verificationCode.value = "";
+  sourceNotice.value = null;
+}
+
 async function connectAccount(account: { accountRef: string; displayName: string }) {
   await accountsQuery.refetch();
   activeAccountRef.value = account.accountRef;
+  showLogin.value = false;
+  phone.value = "";
+  verificationCode.value = "";
   sourceNotice.value = t("{name} connected.", { name: account.displayName });
 }
 
@@ -245,11 +332,10 @@ async function refreshAccountStatuses() {
         <button
           class="btn btn-sm"
           type="button"
-          :disabled="!isPluginReady || isConnecting"
-          @click="startQrLogin"
+          :disabled="!isPluginReady || showLogin || isConnectingQr || isSendingCode || isCompletingPhoneLogin"
+          @click="openLogin"
         >
-          <RefreshCw v-if="isConnecting" class="animate-spin" :size="16" aria-hidden="true" />
-          <QrCode v-else :size="16" aria-hidden="true" />
+          <LogIn :size="16" aria-hidden="true" />
           {{ t("Connect") }}
         </button>
         <button
@@ -304,20 +390,129 @@ async function refreshAccountStatuses() {
       <button class="btn btn-sm" type="button" @click="emit('openPlugins')">{{ t("Open Plugins") }}</button>
     </div>
 
-    <div v-else-if="qrLogin" class="grid gap-5 p-5 sm:grid-cols-[16rem_minmax(0,1fr)] sm:items-center">
-      <img
-        class="aspect-square w-full max-w-64 border border-base-300 bg-white p-2"
-        :src="qrLogin.qrImageDataUrl"
-        :alt="t('NetEase login QR code')"
-      />
-      <div class="min-w-0">
-        <div class="flex items-center gap-2 text-sm font-medium">
-          <RefreshCw v-if="isPollingQr" class="animate-spin" :size="16" aria-hidden="true" />
-          <Clock3 v-else :size="16" aria-hidden="true" />
-          {{ qrStatus }}
+    <div v-else-if="showLogin" class="p-5">
+      <div role="tablist" class="tabs tabs-box w-full sm:w-fit" :aria-label="t('NetEase login method')">
+        <button
+          role="tab"
+          class="tab flex-1 gap-2 sm:flex-none"
+          :class="{ 'tab-active': loginMode === 'phone' }"
+          type="button"
+          :aria-selected="loginMode === 'phone'"
+          @click="selectLoginMode('phone')"
+        >
+          <MessageSquareText :size="16" aria-hidden="true" />
+          {{ t("Verification code") }}
+        </button>
+        <button
+          role="tab"
+          class="tab flex-1 gap-2 sm:flex-none"
+          :class="{ 'tab-active': loginMode === 'qr' }"
+          type="button"
+          :aria-selected="loginMode === 'qr'"
+          @click="selectLoginMode('qr')"
+        >
+          <QrCode :size="16" aria-hidden="true" />
+          {{ t("QR code") }}
+        </button>
+      </div>
+
+      <form v-if="loginMode === 'phone'" class="mt-5 max-w-md" @submit.prevent="submitPhoneLogin">
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">{{ t("Phone number") }}</legend>
+          <label class="input input-sm flex w-full items-center gap-2">
+            <span class="label shrink-0">+86</span>
+            <input
+              v-model="phone"
+              class="min-w-0 grow"
+              type="tel"
+              inputmode="numeric"
+              autocomplete="tel-national"
+              maxlength="11"
+              :disabled="Boolean(phoneLogin)"
+              :placeholder="t('11-digit phone number')"
+              :aria-label="t('NetEase phone number')"
+            />
+          </label>
+        </fieldset>
+
+        <div class="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            class="btn btn-sm"
+            type="button"
+            :disabled="!isPhoneValid || isSendingCode || isCompletingPhoneLogin || resendSeconds > 0"
+            @click="sendVerificationCode"
+          >
+            <RefreshCw v-if="isSendingCode" class="animate-spin" :size="16" aria-hidden="true" />
+            <MessageSquareText v-else :size="16" aria-hidden="true" />
+            <template v-if="isSendingCode">{{ t("Sending") }}</template>
+            <template v-else-if="resendSeconds > 0">{{ t("Resend in {seconds}s", { seconds: resendSeconds }) }}</template>
+            <template v-else-if="phoneLogin">{{ t("Resend code") }}</template>
+            <template v-else>{{ t("Send code") }}</template>
+          </button>
+          <button v-if="phoneLogin" class="btn btn-ghost btn-sm" type="button" @click="changePhoneNumber">
+            {{ t("Change phone number") }}
+          </button>
         </div>
-        <p class="mt-2 text-sm text-muted">{{ t("Scan with the NetEase Cloud Music mobile app.") }}</p>
-        <button class="btn btn-ghost btn-sm mt-4" type="button" @click="cancelQrLogin">
+
+        <fieldset v-if="phoneLogin" class="fieldset mt-3">
+          <legend class="fieldset-legend">{{ t("Verification code") }}</legend>
+          <input
+            v-model="verificationCode"
+            class="input input-sm w-full"
+            type="text"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            maxlength="8"
+            :placeholder="t('SMS verification code')"
+            :aria-label="t('NetEase verification code')"
+          />
+        </fieldset>
+
+        <div class="mt-5 flex flex-wrap gap-2">
+          <button
+            v-if="phoneLogin"
+            class="btn btn-primary btn-sm"
+            type="submit"
+            :disabled="!isVerificationCodeValid || isCompletingPhoneLogin"
+          >
+            <RefreshCw v-if="isCompletingPhoneLogin" class="animate-spin" :size="16" aria-hidden="true" />
+            <LogIn v-else :size="16" aria-hidden="true" />
+            {{ isCompletingPhoneLogin ? t("Signing in") : t("Sign in") }}
+          </button>
+          <button class="btn btn-ghost btn-sm" type="button" @click="closeLogin">
+            <X :size="16" aria-hidden="true" />
+            {{ t("Cancel") }}
+          </button>
+        </div>
+      </form>
+
+      <div v-else-if="qrLogin" class="mt-5 grid gap-5 sm:grid-cols-[16rem_minmax(0,1fr)] sm:items-center">
+        <img
+          class="aspect-square w-full max-w-64 border border-base-300 bg-white p-2"
+          :src="qrLogin.qrImageDataUrl"
+          :alt="t('NetEase login QR code')"
+        />
+        <div class="min-w-0">
+          <div class="flex items-center gap-2 text-sm font-medium">
+            <RefreshCw v-if="isPollingQr" class="animate-spin" :size="16" aria-hidden="true" />
+            <Clock3 v-else :size="16" aria-hidden="true" />
+            {{ qrStatus }}
+          </div>
+          <p class="mt-2 text-sm text-muted">{{ t("Scan with the NetEase Cloud Music mobile app.") }}</p>
+          <button class="btn btn-ghost btn-sm mt-4" type="button" @click="cancelQrLogin">
+            <X :size="16" aria-hidden="true" />
+            {{ t("Cancel QR code") }}
+          </button>
+        </div>
+      </div>
+
+      <div v-else class="mt-5 flex flex-wrap gap-2">
+        <button class="btn btn-sm" type="button" :disabled="isConnectingQr" @click="startQrLogin">
+          <RefreshCw v-if="isConnectingQr" class="animate-spin" :size="16" aria-hidden="true" />
+          <QrCode v-else :size="16" aria-hidden="true" />
+          {{ t("Create QR code") }}
+        </button>
+        <button class="btn btn-ghost btn-sm" type="button" @click="closeLogin">
           <X :size="16" aria-hidden="true" />
           {{ t("Cancel") }}
         </button>

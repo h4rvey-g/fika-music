@@ -11,7 +11,9 @@ const pluginApiMocks = vi.hoisted(() => ({
 }));
 
 const neteaseApiMocks = vi.hoisted(() => ({
+  cancelNeteasePhoneLogin: vi.fn(),
   cancelNeteaseQrLogin: vi.fn(),
+  completeNeteasePhoneLogin: vi.fn(),
   disconnectNeteaseAccount: vi.fn(),
   getNeteasePlaylist: vi.fn(),
   getNeteasePlaylists: vi.fn(),
@@ -19,6 +21,7 @@ const neteaseApiMocks = vi.hoisted(() => ({
   listNeteaseAccounts: vi.fn(),
   listNeteaseMutationAudit: vi.fn(),
   pollNeteaseQrLogin: vi.fn(),
+  startNeteasePhoneLogin: vi.fn(),
   startNeteaseQrLogin: vi.fn(),
 }));
 
@@ -75,6 +78,7 @@ describe("NeteaseSource", () => {
       createSourceAccount({ accountRef }),
     ]);
     neteaseApiMocks.cancelNeteaseQrLogin.mockResolvedValue(undefined);
+    neteaseApiMocks.cancelNeteasePhoneLogin.mockResolvedValue(undefined);
   });
 
   it("shows login and audio source controls without loading music content", async () => {
@@ -150,12 +154,60 @@ describe("NeteaseSource", () => {
       .find((button) => button.text().trim() === "Connect");
     await connect?.trigger("click");
     await flushPromises();
+    const qrTab = wrapper
+      .findAll('[role="tab"]')
+      .find((tab) => tab.text().includes("QR code"));
+    await qrTab?.trigger("click");
+    const createQr = wrapper
+      .findAll("button")
+      .find((button) => button.text().trim() === "Create QR code");
+    await createQr?.trigger("click");
+    await flushPromises();
     const cancel = wrapper
       .findAll("button")
-      .find((button) => button.text().trim() === "Cancel");
+      .find((button) => button.text().trim() === "Cancel QR code");
     await cancel?.trigger("click");
 
     expect(neteaseApiMocks.cancelNeteaseQrLogin).toHaveBeenCalledWith("qr-session");
+    wrapper.unmount();
+  });
+
+  it("connects with an SMS verification code on one device", async () => {
+    const phoneAccount = createSourceAccount({
+      accountRef: "netease-account:00000000-0000-4000-8000-000000000002",
+      displayName: "Phone User",
+    });
+    neteaseApiMocks.listNeteaseAccounts
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([phoneAccount]);
+    neteaseApiMocks.startNeteasePhoneLogin.mockResolvedValue({
+      sessionId: "phone-session",
+      expiresAt: 600,
+    });
+    neteaseApiMocks.completeNeteasePhoneLogin.mockResolvedValue(phoneAccount);
+    const wrapper = mountNeteaseSource();
+    await flushPromises();
+
+    const connect = wrapper
+      .findAll("button")
+      .find((button) => button.text().trim() === "Connect");
+    await connect?.trigger("click");
+    await wrapper.get('input[aria-label="NetEase phone number"]').setValue("13800138000");
+    const sendCode = wrapper
+      .findAll("button")
+      .find((button) => button.text().trim() === "Send code");
+    await sendCode?.trigger("click");
+    await flushPromises();
+    await wrapper.get('input[aria-label="NetEase verification code"]').setValue("123456");
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+
+    expect(neteaseApiMocks.startNeteasePhoneLogin).toHaveBeenCalledWith("13800138000");
+    expect(neteaseApiMocks.completeNeteasePhoneLogin).toHaveBeenCalledWith(
+      "phone-session",
+      "123456",
+    );
+    expect(wrapper.text()).toContain("Phone User connected.");
     wrapper.unmount();
   });
 });

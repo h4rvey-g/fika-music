@@ -62,6 +62,39 @@ pub(crate) async fn cancel_netease_qr_login(
 }
 
 #[tauri::command]
+pub(crate) async fn start_netease_phone_login(
+    state: State<'_, AppState>,
+    phone: String,
+) -> Result<netease::NeteasePhoneLoginStart, NeteaseCommandError> {
+    let bridge = Arc::clone(&state.netease_bridge);
+    run_netease_task(move || bridge.start_phone_login(phone.trim())).await
+}
+
+#[tauri::command]
+pub(crate) async fn complete_netease_phone_login(
+    state: State<'_, AppState>,
+    session_id: String,
+    verification_code: String,
+) -> Result<netease::NeteaseAccount, NeteaseCommandError> {
+    let bridge = Arc::clone(&state.netease_bridge);
+    let account = run_netease_task(move || {
+        bridge.complete_phone_login(session_id.trim(), verification_code.trim())
+    })
+    .await?;
+    state.online_music_cache.invalidate();
+    Ok(account)
+}
+
+#[tauri::command]
+pub(crate) async fn cancel_netease_phone_login(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), NeteaseCommandError> {
+    let bridge = Arc::clone(&state.netease_bridge);
+    run_netease_task(move || bridge.cancel_phone_login(session_id.trim())).await
+}
+
+#[tauri::command]
 pub(crate) fn list_netease_accounts(
     state: State<'_, AppState>,
 ) -> Result<Vec<netease::NeteaseAccount>, NeteaseCommandError> {
@@ -150,6 +183,39 @@ pub(crate) async fn cancel_kugou_qr_login(
 ) -> Result<(), KugouCommandError> {
     let bridge = Arc::clone(&state.kugou_bridge);
     run_kugou_task(move || bridge.cancel_qr_login(session_id.trim())).await
+}
+
+#[tauri::command]
+pub(crate) async fn start_kugou_phone_login(
+    state: State<'_, AppState>,
+    phone: String,
+) -> Result<kugou::KugouPhoneLoginStart, KugouCommandError> {
+    let bridge = Arc::clone(&state.kugou_bridge);
+    run_kugou_task(move || bridge.start_phone_login(phone.trim())).await
+}
+
+#[tauri::command]
+pub(crate) async fn complete_kugou_phone_login(
+    state: State<'_, AppState>,
+    session_id: String,
+    verification_code: String,
+) -> Result<kugou::KugouAccount, KugouCommandError> {
+    let bridge = Arc::clone(&state.kugou_bridge);
+    let account = run_kugou_task(move || {
+        bridge.complete_phone_login(session_id.trim(), verification_code.trim())
+    })
+    .await?;
+    state.online_music_cache.invalidate();
+    Ok(account)
+}
+
+#[tauri::command]
+pub(crate) async fn cancel_kugou_phone_login(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), KugouCommandError> {
+    let bridge = Arc::clone(&state.kugou_bridge);
+    run_kugou_task(move || bridge.cancel_phone_login(session_id.trim())).await
 }
 
 #[tauri::command]

@@ -139,6 +139,113 @@ export function useQrLoginSession<Account extends QrAccount, Start extends QrLog
   return { login, status, isConnecting, isPolling, start, cancel };
 }
 
+type PhoneLoginStart = {
+  sessionId: string;
+};
+
+type PhoneLoginOptions<Account extends QrAccount, Start extends PhoneLoginStart> = {
+  start: (phone: string) => Promise<Start>;
+  complete: (sessionId: string, verificationCode: string) => Promise<Account>;
+  cancel: (sessionId: string) => Promise<void>;
+  onConnected: (account: Account) => Promise<void>;
+  onError: (error: unknown) => void;
+  resendDelaySeconds?: number;
+};
+
+export function usePhoneLoginSession<
+  Account extends QrAccount,
+  Start extends PhoneLoginStart,
+>(options: PhoneLoginOptions<Account, Start>) {
+  const login = shallowRef<Start | null>(null);
+  const isSending = ref(false);
+  const isCompleting = ref(false);
+  const resendSeconds = ref(0);
+  let cooldownTimer: ReturnType<typeof setInterval> | null = null;
+  let generation = 0;
+
+  async function sendCode(phone: string): Promise<void> {
+    if (isSending.value || isCompleting.value || resendSeconds.value > 0) return;
+    const previousSessionId = login.value?.sessionId;
+    login.value = null;
+    if (previousSessionId) {
+      void options.cancel(previousSessionId).catch(() => undefined);
+    }
+
+    const requestGeneration = ++generation;
+    isSending.value = true;
+    try {
+      const result = await options.start(phone);
+      if (generation !== requestGeneration) {
+        void options.cancel(result.sessionId).catch(() => undefined);
+        return;
+      }
+      login.value = result;
+      startCooldown(options.resendDelaySeconds ?? 60);
+    } catch (error) {
+      if (generation === requestGeneration) options.onError(error);
+    } finally {
+      if (generation === requestGeneration) isSending.value = false;
+    }
+  }
+
+  async function complete(verificationCode: string): Promise<void> {
+    const sessionId = login.value?.sessionId;
+    if (!sessionId || isSending.value || isCompleting.value) return;
+    const requestGeneration = generation;
+    isCompleting.value = true;
+    try {
+      const account = await options.complete(sessionId, verificationCode);
+      if (generation !== requestGeneration) return;
+      login.value = null;
+      stopCooldown();
+      await options.onConnected(account);
+    } catch (error) {
+      if (generation === requestGeneration) options.onError(error);
+    } finally {
+      if (generation === requestGeneration) isCompleting.value = false;
+    }
+  }
+
+  function startCooldown(seconds: number): void {
+    stopCooldown();
+    resendSeconds.value = seconds;
+    cooldownTimer = setInterval(() => {
+      resendSeconds.value = Math.max(0, resendSeconds.value - 1);
+      if (resendSeconds.value === 0) stopCooldown();
+    }, 1_000);
+  }
+
+  function stopCooldown(): void {
+    if (cooldownTimer) {
+      clearInterval(cooldownTimer);
+      cooldownTimer = null;
+    }
+    resendSeconds.value = 0;
+  }
+
+  function cancel(): void {
+    generation += 1;
+    const sessionId = login.value?.sessionId;
+    login.value = null;
+    isSending.value = false;
+    isCompleting.value = false;
+    stopCooldown();
+    if (sessionId) {
+      void options.cancel(sessionId).catch(() => undefined);
+    }
+  }
+
+  return {
+    login,
+    isSending,
+    isCompleting,
+    resendSeconds,
+    sendCode,
+    complete,
+    cancel,
+  };
+}
+
 export function useSourcePlaybackRequest() {
   const activeTrackId = ref<string | null>(null);
   let activeRequestId: string | null = null;

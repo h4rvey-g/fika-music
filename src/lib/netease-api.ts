@@ -3,6 +3,7 @@ import { TAURI_COMMANDS } from "../generated/bindings";
 import type {
   NeteaseAccount,
   NeteaseMutationAudit,
+  NeteasePhoneLoginStart,
   NeteaseQrLoginPoll,
   NeteaseQrLoginStart,
 } from "../generated/bindings";
@@ -25,6 +26,7 @@ export const NETEASE_SOURCE_ID = "wy";
 export type {
   NeteaseAccount,
   NeteaseMutationAudit,
+  NeteasePhoneLoginStart,
   NeteaseQrLoginPoll,
   NeteaseQrLoginStart,
 } from "../generated/bindings";
@@ -51,6 +53,21 @@ export function pollNeteaseQrLogin(sessionId: string) {
 
 export function cancelNeteaseQrLogin(sessionId: string) {
   return invoke<void>(TAURI_COMMANDS.cancelNeteaseQrLogin, { sessionId });
+}
+
+export function startNeteasePhoneLogin(phone: string) {
+  return invoke<NeteasePhoneLoginStart>(TAURI_COMMANDS.startNeteasePhoneLogin, { phone });
+}
+
+export function completeNeteasePhoneLogin(sessionId: string, verificationCode: string) {
+  return invoke<NeteaseAccount>(TAURI_COMMANDS.completeNeteasePhoneLogin, {
+    sessionId,
+    verificationCode,
+  });
+}
+
+export function cancelNeteasePhoneLogin(sessionId: string) {
+  return invoke<void>(TAURI_COMMANDS.cancelNeteasePhoneLogin, { sessionId });
 }
 
 export function listNeteaseAccounts() {

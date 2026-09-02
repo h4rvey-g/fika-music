@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useQrLoginSession, useSourcePlaybackRequest } from "./source-workspace";
+import {
+  usePhoneLoginSession,
+  useQrLoginSession,
+  useSourcePlaybackRequest,
+} from "./source-workspace";
 
 const pluginApi = vi.hoisted(() => ({ cancelSourceRequest: vi.fn() }));
 vi.mock("../lib/plugin-api", () => pluginApi);
@@ -57,5 +61,31 @@ describe("source workspace lifecycle", () => {
 
     expect(pluginApi.cancelSourceRequest).toHaveBeenCalledWith(expect.any(String));
     expect(playback.activeTrackId.value).toBeNull();
+  });
+
+  it("completes a verification-code login through one short-lived session", async () => {
+    const onConnected = vi.fn(async () => undefined);
+    const complete = vi.fn(async () => ({
+      accountRef: "account-1",
+      displayName: "Fika",
+    }));
+    const session = usePhoneLoginSession({
+      start: async () => ({ sessionId: "phone-session" }),
+      complete,
+      cancel: async () => undefined,
+      onConnected,
+      onError: vi.fn(),
+    });
+
+    await session.sendCode("13800138000");
+    await session.complete("123456");
+
+    expect(complete).toHaveBeenCalledWith("phone-session", "123456");
+    expect(onConnected).toHaveBeenCalledWith({
+      accountRef: "account-1",
+      displayName: "Fika",
+    });
+    expect(session.login.value).toBeNull();
+    session.cancel();
   });
 });

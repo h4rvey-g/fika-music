@@ -13,8 +13,9 @@ use crate::source_runtime::{
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use netease_music::{
-    ApiResponse, LoginQrCheckParams, NeteaseMusicClient, PlaylistDetailParams, SearchParams,
-    SearchSuggestParams, SongDetailParams, SongQualityLevel, SongUrlV1Params, UserPlaylistParams,
+    ApiResponse, CaptchaParams, LoginCellphoneParams, LoginQrCheckParams, NeteaseMusicClient,
+    PlaylistDetailParams, SearchParams, SearchSuggestParams, SongDetailParams, SongQualityLevel,
+    SongUrlV1Params, UserPlaylistParams,
 };
 use qrcode::render::svg;
 use qrcode::QrCode;
@@ -39,6 +40,8 @@ pub const NETEASE_API_BASIS_VERSION: &str = "4.32.1";
 const ACCOUNT_REF_PREFIX: &str = "netease-account:";
 const QR_SESSION_TTL_SECONDS: i64 = 300;
 const MAX_PENDING_QR_SESSIONS: usize = 8;
+const PHONE_LOGIN_SESSION_TTL_SECONDS: i64 = 600;
+const MAX_PENDING_PHONE_LOGIN_SESSIONS: usize = 8;
 const API_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_API_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 // Playlist detail responses can include every track id and embedded track metadata.
@@ -102,6 +105,14 @@ pub struct NeteaseQrLoginStart {
     pub expires_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct NeteasePhoneLoginStart {
+    pub session_id: String,
+    pub expires_at: i64,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "bindings.ts")]
@@ -144,6 +155,12 @@ pub enum NeteaseBridgeError {
     AccountNotFound,
     #[error("NetEase QR login session was not found or has expired")]
     QrSessionExpired,
+    #[error("enter a valid 11-digit mainland China phone number")]
+    InvalidPhone,
+    #[error("enter the verification code from the SMS message")]
+    InvalidVerificationCode,
+    #[error("NetEase verification-code login session was not found or has expired")]
+    PhoneLoginSessionExpired,
     #[error("NetEase API rejected {operation} (code {code}): {message}")]
     Api {
         operation: &'static str,
@@ -174,6 +191,9 @@ impl NeteaseBridgeError {
             Self::CredentialExpired => "credential-expired",
             Self::AccountNotFound => "account-not-found",
             Self::QrSessionExpired => "qr-session-expired",
+            Self::InvalidPhone => "invalid-phone",
+            Self::InvalidVerificationCode => "invalid-verification-code",
+            Self::PhoneLoginSessionExpired => "phone-login-session-expired",
             Self::Api { .. } => "api-failure",
             Self::RateLimited => "rate-limited",
             Self::UnsupportedTrack(_) => "unsupported-track",
@@ -326,11 +346,19 @@ struct PendingQrSession {
     expires_at: i64,
 }
 
+#[derive(Clone)]
+struct PendingPhoneLoginSession {
+    phone: String,
+    client: NeteaseMusicClient,
+    expires_at: i64,
+}
+
 pub struct NeteaseServiceBridge {
     db: SharedConnection,
     credentials: Arc<dyn CredentialStore>,
     source_host: Arc<source_runtime::DefaultSourceHost>,
     qr_sessions: Mutex<BTreeMap<String, PendingQrSession>>,
+    phone_login_sessions: Mutex<BTreeMap<String, PendingPhoneLoginSession>>,
 }
 
 impl fmt::Debug for NeteaseServiceBridge {
@@ -340,10 +368,19 @@ impl fmt::Debug for NeteaseServiceBridge {
             .lock()
             .map(|sessions| sessions.len())
             .unwrap_or_default();
+        let pending_phone_login_sessions = self
+            .phone_login_sessions
+            .lock()
+            .map(|sessions| sessions.len())
+            .unwrap_or_default();
         formatter
             .debug_struct("NeteaseServiceBridge")
             .field("api_basis_version", &NETEASE_API_BASIS_VERSION)
             .field("pending_qr_sessions", &pending_sessions)
+            .field(
+                "pending_phone_login_sessions",
+                &pending_phone_login_sessions,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -370,6 +407,7 @@ impl NeteaseServiceBridge {
             credentials,
             source_host,
             qr_sessions: Mutex::new(BTreeMap::new()),
+            phone_login_sessions: Mutex::new(BTreeMap::new()),
         };
         bridge.restore_account_refs()?;
         Ok(bridge)
@@ -423,6 +461,96 @@ impl NeteaseServiceBridge {
         })
     }
 
+    pub fn start_phone_login(
+        &self,
+        phone: &str,
+    ) -> Result<NeteasePhoneLoginStart, NeteaseBridgeError> {
+        let phone = validate_phone(phone)?;
+        let client = new_client()?;
+        checked_body(
+            client
+                .captcha_sent(CaptchaParams {
+                    phone: phone.clone(),
+                    countrycode: Some("86".to_owned()),
+                    captcha: None,
+                })
+                .map_err(|error| bridge_failure("send verification code", error))?,
+            "send verification code",
+        )?;
+
+        let session_id = Uuid::new_v4().to_string();
+        let expires_at = now_timestamp() + PHONE_LOGIN_SESSION_TTL_SECONDS;
+        let mut sessions = self.phone_login_sessions.lock().map_err(|_| {
+            NeteaseBridgeError::Bridge("phone login session lock was poisoned".to_owned())
+        })?;
+        sessions.retain(|_, session| session.expires_at > now_timestamp());
+        if sessions.len() >= MAX_PENDING_PHONE_LOGIN_SESSIONS {
+            if let Some(oldest_id) = sessions
+                .iter()
+                .min_by_key(|(_, session)| session.expires_at)
+                .map(|(id, _)| id.clone())
+            {
+                sessions.remove(&oldest_id);
+            }
+        }
+        sessions.insert(
+            session_id.clone(),
+            PendingPhoneLoginSession {
+                phone,
+                client,
+                expires_at,
+            },
+        );
+        Ok(NeteasePhoneLoginStart {
+            session_id,
+            expires_at,
+        })
+    }
+
+    pub fn complete_phone_login(
+        &self,
+        session_id: &str,
+        verification_code: &str,
+    ) -> Result<NeteaseAccount, NeteaseBridgeError> {
+        let verification_code = validate_verification_code(verification_code)?;
+        let session = self
+            .phone_login_sessions
+            .lock()
+            .map_err(|_| {
+                NeteaseBridgeError::Bridge("phone login session lock was poisoned".to_owned())
+            })?
+            .get(session_id)
+            .cloned()
+            .ok_or(NeteaseBridgeError::PhoneLoginSessionExpired)?;
+        if session.expires_at <= now_timestamp() {
+            self.remove_phone_login_session(session_id)?;
+            return Err(NeteaseBridgeError::PhoneLoginSessionExpired);
+        }
+
+        checked_body(
+            session
+                .client
+                .login_cellphone(LoginCellphoneParams {
+                    phone: session.phone.clone(),
+                    countrycode: Some("86".to_owned()),
+                    captcha: Some(verification_code),
+                    ..Default::default()
+                })
+                .map_err(|error| bridge_failure("log in with verification code", error))?,
+            "log in with verification code",
+        )?;
+        let account = self.finish_login(&session.client, "verify phone login")?;
+        self.remove_phone_login_session(session_id)?;
+        Ok(account)
+    }
+
+    pub fn cancel_phone_login(&self, session_id: &str) -> Result<(), NeteaseBridgeError> {
+        if session_id.trim().is_empty() {
+            return Err(NeteaseBridgeError::PhoneLoginSessionExpired);
+        }
+        self.remove_phone_login_session(session_id)
+    }
+
     pub fn poll_qr_login(
         &self,
         session_id: &str,
@@ -474,7 +602,7 @@ impl NeteaseServiceBridge {
                 account: None,
             }),
             803 => {
-                let account = self.finish_qr_login(&session.client)?;
+                let account = self.finish_login(&session.client, "verify QR login")?;
                 self.remove_qr_session(session_id)?;
                 Ok(NeteaseQrLoginPoll {
                     status: NeteaseQrLoginStatus::Connected,
@@ -544,15 +672,16 @@ impl NeteaseServiceBridge {
         load_mutation_audit(&db, account_ref, limit)
     }
 
-    fn finish_qr_login(
+    fn finish_login(
         &self,
         client: &NeteaseMusicClient,
+        operation: &'static str,
     ) -> Result<NeteaseAccount, NeteaseBridgeError> {
         let body = checked_body(
             client
                 .account()
-                .map_err(|error| bridge_failure("verify QR login", error))?,
-            "verify QR login",
+                .map_err(|error| bridge_failure(operation, error))?,
+            operation,
         )?;
         let profile = body
             .get("profile")
@@ -560,7 +689,7 @@ impl NeteaseServiceBridge {
             .ok_or(NeteaseBridgeError::CredentialExpired)?;
         let user_id =
             json_id(profile.get("userId")).ok_or_else(|| NeteaseBridgeError::InvalidResponse {
-                operation: "verify QR login",
+                operation,
                 message: "account profile did not include a user id".to_owned(),
             })?;
         let display_name = profile
@@ -670,6 +799,16 @@ impl NeteaseServiceBridge {
         self.qr_sessions
             .lock()
             .map_err(|_| NeteaseBridgeError::Bridge("QR session lock was poisoned".to_owned()))?
+            .remove(session_id);
+        Ok(())
+    }
+
+    fn remove_phone_login_session(&self, session_id: &str) -> Result<(), NeteaseBridgeError> {
+        self.phone_login_sessions
+            .lock()
+            .map_err(|_| {
+                NeteaseBridgeError::Bridge("phone login session lock was poisoned".to_owned())
+            })?
             .remove(session_id);
         Ok(())
     }
@@ -2142,6 +2281,27 @@ fn qr_data_url(qr_url: &str) -> Result<String, NeteaseBridgeError> {
     ))
 }
 
+fn validate_phone(phone: &str) -> Result<String, NeteaseBridgeError> {
+    let phone = phone.trim();
+    if phone.len() == 11
+        && phone.starts_with('1')
+        && phone.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        Ok(phone.to_owned())
+    } else {
+        Err(NeteaseBridgeError::InvalidPhone)
+    }
+}
+
+fn validate_verification_code(code: &str) -> Result<String, NeteaseBridgeError> {
+    let code = code.trim();
+    if (4..=8).contains(&code.len()) && code.bytes().all(|byte| byte.is_ascii_digit()) {
+        Ok(code.to_owned())
+    } else {
+        Err(NeteaseBridgeError::InvalidVerificationCode)
+    }
+}
+
 fn validate_opaque_account_ref(account_ref: &str) -> Result<(), NeteaseBridgeError> {
     let opaque_id = account_ref
         .strip_prefix(ACCOUNT_REF_PREFIX)
@@ -2562,6 +2722,29 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     const TEST_ACCOUNT_REF: &str = "netease-account:00000000-0000-4000-8000-000000000001";
+
+    #[test]
+    fn phone_login_input_should_accept_mainland_phone_and_numeric_code() {
+        assert_eq!(
+            (
+                validate_phone(" 13800138000 ").expect("phone should be valid"),
+                validate_verification_code(" 123456 ").expect("code should be valid"),
+            ),
+            ("13800138000".to_owned(), "123456".to_owned())
+        );
+    }
+
+    #[test]
+    fn phone_login_input_should_reject_invalid_values() {
+        assert!(matches!(
+            validate_phone("1380013800"),
+            Err(NeteaseBridgeError::InvalidPhone)
+        ));
+        assert!(matches!(
+            validate_verification_code("12ab"),
+            Err(NeteaseBridgeError::InvalidVerificationCode)
+        ));
+    }
 
     #[derive(Debug, Default)]
     struct MemoryCredentialStore {
