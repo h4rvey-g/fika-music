@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::kugou::{
@@ -16,6 +18,39 @@ use crate::youtube_music::{
     YoutubeMusicSourceProvider, YOUTUBE_MUSIC_PLUGIN_ID, YOUTUBE_MUSIC_PROVIDER_API_VERSION,
     YOUTUBE_MUSIC_PROVIDER_ENTRYPOINT, YOUTUBE_MUSIC_PROVIDER_ID,
 };
+
+const PACKAGE_FILES: &[(&str, &[u8])] = &[
+    (
+        "kugou/plugin.json",
+        include_bytes!("../plugins/kugou/plugin.json"),
+    ),
+    ("kugou/LICENSE", include_bytes!("../plugins/kugou/LICENSE")),
+    (
+        "netease/plugin.json",
+        include_bytes!("../plugins/netease/plugin.json"),
+    ),
+    (
+        "youtube-music/plugin.json",
+        include_bytes!("../plugins/youtube-music/plugin.json"),
+    ),
+];
+
+pub(crate) fn materialize_packages(root: &Path) -> Result<(), std::io::Error> {
+    if root.is_dir() {
+        fs::remove_dir_all(root)?;
+    } else if root.exists() {
+        fs::remove_file(root)?;
+    }
+    fs::create_dir_all(root)?;
+    for (relative_path, contents) in PACKAGE_FILES {
+        let target = root.join(relative_path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(target, contents)?;
+    }
+    Ok(())
+}
 
 /// Returns the manifest contracts for every production Provider entrypoint.
 ///
@@ -105,4 +140,54 @@ fn youtube_music_contract() -> PluginProviderContract {
         [SourceCapability::NetworkAny],
         std::iter::empty::<String>(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use rusqlite::Connection;
+
+    use super::*;
+    use crate::plugin_system::PluginRegistry;
+    use crate::source_runtime::SourceRuntime;
+
+    static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn materialized_packages_should_expose_the_mobile_bundled_plugins() {
+        let id = NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "fika-music-bundled-plugins-{}-{id}",
+            std::process::id()
+        ));
+        let bundled = root.join("bundled");
+        let user = root.join("user");
+        fs::create_dir_all(&user).expect("user plugin directory should be created");
+        materialize_packages(&bundled).expect("bundled packages should be materialized");
+        let mut connection = Connection::open_in_memory().expect("database should open");
+        crate::database::initialize(&mut connection).expect("database should initialize");
+        let catalog = contract_catalog().expect("bundled contracts should register");
+        let mut registry = PluginRegistry::new(&user, &bundled, Arc::new(SourceRuntime::new()))
+            .with_provider_catalog(catalog);
+
+        let plugin_ids = registry
+            .refresh(&connection)
+            .expect("registry should refresh")
+            .into_iter()
+            .map(|record| record.id)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            plugin_ids,
+            BTreeSet::from([
+                KUGOU_PLUGIN_ID.to_owned(),
+                NETEASE_PLUGIN_ID.to_owned(),
+                YOUTUBE_MUSIC_PLUGIN_ID.to_owned(),
+            ])
+        );
+        fs::remove_dir_all(root).expect("test directory should be removed");
+    }
 }

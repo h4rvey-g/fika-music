@@ -6239,6 +6239,22 @@ fn now_timestamp() -> i64 {
     system_time_to_timestamp(SystemTime::now()).unwrap_or_default()
 }
 
+fn prepare_bundled_plugins_dir(
+    resource_plugins_dir: PathBuf,
+    source_plugins_dir: PathBuf,
+    materialized_plugins_dir: PathBuf,
+) -> AppResult<PathBuf> {
+    if resource_plugins_dir.is_dir() {
+        return Ok(resource_plugins_dir);
+    }
+    if source_plugins_dir.is_dir() {
+        return Ok(source_plugins_dir);
+    }
+
+    bundled_plugins::materialize_packages(&materialized_plugins_dir)?;
+    Ok(materialized_plugins_dir)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
@@ -6273,11 +6289,11 @@ pub fn run() {
             let db_path = app_data_dir.join("fika-library.sqlite3");
             let resource_plugins_dir = app.path().resource_dir()?.join("plugins");
             let source_plugins_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins");
-            let bundled_plugins_dir = if resource_plugins_dir.is_dir() {
-                resource_plugins_dir
-            } else {
-                source_plugins_dir
-            };
+            let bundled_plugins_dir = prepare_bundled_plugins_dir(
+                resource_plugins_dir,
+                source_plugins_dir,
+                app_data_dir.join("bundled-plugins"),
+            )?;
             let state = AppState::new_with_plugin_dirs(
                 &db_path,
                 playback_cache_dir,
@@ -6693,6 +6709,28 @@ mod tests {
             std::env::temp_dir().join(format!("fika-music-{name}-{}-{id}", std::process::id()));
         fs::create_dir_all(&dir).expect("test temp directory should be created");
         dir
+    }
+
+    #[test]
+    fn prepare_bundled_plugins_dir_should_materialize_packages_for_android_asset_uri() {
+        let root = tempfile::tempdir().expect("temporary directory should open");
+        let materialized = root.path().join("bundled-plugins");
+
+        let selected = prepare_bundled_plugins_dir(
+            PathBuf::from("asset://localhost/plugins"),
+            root.path().join("missing-source-plugins"),
+            materialized.clone(),
+        )
+        .expect("Android bundled packages should be prepared");
+
+        assert_eq!(
+            (
+                selected,
+                materialized.join("netease/plugin.json").is_file(),
+                materialized.join("kugou/plugin.json").is_file(),
+            ),
+            (materialized, true, true)
+        );
     }
 
     #[test]
