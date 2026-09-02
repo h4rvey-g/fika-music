@@ -11,7 +11,7 @@
     "core:window:allow-set-ignore-cursor-events",
     "core:window:allow-set-min-size",
     "opener:default",
-    "process:allow-restart",
-    "updater:default"
+    "os:default",
+    "process:allow-restart"
   ]
 }

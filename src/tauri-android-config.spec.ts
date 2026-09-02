@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import androidConfig from "../src-tauri/tauri.android.conf.json";
+import defaultCapability from "../src-tauri/capabilities/default.json";
+import desktopCapability from "../src-tauri/capabilities/desktop.json";
 
 const androidIconDensities = ["mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"];
 const androidIconFiles = [
@@ -37,5 +39,14 @@ describe("Android Tauri configuration", () => {
 
   it("provides launcher icons for every Android density", () => {
     expect(includedAndroidIconFiles).toEqual(androidIconFiles);
+  });
+
+  it("exposes OS information without enabling the unsupported updater on Android", () => {
+    expect(defaultCapability.permissions).toContain("os:default");
+    expect(defaultCapability.permissions).not.toContain("updater:default");
+  });
+
+  it("keeps the native updater permission on desktop", () => {
+    expect(desktopCapability.permissions).toContain("updater:default");
   });
 });

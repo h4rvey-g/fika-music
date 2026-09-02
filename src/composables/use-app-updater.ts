@@ -1,6 +1,8 @@
 import { computed, ref, shallowRef } from "vue";
 import { getVersion } from "@tauri-apps/api/app";
 import { isTauri } from "@tauri-apps/api/core";
+import { arch, platform } from "@tauri-apps/plugin-os";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { relaunch } from "@tauri-apps/plugin-process";
 import {
   check,
@@ -8,6 +10,7 @@ import {
   type DownloadEvent,
   type DownloadOptions,
 } from "@tauri-apps/plugin-updater";
+import { checkAndroidUpdate } from "../lib/android-update";
 import { normalizeError } from "../lib/errors";
 
 const UPDATE_CHECK_TIMEOUT_MS = 30_000;
@@ -18,13 +21,17 @@ export type AppUpdateSummary = {
   version: string;
   date: string | null;
   body: string | null;
+  installMode: AppUpdateInstallMode;
 };
+
+export type AppUpdateInstallMode = "native" | "external";
 
 export type AppUpdateResource = {
   currentVersion: string;
   version: string;
   date?: string;
   body?: string;
+  installMode?: AppUpdateInstallMode;
   downloadAndInstall: (
     onEvent?: (event: DownloadEvent) => void,
     options?: DownloadOptions,
@@ -35,14 +42,38 @@ export type AppUpdateResource = {
 export type AppUpdaterDependencies = {
   isTauri: () => boolean;
   getVersion: () => Promise<string>;
+  platform: () => string;
   check: (options?: CheckOptions) => Promise<AppUpdateResource | null>;
+  checkAndroid: (currentVersion: string) => Promise<AppUpdateResource | null>;
   relaunch: () => Promise<void>;
 };
+
+async function checkDefaultAndroidUpdate(
+  currentVersion: string,
+): Promise<AppUpdateResource | null> {
+  const update = await checkAndroidUpdate({
+    currentVersion,
+    architecture: arch(),
+  });
+  if (!update) return null;
+
+  return {
+    currentVersion,
+    version: update.version,
+    date: update.date ?? undefined,
+    body: update.body ?? undefined,
+    installMode: "external",
+    downloadAndInstall: async () => openUrl(update.downloadUrl),
+    close: async () => undefined,
+  };
+}
 
 const defaultDependencies: AppUpdaterDependencies = {
   isTauri,
   getVersion,
+  platform,
   check,
+  checkAndroid: checkDefaultAndroidUpdate,
   relaunch,
 };
 
@@ -107,7 +138,9 @@ export function useAppUpdater(
     isChecking.value = true;
     error.value = null;
     try {
-      const nextUpdate = await dependencies.check({ timeout: UPDATE_CHECK_TIMEOUT_MS });
+      const nextUpdate = dependencies.platform() === "android"
+        ? await checkForAndroidUpdate()
+        : await dependencies.check({ timeout: UPDATE_CHECK_TIMEOUT_MS });
       if (disposed) {
         await closeUpdate(nextUpdate);
         return;
@@ -131,6 +164,7 @@ export function useAppUpdater(
         version: nextUpdate.version,
         date: nextUpdate.date ?? null,
         body: nextUpdate.body ?? null,
+        installMode: nextUpdate.installMode ?? "native",
       };
       notificationDismissed.value = false;
     } catch (checkError) {
@@ -140,6 +174,12 @@ export function useAppUpdater(
     } finally {
       if (!disposed) isChecking.value = false;
     }
+  }
+
+  async function checkForAndroidUpdate(): Promise<AppUpdateResource | null> {
+    const version = currentVersion.value;
+    if (!version) throw new Error("Unable to check for Android updates.");
+    return dependencies.checkAndroid(version);
   }
 
   function installUpdate(): Promise<void> {
@@ -160,6 +200,10 @@ export function useAppUpdater(
     error.value = null;
 
     try {
+      if (update.installMode === "external") {
+        await update.downloadAndInstall();
+        return;
+      }
       await update.downloadAndInstall(handleDownloadEvent, {
         timeout: UPDATE_DOWNLOAD_TIMEOUT_MS,
       });

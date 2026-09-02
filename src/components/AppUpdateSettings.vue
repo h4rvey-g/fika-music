@@ -141,7 +141,11 @@ function formatBytes(bytes: number): string {
             >
               <RefreshCw v-if="isInstalling" class="animate-spin" :size="16" aria-hidden="true" />
               <Download v-else :size="16" aria-hidden="true" />
-              {{ isInstalling ? t("Installing update") : t("Download and install") }}
+              {{
+                isInstalling
+                  ? t(update.installMode === "external" ? "Opening download" : "Installing update")
+                  : t(update.installMode === "external" ? "Download APK" : "Download and install")
+              }}
             </button>
           </div>
         </template>
