@@ -97,20 +97,42 @@ import {
   type OnlineTrack,
 } from "./lib/online-music-api";
 import {
-  playbackQueueItemFromCollectionItem,
+  playbackTrackInputFromCollectionItem,
   type PlaybackQueueItem,
-  type PlaybackQueuePlacement,
 } from "./lib/playback-queue";
+import {
+  PLAYBACK_QUEUE_PAGE_SIZE,
+  appendPlaybackSessionStream,
+  clearPlaybackSessionUpcoming,
+  closePlaybackSessionStream,
+  failPlaybackSessionCurrent,
+  getPlaybackSession,
+  localPlaybackInput,
+  markPlaybackSessionStarted,
+  movePlaybackSessionItem,
+  nextPlaybackSessionItem,
+  onlinePlaybackInput,
+  playNextInPlaybackSession,
+  previousPlaybackSessionItem,
+  removePlaybackSessionItem,
+  replaceLocalPlaybackSession,
+  replacePlaybackSession,
+  savePlaybackSessionProgress,
+  selectPlaybackSessionItem,
+  setPlaybackSessionMode,
+  setPlaybackSessionPaused,
+} from "./lib/playback-session-api";
 import { TAURI_COMMANDS } from "./generated/bindings";
 import type {
   AudioSourceSelectionMode,
   LibraryChangedEvent,
   LibraryPlaybackQueue,
-  LibraryQueueTrack,
   LocalTrack,
   LocalTrackPlaybackDetails,
   MediaSource,
   OnlineMusicSettings,
+  PlaybackSessionSnapshot,
+  PlaybackTrackInput,
   ResolvedLyrics,
   SourceQuality,
   TrackLyricsQuery,
@@ -230,7 +252,7 @@ type OnlineMusicInstance = {
 type OnlineQueueLoadMore = () => Promise<OnlineTrack[]>;
 
 type PreloadedOnlinePlayback = {
-  index: number;
+  entryId: string;
   playback: OnlinePlayback;
   preparedAt: number;
 };
@@ -311,8 +333,6 @@ type CollectionNameDialog =
 
 const MOUSE_BACK_BUTTON = 3;
 const MOUSE_FORWARD_BUTTON = 4;
-const LOCAL_QUEUE_PAGE_SIZE = 200;
-
 const savedUiPreferences = loadUiPreferences();
 setLocale(savedUiPreferences.locale);
 const savedDesktopLyricsPreferences = loadDesktopLyricsPreferences();
@@ -416,29 +436,17 @@ const activeRemoteLyricsQuery = ref<TrackLyricsQuery | null>(null);
 const isLoadingLyrics = ref(false);
 const lyricsError = ref<string | null>(null);
 const isPreparingPlayback = ref(false);
-const playbackQueue = ref<PlaybackQueueItem[]>([]);
+const playbackSession = ref<PlaybackSessionSnapshot | null>(null);
+const playbackSessionLoading = ref(false);
 const playbackQueueOpen = ref(false);
-const manualPlaybackActive = ref(false);
+const activePlaybackEntryId = ref<string | null>(null);
 const audioElement = ref<HTMLAudioElement | null>(null);
 const playbackOptionsMenu = ref<HTMLDetailsElement | null>(null);
 const libraryBrowser = ref<LibraryBrowserInstance | null>(null);
 const collectionBrowser = ref<CollectionBrowserInstance | null>(null);
 const onlineMusic = ref<OnlineMusicInstance | null>(null);
 const libraryTrackCount = ref(0);
-const localQueueId = ref<string | null>(null);
-const localQueueTotal = ref(0);
-const localQueueIndex = ref(-1);
-const queuedLocalTrack = ref<LocalTrack | null>(null);
-const localQueueActive = ref(false);
-const localQueueTracks = ref<LibraryQueueTrack[]>([]);
-const localQueueTracksLoading = ref(false);
-const remoteQueue = ref<OnlineTrack[]>([]);
-const remoteQueueIndex = ref(-1);
-const remoteQueueActive = ref(false);
 const remoteQueueLoadMore = ref<OnlineQueueLoadMore | null>(null);
-const collectionQueue = ref<MusicCollectionItem[]>([]);
-const collectionQueueIndex = ref(-1);
-const collectionQueueActive = ref(false);
 const resolvingOnlineTrackKey = ref<string | null>(null);
 const playbackAudioSourceId = ref(savedUiPreferences.audioSourceId);
 const playbackQuality = ref<SourceQuality>("320k");
@@ -460,11 +468,10 @@ let remoteQueueGeneration = 0;
 let audioSourceSelectionModeGeneration = 0;
 let sourceChangeMessageTimer: ReturnType<typeof setTimeout> | null = null;
 let collectionNoticeTimer: ReturnType<typeof setTimeout> | null = null;
-let playbackQueueSequence = 0;
-let localQueueTracksGeneration = 0;
 let sidebarPlaybackGeneration = 0;
 let dynamicThemeGeneration = 0;
 let volumeBeforeMute = savedUiPreferences.volume > 0 ? savedUiPreferences.volume : 0.8;
+let lastPersistedPlaybackSecond = -1;
 const desktopLyricsUnlisteners: UnlistenFn[] = [];
 const collectionUnlisteners: UnlistenFn[] = [];
 const failedOnlineAttempts = new ExpiringCache<string, true>(5 * 60_000, 256);
@@ -529,8 +536,8 @@ const canTogglePlayback = computed(() =>
   && Boolean(
     activeTrack.value
     || activeRemoteTitle.value
-    || queuedLocalTrack.value
-    || collectionQueue.value.length
+    || playbackSession.value?.current
+    || playbackSession.value?.canGoNext
     || libraryTrackCount.value,
   ),
 );
@@ -547,103 +554,14 @@ const currentPlaybackQuality = computed(() =>
     ? activeRemoteQuality.value
     : playbackQuality.value,
 );
-const contextPlaybackQueue = computed<PlaybackQueueItem[]>(() => {
-  if (collectionQueue.value.length && collectionQueueIndex.value >= 0) {
-    return collectionQueue.value.flatMap((item, index) => {
-      if (index <= collectionQueueIndex.value) return [];
-      const queueItem = playbackQueueItemFromCollectionItem(
-        item,
-        `collection-context-${item.id}-${index}`,
-      );
-      if (!queueItem) return [];
-      queueItem.context = { kind: "collection", index };
-      return [queueItem];
-    });
-  }
-  if (remoteQueue.value.length && remoteQueueIndex.value >= 0) {
-    return remoteQueue.value.flatMap((track, index) => index > remoteQueueIndex.value
-      ? [{
-          id: `online-context-${index}-${track.key}`,
-          kind: "online" as const,
-          track,
-          context: { kind: "online" as const, index },
-        }]
-      : []);
-  }
-  if (localQueueId.value && localQueueIndex.value >= 0) {
-    return localQueueTracks.value.flatMap((item) => item.index > localQueueIndex.value
-      ? [{
-          id: `local-context-${localQueueId.value}-${item.index}`,
-          kind: "local" as const,
-          track: item.track,
-          context: { kind: "local" as const, index: item.index },
-        }]
-      : []);
-  }
-  return [];
-});
-const displayedPlaybackQueue = computed(() => [
-  ...playbackQueue.value,
-  ...contextPlaybackQueue.value,
-]);
-const playbackQueueTotal = computed(() => {
-  if (collectionQueue.value.length && collectionQueueIndex.value >= 0) {
-    return playbackQueue.value.length + contextPlaybackQueue.value.length;
-  }
-  if (remoteQueue.value.length && remoteQueueIndex.value >= 0) {
-    return playbackQueue.value.length + contextPlaybackQueue.value.length;
-  }
-  if (localQueueId.value && localQueueIndex.value >= 0) {
-    return playbackQueue.value.length
-      + Math.max(0, localQueueTotal.value - localQueueIndex.value - 1);
-  }
-  return playbackQueue.value.length;
-});
-const canLoadMoreLocalQueueTracks = computed(() => {
-  if (!localQueueId.value || localQueueIndex.value < 0) return false;
-  const lastLoadedIndex = lastLoadedLocalQueueIndex();
-  return lastLoadedIndex < localQueueTotal.value - 1;
-});
-const canGoPrevious = computed(() => {
-  if (collectionQueueActive.value && collectionQueueIndex.value >= 0) {
-    return playbackMode.value !== "sequential" || collectionQueueIndex.value > 0;
-  }
-  if (remoteQueueActive.value && remoteQueueIndex.value >= 0) {
-    return playbackMode.value !== "sequential" || remoteQueueIndex.value > 0;
-  }
-  if (
-    !activeTrack.value ||
-    !localQueueActive.value ||
-    !localQueueId.value ||
-    localQueueIndex.value < 0
-  ) {
-    return false;
-  }
-  return playbackMode.value !== "sequential" || localQueueIndex.value > 0;
-});
-const canGoNext = computed(() => {
-  if (playbackQueue.value.length) return true;
-  if (collectionQueueActive.value && collectionQueueIndex.value >= 0) {
-    return playbackMode.value !== "sequential"
-      || collectionQueueIndex.value < collectionQueue.value.length - 1;
-  }
-  if (remoteQueueActive.value && remoteQueueIndex.value >= 0) {
-    return (
-      Boolean(remoteQueueLoadMore.value) ||
-      playbackMode.value !== "sequential" ||
-      remoteQueueIndex.value < remoteQueue.value.length - 1
-    );
-  }
-  if (
-    !activeTrack.value ||
-    !localQueueActive.value ||
-    !localQueueId.value ||
-    localQueueIndex.value < 0
-  ) {
-    return false;
-  }
-  return playbackMode.value !== "sequential" || localQueueIndex.value < localQueueTotal.value - 1;
-});
+const displayedPlaybackQueue = computed(() => playbackSession.value?.upcoming ?? []);
+const playbackQueueCurrent = computed(() => playbackSession.value?.current ?? null);
+const playbackQueueTotal = computed(() => playbackSession.value?.upcomingTotal ?? 0);
+const canLoadMorePlaybackQueue = computed(() =>
+  displayedPlaybackQueue.value.length < playbackQueueTotal.value,
+);
+const canGoPrevious = computed(() => playbackSession.value?.canGoPrevious ?? false);
+const canGoNext = computed(() => playbackSession.value?.canGoNext ?? false);
 const playbackModeLabel = computed(() => {
   switch (playbackMode.value) {
     case "shuffle":
@@ -706,7 +624,7 @@ watch(audioUrl, () => {
 });
 watch(playbackMode, (mode) => {
   cancelOnlinePreload();
-  if (mode === "sequential") scheduleNextOnlinePreload();
+  if (mode) scheduleNextOnlinePreload();
 });
 watch([playbackQuality, playbackAudioSourceId], cancelOnlinePreload);
 watch(
@@ -779,6 +697,7 @@ onMounted(async () => {
     loadAudioSourceNavigation(),
     loadCollectionNavigation(),
   ]);
+  await initializePlaybackSession();
   const modeGeneration = audioSourceSelectionModeGeneration;
   void onlineMusicConfig.load().then(({ settings }) => {
     if (modeGeneration === audioSourceSelectionModeGeneration) {
@@ -811,6 +730,7 @@ onBeforeUnmount(() => {
   void globalShortcuts.dispose();
   appUpdater.dispose();
   sampleListeningTime();
+  void savePlaybackSessionProgress(playbackPosition.value);
 });
 
 function setMediaSessionAction(
@@ -1482,9 +1402,8 @@ async function confirmCollectionDelete() {
     musicCollections.value = musicCollections.value.filter(
       (candidate) => candidate.id !== collection.id,
     );
-    if (activeCollectionId.value === collection.id) {
-      clearCollectionPlaybackQueue();
-      replaceCurrentLocation({ section: "local", pluginId: null, collectionId: null });
+  if (activeCollectionId.value === collection.id) {
+    replaceCurrentLocation({ section: "local", pluginId: null, collectionId: null });
     }
     collectionDeleteTarget.value = null;
     showCollectionNotice(t("Deleted {name}.", { name: collection.name }));
@@ -1738,175 +1657,172 @@ function ownsOnlinePlaybackRequest(
     && onlinePlaybackController === controller;
 }
 
-function nextPlaybackQueueId() {
-  playbackQueueSequence += 1;
-  return `playback-queue-${playbackQueueSequence}`;
-}
-
-function appendPlaybackQueue(items: PlaybackQueueItem[], placement: PlaybackQueuePlacement) {
-  if (!items.length) return;
-  playbackQueue.value = placement === "next"
-    ? [...items, ...playbackQueue.value]
-    : [...playbackQueue.value, ...items];
-  if (!activeTrack.value && !activeRemoteTitle.value && !isPreparingPlayback.value) {
-    void playNextPlaybackQueueItem();
+function applyPlaybackSessionSnapshot(snapshot: PlaybackSessionSnapshot) {
+  if (playbackSession.value && snapshot.revision < playbackSession.value.revision) return;
+  playbackSession.value = snapshot;
+  if (playbackMode.value !== snapshot.mode) playbackMode.value = snapshot.mode;
+  if (snapshot.current && snapshot.current.id !== activePlaybackEntryId.value && snapshot.paused) {
+    showRestoredPlaybackItem(snapshot.current);
   }
 }
 
-function queueLocalTracks(tracks: LocalTrack[], placement: PlaybackQueuePlacement) {
-  appendPlaybackQueue(
-    tracks.map((track) => ({ id: nextPlaybackQueueId(), kind: "local", track })),
-    placement,
+function showRestoredPlaybackItem(item: PlaybackQueueItem) {
+  activePlaybackEntryId.value = item.id;
+  if (item.kind === "local") {
+    activeTrack.value = item.track;
+    activeOnlineTrack.value = null;
+    activeRemoteTitle.value = null;
+    return;
+  }
+  activeTrack.value = null;
+  activeOnlineTrack.value = item.track;
+  activeRemoteTitle.value = item.track.title;
+  nowPlayingCoverUrl.value = item.track.coverUrl;
+}
+
+async function initializePlaybackSession() {
+  try {
+    const desiredMode = playbackMode.value;
+    let snapshot = await getPlaybackSession();
+    if (!snapshot) return;
+    if (snapshot.revision === 0 && snapshot.mode !== desiredMode) {
+      snapshot = await setPlaybackSessionMode(desiredMode);
+    }
+    applyPlaybackSessionSnapshot(snapshot);
+  } catch (error) {
+    appError.value = normalizeError(error);
+  }
+}
+
+async function loadMorePlaybackQueueItems() {
+  if (!canLoadMorePlaybackQueue.value || playbackSessionLoading.value) return;
+  playbackSessionLoading.value = true;
+  try {
+    const current = playbackSession.value;
+    if (!current) return;
+    const page = await getPlaybackSession(
+      current.upcoming.length,
+      PLAYBACK_QUEUE_PAGE_SIZE,
+    );
+    if (page.revision !== current.revision) {
+      applyPlaybackSessionSnapshot(page);
+      return;
+    }
+    playbackSession.value = {
+      ...page,
+      upcoming: [...current.upcoming, ...page.upcoming],
+      upcomingOffset: 0,
+    };
+  } catch (error) {
+    appError.value = normalizeError(error);
+  } finally {
+    playbackSessionLoading.value = false;
+  }
+}
+
+async function applyPlaybackSessionMutation(
+  mutation: Promise<PlaybackSessionSnapshot>,
+) {
+  try {
+    const snapshot = await mutation;
+    applyPlaybackSessionSnapshot(snapshot);
+    return snapshot;
+  } catch (error) {
+    appError.value = normalizeError(error);
+    return null;
+  }
+}
+
+async function queueLocalTracks(tracks: LocalTrack[]) {
+  await queuePlaybackInputs(tracks.map(localPlaybackInput));
+}
+
+async function queueOnlineTracks(tracks: OnlineTrack[]) {
+  await queuePlaybackInputs(tracks.map(onlinePlaybackInput));
+}
+
+async function queueCollectionTracks(items: MusicCollectionItem[]) {
+  await queuePlaybackInputs(
+    items.flatMap((item) => {
+      const input = playbackTrackInputFromCollectionItem(item);
+      return input ? [input] : [];
+    }),
   );
 }
 
-function queueOnlineTracks(tracks: OnlineTrack[], placement: PlaybackQueuePlacement) {
-  appendPlaybackQueue(
-    tracks.map((track) => ({ id: nextPlaybackQueueId(), kind: "online", track })),
-    placement,
-  );
+async function queuePlaybackInputs(tracks: PlaybackTrackInput[]) {
+  if (!tracks.length) return;
+  const hadCurrent = Boolean(playbackSession.value?.current);
+  let snapshot = await applyPlaybackSessionMutation(playNextInPlaybackSession(tracks));
+  if (!snapshot || hadCurrent || snapshot.current) return;
+  snapshot = await applyPlaybackSessionMutation(nextPlaybackSessionItem());
+  if (snapshot) await playPlaybackSessionCurrent(snapshot);
 }
 
-function queueCollectionTracks(items: MusicCollectionItem[], placement: PlaybackQueuePlacement) {
-  const queueItems = items.flatMap((item) => {
-    const queueItem = playbackQueueItemFromCollectionItem(item, nextPlaybackQueueId());
-    return queueItem ? [queueItem] : [];
-  });
-  appendPlaybackQueue(queueItems, placement);
+async function clearUpcomingPlaybackQueue() {
+  remoteQueueLoadMore.value = null;
+  await applyPlaybackSessionMutation(clearPlaybackSessionUpcoming());
+  cancelOnlinePreload();
 }
 
-function clearPlaybackQueue() {
-  playbackQueue.value = [];
-  manualPlaybackActive.value = false;
+async function removePlaybackQueueItem(index: number) {
+  const snapshot = await applyPlaybackSessionMutation(removePlaybackSessionItem(index));
+  if (snapshot) scheduleNextOnlinePreload();
 }
 
-function removePlaybackQueueItem(index: number) {
-  if (index < 0 || index >= playbackQueue.value.length) return;
-  playbackQueue.value = playbackQueue.value.filter((_, itemIndex) => itemIndex !== index);
-}
-
-function movePlaybackQueueItem(from: number, to: number) {
-  if (
-    from < 0
-    || from >= playbackQueue.value.length
-    || to < 0
-    || to >= playbackQueue.value.length
-    || from === to
-  ) return;
-  const next = [...playbackQueue.value];
-  const [item] = next.splice(from, 1);
-  next.splice(to, 0, item);
-  playbackQueue.value = next;
-}
-
-async function playPlaybackQueueItem(index: number) {
-  const item = playbackQueue.value[index];
-  if (!item) return;
-  playbackQueue.value = playbackQueue.value.filter((_, itemIndex) => itemIndex !== index);
-  await playManualPlaybackItem(item);
+async function movePlaybackQueueItem(from: number, to: number) {
+  const snapshot = await applyPlaybackSessionMutation(movePlaybackSessionItem(from, to));
+  if (snapshot) scheduleNextOnlinePreload();
 }
 
 async function playDisplayedPlaybackQueueItem(index: number) {
-  const item = displayedPlaybackQueue.value[index];
-  if (!item) return;
-  if (!item.context) {
-    const manualIndex = playbackQueue.value.findIndex((candidate) => candidate.id === item.id);
-    if (manualIndex >= 0) await playPlaybackQueueItem(manualIndex);
-    return;
-  }
-  if (item.context.kind === "local") {
-    await playLocalQueueTrack(item.context.index);
-    return;
-  }
-  if (item.context.kind === "online") {
-    await playOnlineQueueTrack(item.context.index);
-    return;
-  }
-  await playCollectionQueueTrack(item.context.index);
+  const snapshot = await applyPlaybackSessionMutation(selectPlaybackSessionItem(index));
+  if (snapshot) await playPlaybackSessionCurrent(snapshot);
 }
 
-async function playNextPlaybackQueueItem() {
-  const [item, ...remaining] = playbackQueue.value;
+async function playPlaybackSessionCurrent(
+  snapshot: PlaybackSessionSnapshot,
+  initialPosition = 0,
+) {
+  const item = snapshot.current;
   if (!item) return false;
-  playbackQueue.value = remaining;
-  await playManualPlaybackItem(item);
+  activePlaybackEntryId.value = item.id;
+  let played = false;
+  if (item.kind === "local") {
+    activeOnlineTrack.value = null;
+    played = await playTrack(item.track, { initialPosition });
+  } else {
+    activeTrack.value = null;
+    played = (await playStandaloneOnlineTrack(item.track, initialPosition)) !== null;
+  }
+  if (!played) {
+    await skipFailedPlaybackSessionItem();
+    return false;
+  }
+  const started = await applyPlaybackSessionMutation(markPlaybackSessionStarted());
+  if (started) {
+    scheduleNextOnlinePreload();
+    if (started.streamOpen && started.upcoming.length <= 1) {
+      void loadMoreRemoteQueue();
+    }
+  }
   return true;
 }
 
-async function playManualPlaybackItem(item: PlaybackQueueItem) {
-  manualPlaybackActive.value = true;
-  if (item.kind === "local") {
-    await playTrack(item.track, {
-      preserveCollectionQueue: true,
-      preserveLocalQueue: true,
-      preserveRemoteQueue: true,
-    });
-    return;
-  }
-  await playStandaloneOnlineTrack(item.track, true);
-}
-
-function lastLoadedLocalQueueIndex() {
-  return localQueueTracks.value[localQueueTracks.value.length - 1]?.index
-    ?? localQueueIndex.value;
-}
-
-function resetLocalQueueTracks() {
-  localQueueTracksGeneration += 1;
-  localQueueTracks.value = [];
-  localQueueTracksLoading.value = false;
-}
-
-async function loadMoreLocalQueueTracks() {
-  const queueId = localQueueId.value;
-  if (!queueId || localQueueTracksLoading.value || !canLoadMoreLocalQueueTracks.value) return;
-  const lastLoadedIndex = lastLoadedLocalQueueIndex();
-  const generation = localQueueTracksGeneration;
-  localQueueTracksLoading.value = true;
-  try {
-    const tracks = await invoke<LibraryQueueTrack[]>(TAURI_COMMANDS.localLibraryQueueTracks, {
-      queueId,
-      offset: lastLoadedIndex + 1,
-      limit: LOCAL_QUEUE_PAGE_SIZE,
-    });
-    if (generation !== localQueueTracksGeneration || queueId !== localQueueId.value) return;
-    localQueueTracks.value = [...localQueueTracks.value, ...tracks];
-  } catch (error) {
-    if (generation === localQueueTracksGeneration && queueId === localQueueId.value) {
-      appError.value = normalizeError(error);
-    }
-  } finally {
-    if (generation === localQueueTracksGeneration && queueId === localQueueId.value) {
-      localQueueTracksLoading.value = false;
-    }
-  }
-}
-
-function updateLocalQueueTracksForCurrentIndex() {
-  const nextIndex = localQueueIndex.value + 1;
-  const firstLoadedIndex = localQueueTracks.value[0]?.index;
-  const lastLoadedIndex = lastLoadedLocalQueueIndex();
-  if (
-    firstLoadedIndex === undefined
-    || firstLoadedIndex > nextIndex
-    || lastLoadedIndex < nextIndex
-  ) {
-    resetLocalQueueTracks();
-    void loadMoreLocalQueueTracks();
-  }
+async function skipFailedPlaybackSessionItem() {
+  const failedId = playbackSession.value?.current?.id;
+  const snapshot = await applyPlaybackSessionMutation(failPlaybackSessionCurrent());
+  if (!snapshot || snapshot.current?.id === failedId || snapshot.consecutiveFailures >= 3) return;
+  await playPlaybackSessionCurrent(snapshot);
 }
 
 type LocalPlaybackOptions = {
-  preserveCollectionQueue?: boolean;
-  preserveLocalQueue?: boolean;
-  preserveRemoteQueue?: boolean;
+  initialPosition?: number;
 };
 
 async function playTrack(track: LocalTrack, options: LocalPlaybackOptions = {}) {
   const generation = beginPlaybackRequest();
   sampleListeningTime();
-  if (!options.preserveCollectionQueue) clearCollectionPlaybackQueue();
-  if (!options.preserveRemoteQueue) clearRemotePlaybackQueue();
   isPreparingPlayback.value = true;
   appError.value = null;
 
@@ -1914,29 +1830,32 @@ async function playTrack(track: LocalTrack, options: LocalPlaybackOptions = {}) 
     const source = await invoke<MediaSource>(TAURI_COMMANDS.localTrackMediaSource, {
       trackId: track.id,
     });
-    if (!ownsPlaybackRequest(generation)) return;
+    if (!ownsPlaybackRequest(generation)) return false;
 
     activeTrack.value = track;
     activeRemoteTitle.value = null;
     activeRemoteQuality.value = null;
     audioUrl.value = convertFileSrc(source.filePath);
-    if (!options.preserveLocalQueue) queuedLocalTrack.value = track;
     resetListeningSession();
     void loadLocalTrackPlaybackDetails(track);
 
     await nextTick();
-    if (!ownsPlaybackRequest(generation)) return;
+    if (!ownsPlaybackRequest(generation)) return false;
     const audio = audioElement.value;
     if (audio) {
       audio.volume = volume.value;
+      if (options.initialPosition) audio.currentTime = options.initialPosition;
       await audio.play();
-      if (!ownsPlaybackRequest(generation)) return;
+      if (!ownsPlaybackRequest(generation)) return false;
       isPlaying.value = true;
+      return true;
     }
+    return false;
   } catch (error) {
-    if (!ownsPlaybackRequest(generation)) return;
+    if (!ownsPlaybackRequest(generation)) return false;
     appError.value = normalizeError(error);
     isPlaying.value = false;
+    return false;
   } finally {
     if (ownsPlaybackRequest(generation)) {
       isPreparingPlayback.value = false;
@@ -1945,45 +1864,22 @@ async function playTrack(track: LocalTrack, options: LocalPlaybackOptions = {}) 
 }
 
 async function handleLibraryPlaybackQueue(queue: LibraryPlaybackQueue, autoplay: boolean) {
-  clearPlaybackQueue();
-  clearCollectionPlaybackQueue();
-  resetLocalQueueTracks();
-  localQueueId.value = queue.queueId;
-  localQueueTotal.value = queue.total;
-  localQueueIndex.value = queue.currentIndex;
-  queuedLocalTrack.value = queue.track;
-  localQueueActive.value = autoplay;
-  void loadMoreLocalQueueTracks();
+  const snapshot = await applyPlaybackSessionMutation(
+    replaceLocalPlaybackSession(queue, autoplay, playbackMode.value),
+  );
+  if (!snapshot) return;
   if (autoplay) {
-    await playTrack(queue.track);
+    clearRemotePlaybackQueue();
+    await playPlaybackSessionCurrent(snapshot);
+  } else {
+    clearRemoteQueueContinuation();
   }
 }
 
-function clearLocalPlaybackQueue() {
-  resetLocalQueueTracks();
-  localQueueId.value = null;
-  localQueueTotal.value = 0;
-  localQueueIndex.value = -1;
-  queuedLocalTrack.value = null;
-  localQueueActive.value = false;
-}
-
-function clearCollectionPlaybackQueue() {
-  collectionQueue.value = [];
-  collectionQueueIndex.value = -1;
-  collectionQueueActive.value = false;
-}
-
 function clearRemotePlaybackQueue() {
-  remoteQueueGeneration += 1;
+  clearRemoteQueueContinuation();
   onlinePlaybackController?.abort();
   onlinePlaybackController = null;
-  cancelOnlinePreload();
-  remoteQueue.value = [];
-  remoteQueueIndex.value = -1;
-  remoteQueueActive.value = false;
-  remoteQueueLoadMore.value = null;
-  pendingRemoteQueueLoad = null;
   resolvingOnlineTrackKey.value = null;
   activeOnlineTrack.value = null;
   activeRemoteQuality.value = null;
@@ -1998,15 +1894,9 @@ function clearRemotePlaybackQueue() {
   }
 }
 
-function clearUpcomingPlaybackQueue() {
-  clearPlaybackQueue();
-  clearLocalPlaybackQueue();
-  clearCollectionPlaybackQueue();
+function clearRemoteQueueContinuation() {
   remoteQueueGeneration += 1;
   cancelOnlinePreload();
-  remoteQueue.value = [];
-  remoteQueueIndex.value = -1;
-  remoteQueueActive.value = false;
   remoteQueueLoadMore.value = null;
   pendingRemoteQueueLoad = null;
 }
@@ -2103,18 +1993,23 @@ async function handleOnlinePlayRequest(
   appendable: boolean,
   loadMore?: OnlineQueueLoadMore,
 ) {
-  clearPlaybackQueue();
-  clearCollectionPlaybackQueue();
   remoteQueueGeneration += 1;
   cancelOnlinePreload();
   clearFailedOnlinePlayback(track.key);
   clearOnlinePlaybackFailures(track.key);
   const targetIndex = index >= 0 ? index : queue.findIndex((item) => item.key === track.key);
-  remoteQueue.value = appendable ? queue : [...queue];
-  remoteQueueActive.value = true;
   remoteQueueLoadMore.value = loadMore ?? null;
   pendingRemoteQueueLoad = null;
-  await playOnlineQueueTrack(Math.max(0, targetIndex));
+  const snapshot = await applyPlaybackSessionMutation(
+    replacePlaybackSession(
+      queue.map(onlinePlaybackInput),
+      Math.max(0, targetIndex),
+      true,
+      playbackMode.value,
+      appendable,
+    ),
+  );
+  if (snapshot) await playPlaybackSessionCurrent(snapshot);
 }
 
 async function handleCollectionPlayback(
@@ -2122,133 +2017,23 @@ async function handleCollectionPlayback(
   index: number,
   autoplay = true,
 ) {
-  clearPlaybackQueue();
   if (!items[index]) return;
-  clearLocalPlaybackQueue();
-  clearRemotePlaybackQueue();
-  collectionQueue.value = [...items];
-  collectionQueueIndex.value = index;
-  collectionQueueActive.value = autoplay;
-  if (autoplay) await playCollectionQueueTrack(index);
-}
-
-async function playCollectionQueueTrack(index: number) {
-  const item = collectionQueue.value[index];
-  if (!item) return;
-  collectionQueueIndex.value = index;
-  if (item.localTrack) {
-    await playTrack(item.localTrack, { preserveCollectionQueue: true });
-    return;
+  const tracks = items.flatMap((item) => {
+    const input = playbackTrackInputFromCollectionItem(item);
+    return input ? [input] : [];
+  });
+  const startIndex = items.slice(0, index).reduce((count, item) =>
+    count + (playbackTrackInputFromCollectionItem(item) ? 1 : 0), 0);
+  const snapshot = await applyPlaybackSessionMutation(
+    replacePlaybackSession(tracks, startIndex, autoplay, playbackMode.value),
+  );
+  if (!snapshot) return;
+  if (autoplay) {
+    clearRemotePlaybackQueue();
+    await playPlaybackSessionCurrent(snapshot);
+  } else {
+    clearRemoteQueueContinuation();
   }
-  if (item.onlineTrack) {
-    await playCollectionOnlineTrack(item.onlineTrack);
-  }
-}
-
-async function playCollectionOnlineTrack(track: OnlineTrack) {
-  clearRemotePlaybackQueue();
-  const generation = beginPlaybackRequest();
-  const controller = new AbortController();
-  onlinePlaybackController = controller;
-  resolvingOnlineTrackKey.value = track.key;
-  isPreparingPlayback.value = true;
-  appError.value = null;
-  clearFailedOnlinePlayback(track.key);
-  clearOnlinePlaybackFailures(track.key);
-
-  try {
-    const playback = await resolveConfiguredOnlinePlayback(track, controller.signal, true);
-    if (!ownsOnlinePlaybackRequest(generation, controller)) return;
-    await applyOnlinePlayback(playback, generation);
-  } catch (error) {
-    if (
-      ownsPlaybackRequest(generation)
-      && !(error instanceof DOMException && error.name === "AbortError")
-    ) {
-      appError.value = playbackErrorMessage(error);
-    }
-  } finally {
-    if (ownsOnlinePlaybackRequest(generation, controller)) {
-      resolvingOnlineTrackKey.value = null;
-      isPreparingPlayback.value = false;
-    }
-  }
-}
-
-async function playOnlineQueueTrack(index: number) {
-  const snapshotTrack = remoteQueue.value[index];
-  if (!snapshotTrack) return null;
-  const generation = beginPlaybackRequest();
-
-  const prepared = takePreloadedOnlinePlayback(index, snapshotTrack);
-  if (prepared) {
-    onlinePlaybackController?.abort();
-    onlinePlaybackController = null;
-    resolvingOnlineTrackKey.value = snapshotTrack.key;
-    isPreparingPlayback.value = true;
-    appError.value = null;
-    try {
-      remoteQueueIndex.value = index;
-      const applied = await applyOnlinePlayback(prepared, generation);
-      if (
-        applied
-        && ownsPlaybackRequest(generation)
-        && index === remoteQueue.value.length - 1
-      ) {
-        void loadMoreRemoteQueue();
-      }
-    } catch (error) {
-      if (ownsPlaybackRequest(generation)) {
-        appError.value = playbackErrorMessage(error);
-      }
-    } finally {
-      if (ownsPlaybackRequest(generation)) {
-        clearPreloadedMedia();
-        resolvingOnlineTrackKey.value = null;
-        isPreparingPlayback.value = false;
-      }
-    }
-    return generation;
-  }
-
-  cancelOnlinePreload();
-  onlinePlaybackController?.abort();
-  const controller = new AbortController();
-  onlinePlaybackController = controller;
-  resolvingOnlineTrackKey.value = snapshotTrack.key;
-  isPreparingPlayback.value = true;
-  appError.value = null;
-
-  try {
-    const playback = await resolveConfiguredOnlinePlayback(
-      snapshotTrack,
-      controller.signal,
-      true,
-    );
-    if (!ownsOnlinePlaybackRequest(generation, controller)) return generation;
-    remoteQueueIndex.value = index;
-    const applied = await applyOnlinePlayback(playback, generation);
-    if (
-      applied
-      && ownsPlaybackRequest(generation)
-      && index === remoteQueue.value.length - 1
-    ) {
-      void loadMoreRemoteQueue();
-    }
-  } catch (error) {
-    if (
-      ownsPlaybackRequest(generation)
-      && !(error instanceof DOMException && error.name === "AbortError")
-    ) {
-      appError.value = playbackErrorMessage(error);
-    }
-  } finally {
-    if (ownsOnlinePlaybackRequest(generation, controller)) {
-      resolvingOnlineTrackKey.value = null;
-      isPreparingPlayback.value = false;
-    }
-  }
-  return generation;
 }
 
 async function resolveConfiguredOnlinePlayback(
@@ -2295,29 +2080,25 @@ function handleOnlineMusicSettingsChanged(
   onlineMusic.value?.updateSettings(settings);
 }
 
-function nextRemoteQueueIndexForPreload() {
-  if (playbackMode.value === "shuffle") return -1;
-  const nextIndex = remoteQueueIndex.value + 1;
-  if (nextIndex < remoteQueue.value.length) return nextIndex;
-  if (remoteQueueLoadMore.value) return -1;
-  return playbackMode.value === "repeat" && remoteQueue.value.length ? 0 : -1;
+function nextOnlineQueueEntryForPreload() {
+  const entry = playbackSession.value?.upcoming[0];
+  return entry?.kind === "online" ? entry : null;
 }
 
 function scheduleNextOnlinePreload(delayMs = 750) {
-  if (!remoteQueueActive.value || !isPlaying.value) return;
-  const index = nextRemoteQueueIndexForPreload();
-  if (index < 0) return;
-  if (preloadedOnlinePlayback?.index === index) return;
+  if (!isPlaying.value) return;
+  const entry = nextOnlineQueueEntryForPreload();
+  if (!entry || preloadedOnlinePlayback?.entryId === entry.id) return;
   if (onlinePreloadTimer) clearTimeout(onlinePreloadTimer);
   onlinePreloadTimer = window.setTimeout(() => {
     onlinePreloadTimer = null;
-    void preloadOnlineQueueTrack(index);
+    void preloadOnlineQueueTrack(entry);
   }, delayMs);
 }
 
-async function preloadOnlineQueueTrack(index: number, refresh = false) {
-  const track = remoteQueue.value[index];
-  if (!track || index !== nextRemoteQueueIndexForPreload()) return;
+async function preloadOnlineQueueTrack(entry: Extract<PlaybackQueueItem, { kind: "online" }>, refresh = false) {
+  const track = entry.track;
+  if (entry.id !== nextOnlineQueueEntryForPreload()?.id) return;
   onlinePreloadController?.abort();
   const controller = new AbortController();
   onlinePreloadController = controller;
@@ -2332,14 +2113,13 @@ async function preloadOnlineQueueTrack(index: number, refresh = false) {
     if (
       controller.signal.aborted
       || onlinePreloadController !== controller
-      || index !== nextRemoteQueueIndexForPreload()
-      || remoteQueue.value[index]?.key !== track.key
+      || entry.id !== nextOnlineQueueEntryForPreload()?.id
     ) {
       clearPreloadedMedia();
       return;
     }
     clearPreloadedMedia(playback.url);
-    preloadedOnlinePlayback = { index, playback, preparedAt: Date.now() };
+    preloadedOnlinePlayback = { entryId: entry.id, playback, preparedAt: Date.now() };
   } catch (error) {
     clearPreloadedMedia();
     if (!(error instanceof DOMException && error.name === "AbortError")) {
@@ -2350,9 +2130,9 @@ async function preloadOnlineQueueTrack(index: number, refresh = false) {
   }
 }
 
-function takePreloadedOnlinePlayback(index: number, track: OnlineTrack) {
+function takePreloadedOnlinePlayback(entryId: string | number, track: OnlineTrack) {
   const prepared = preloadedOnlinePlayback;
-  if (!prepared || prepared.index !== index || prepared.playback.track.key !== track.key) {
+  if (!prepared || prepared.entryId !== entryId || prepared.playback.track.key !== track.key) {
     return null;
   }
   preloadedOnlinePlayback = null;
@@ -2370,7 +2150,10 @@ function cancelOnlinePreload() {
   clearPreloadedMedia();
 }
 
-async function playStandaloneOnlineTrack(track: OnlineTrack, preservePlaybackQueues = false) {
+async function playStandaloneOnlineTrack(
+  track: OnlineTrack,
+  initialPosition = 0,
+) {
   const generation = beginPlaybackRequest();
   onlinePlaybackController?.abort();
   const controller = new AbortController();
@@ -2380,9 +2163,18 @@ async function playStandaloneOnlineTrack(track: OnlineTrack, preservePlaybackQue
   appError.value = null;
 
   try {
-    const playback = await resolveConfiguredOnlinePlayback(track, controller.signal, false);
-    if (!ownsOnlinePlaybackRequest(generation, controller)) return generation;
-    await applyOnlinePlayback(playback, generation, preservePlaybackQueues);
+    const prepared = activePlaybackEntryId.value
+      ? takePreloadedOnlinePlayback(activePlaybackEntryId.value, track)
+      : null;
+    const playback = prepared
+      ?? await resolveConfiguredOnlinePlayback(track, controller.signal, false);
+    if (!ownsOnlinePlaybackRequest(generation, controller)) return null;
+    const applied = await applyOnlinePlayback(
+      playback,
+      generation,
+      initialPosition,
+    );
+    return applied ? generation : null;
   } catch (error) {
     if (
       ownsPlaybackRequest(generation)
@@ -2390,23 +2182,22 @@ async function playStandaloneOnlineTrack(track: OnlineTrack, preservePlaybackQue
     ) {
       appError.value = playbackErrorMessage(error);
     }
+    return null;
   } finally {
     if (ownsOnlinePlaybackRequest(generation, controller)) {
       resolvingOnlineTrackKey.value = null;
       isPreparingPlayback.value = false;
     }
   }
-  return generation;
 }
 
 async function applyOnlinePlayback(
   playback: OnlinePlayback,
   generation: number,
-  preserveLocalQueue = false,
+  initialPosition = 0,
 ) {
   if (!ownsPlaybackRequest(generation)) return false;
   sampleListeningTime();
-  if (!preserveLocalQueue) clearLocalPlaybackQueue();
   activeTrack.value = null;
   activeOnlineTrack.value = playback.track;
   activeRemoteTitle.value = playback.track.title;
@@ -2435,6 +2226,7 @@ async function applyOnlinePlayback(
   const audio = audioElement.value;
   if (audio) {
     audio.volume = volume.value;
+    if (initialPosition) audio.currentTime = initialPosition;
     await audio.play();
     if (!ownsPlaybackRequest(generation)) return false;
     isPlaying.value = true;
@@ -2444,44 +2236,18 @@ async function applyOnlinePlayback(
 }
 
 async function togglePlayback() {
-  if (
-    !collectionQueueActive.value
-    && collectionQueue.value.length
-    && collectionQueueIndex.value >= 0
-    && (!audioElement.value || audioElement.value.ended)
-  ) {
-    collectionQueueActive.value = true;
-    await playCollectionQueueTrack(collectionQueueIndex.value);
+  const audio = audioElement.value;
+  const session = playbackSession.value;
+  if (session?.current && (!audio || audio.ended || activePlaybackEntryId.value !== session.current.id)) {
+    await playPlaybackSessionCurrent(session, session.positionSeconds);
     return;
   }
-  if (
-    collectionQueueActive.value
-    && collectionQueueIndex.value >= 0
-    && (!audioElement.value || audioElement.value.ended)
-  ) {
-    await playCollectionQueueTrack(collectionQueueIndex.value);
+  if (!session?.current && session?.canGoNext) {
+    const snapshot = await applyPlaybackSessionMutation(nextPlaybackSessionItem(true));
+    if (snapshot) await playPlaybackSessionCurrent(snapshot);
     return;
   }
-  if (
-    !localQueueActive.value &&
-    queuedLocalTrack.value &&
-    (!audioElement.value || audioElement.value.ended)
-  ) {
-    localQueueActive.value = true;
-    await playTrack(queuedLocalTrack.value);
-    return;
-  }
-  if (!audioElement.value) {
-    if (activeTrack.value) {
-      await playTrack(activeTrack.value);
-      return;
-    }
-
-    if (queuedLocalTrack.value) {
-      localQueueActive.value = true;
-      await playTrack(queuedLocalTrack.value);
-      return;
-    }
+  if (!audio) {
     if (activeSection.value === "collection") {
       await collectionBrowser.value?.startFirstTrack();
     } else {
@@ -2490,106 +2256,37 @@ async function togglePlayback() {
     return;
   }
 
-  if (audioElement.value.paused) {
-    await audioElement.value.play();
+  if (audio.paused) {
+    await audio.play();
     isPlaying.value = true;
   } else {
-    audioElement.value.pause();
+    audio.pause();
     isPlaying.value = false;
   }
 }
 
-function cyclePlaybackMode() {
-  switch (playbackMode.value) {
-    case "sequential":
-      playbackMode.value = "shuffle";
-      break;
-    case "shuffle":
-      playbackMode.value = "repeat";
-      break;
-    default:
-      playbackMode.value = "sequential";
-  }
+async function cyclePlaybackMode() {
+  if (playbackSessionLoading.value) return;
+  const mode = playbackMode.value === "sequential"
+    ? "shuffle"
+    : playbackMode.value === "shuffle" ? "repeat" : "sequential";
+  playbackSessionLoading.value = true;
+  const snapshot = await applyPlaybackSessionMutation(setPlaybackSessionMode(mode));
+  playbackSessionLoading.value = false;
+  if (snapshot) scheduleNextOnlinePreload();
 }
 
 async function playPreviousTrack() {
-  if (collectionQueueActive.value) {
-    const index = collectionQueueNavigationIndex("previous");
-    if (index >= 0) await playCollectionQueueTrack(index);
-    return;
-  }
-  if (remoteQueueActive.value) {
-    const index = remoteQueueNavigationIndex("previous");
-    if (index >= 0) await playOnlineQueueTrack(index);
-    return;
-  }
-  if (
-    !activeTrack.value ||
-    !localQueueActive.value ||
-    !localQueueId.value ||
-    localQueueIndex.value < 0 ||
-    localQueueTotal.value === 0
-  ) {
-    return;
-  }
-
-  let previousIndex: number;
-  if (playbackMode.value === "shuffle") {
-    previousIndex = randomQueueIndex(localQueueIndex.value, localQueueTotal.value);
-  } else if (localQueueIndex.value > 0) {
-    previousIndex = localQueueIndex.value - 1;
-  } else if (playbackMode.value === "repeat") {
-    previousIndex = localQueueTotal.value - 1;
-  } else {
-    return;
-  }
-
-  await playLocalQueueTrack(previousIndex);
+  if (!canGoPrevious.value) return;
+  const snapshot = await applyPlaybackSessionMutation(previousPlaybackSessionItem());
+  if (snapshot) await playPlaybackSessionCurrent(snapshot);
 }
 
-async function playNextTrack() {
-  if (playbackQueue.value.length) {
-    await playNextPlaybackQueueItem();
-    return;
-  }
-  if (collectionQueueActive.value) {
-    const index = collectionQueueNavigationIndex("next");
-    if (index >= 0) await playCollectionQueueTrack(index);
-    return;
-  }
-  if (remoteQueueActive.value) {
-    if (
-      remoteQueueLoadMore.value &&
-      remoteQueueIndex.value === remoteQueue.value.length - 1
-    ) {
-      await loadMoreRemoteQueue();
-    }
-    const index = remoteQueueNavigationIndex("next");
-    if (index >= 0) await playOnlineQueueTrack(index);
-    return;
-  }
-  if (
-    !activeTrack.value ||
-    !localQueueActive.value ||
-    !localQueueId.value ||
-    localQueueIndex.value < 0 ||
-    localQueueTotal.value === 0
-  ) {
-    return;
-  }
-
-  let nextIndex: number;
-  if (playbackMode.value === "shuffle") {
-    nextIndex = randomQueueIndex(localQueueIndex.value, localQueueTotal.value);
-  } else if (localQueueIndex.value < localQueueTotal.value - 1) {
-    nextIndex = localQueueIndex.value + 1;
-  } else if (playbackMode.value === "repeat") {
-    nextIndex = 0;
-  } else {
-    return;
-  }
-
-  await playLocalQueueTrack(nextIndex);
+async function playNextTrack(manual = true) {
+  if (!canGoNext.value) return;
+  await appendRemoteQueueBatchIfNeeded();
+  const snapshot = await applyPlaybackSessionMutation(nextPlaybackSessionItem(manual));
+  if (snapshot) await playPlaybackSessionCurrent(snapshot);
 }
 
 function loadMoreRemoteQueue() {
@@ -2599,9 +2296,14 @@ function loadMoreRemoteQueue() {
 
   const generation = remoteQueueGeneration;
   const load = loadMore()
-    .then((tracks) => {
+    .then(async (tracks) => {
       if (generation === remoteQueueGeneration && tracks.length) {
+        applyPlaybackSessionSnapshot(
+          await appendPlaybackSessionStream(tracks.map(onlinePlaybackInput)),
+        );
         scheduleNextOnlinePreload();
+      } else if (generation === remoteQueueGeneration && !tracks.length) {
+        applyPlaybackSessionSnapshot(await closePlaybackSessionStream());
       }
       return tracks;
     })
@@ -2615,61 +2317,14 @@ function loadMoreRemoteQueue() {
   return load;
 }
 
-function remoteQueueNavigationIndex(direction: "previous" | "next") {
-  const total = remoteQueue.value.length;
-  const current = remoteQueueIndex.value;
-  if (!total || current < 0) return -1;
-  if (playbackMode.value === "shuffle") {
-    if (total === 1) return 0;
-    const candidate = Math.floor(Math.random() * (total - 1));
-    return candidate >= current ? candidate + 1 : candidate;
+async function appendRemoteQueueBatchIfNeeded() {
+  if (
+    remoteQueueLoadMore.value
+    && playbackSession.value?.streamOpen
+    && displayedPlaybackQueue.value.length <= 1
+  ) {
+    await loadMoreRemoteQueue();
   }
-  const offset = direction === "previous" ? -1 : 1;
-  const candidate = current + offset;
-  if (candidate >= 0 && candidate < total) return candidate;
-  if (playbackMode.value !== "repeat") return -1;
-  return direction === "previous" ? total - 1 : 0;
-}
-
-async function playLocalQueueTrack(index: number) {
-  const queueId = localQueueId.value;
-  if (!queueId) {
-    return;
-  }
-  try {
-    const queuedTrack = await invoke<LibraryQueueTrack>(TAURI_COMMANDS.localLibraryQueueTrack, {
-      queueId,
-      index,
-    });
-    localQueueIndex.value = queuedTrack.index;
-    queuedLocalTrack.value = queuedTrack.track;
-    localQueueActive.value = true;
-    updateLocalQueueTracksForCurrentIndex();
-    await playTrack(queuedTrack.track);
-  } catch (error) {
-    appError.value = normalizeError(error);
-  }
-}
-
-function collectionQueueNavigationIndex(direction: "previous" | "next") {
-  const total = collectionQueue.value.length;
-  const current = collectionQueueIndex.value;
-  if (!total || current < 0) return -1;
-  if (playbackMode.value === "shuffle") return randomQueueIndex(current, total);
-  const offset = direction === "previous" ? -1 : 1;
-  const candidate = current + offset;
-  if (candidate >= 0 && candidate < total) return candidate;
-  if (playbackMode.value === "repeat") return direction === "previous" ? total - 1 : 0;
-  return -1;
-}
-
-function randomQueueIndex(currentIndex: number, total: number) {
-  if (total <= 1) {
-    return 0;
-  }
-
-  const candidate = Math.floor(Math.random() * (total - 1));
-  return candidate >= currentIndex ? candidate + 1 : candidate;
 }
 
 function updateVolume() {
@@ -2696,39 +2351,20 @@ async function onAudioEnded() {
   isPlaying.value = false;
   isPlaybackWaiting.value = false;
   playbackPosition.value = playbackDuration.value;
-  if (playbackQueue.value.length) {
-    await playNextPlaybackQueueItem();
-    return;
-  }
-  if (manualPlaybackActive.value) {
-    manualPlaybackActive.value = false;
-  }
-  if (
-    !collectionQueueActive.value
-    && collectionQueue.value.length
-    && collectionQueueIndex.value >= 0
-  ) {
-    collectionQueueActive.value = true;
-    await playCollectionQueueTrack(collectionQueueIndex.value);
-    return;
-  }
-  if (!localQueueActive.value && localQueueId.value && queuedLocalTrack.value) {
-    localQueueActive.value = true;
-    await playTrack(queuedLocalTrack.value);
-    return;
-  }
-  await playNextTrack();
+  await playNextTrack(false);
 }
 
 function onAudioPause() {
   pauseListeningTime();
   isPlaying.value = false;
   isPlaybackWaiting.value = false;
+  void setPlaybackSessionPaused(true).then(applyPlaybackSessionSnapshot).catch(() => {});
 }
 
 function onAudioPlay() {
   isPlaying.value = true;
   isPlaybackWaiting.value = false;
+  void setPlaybackSessionPaused(false).then(applyPlaybackSessionSnapshot).catch(() => {});
   if (activeTrack.value) {
     playCountTracker.start(performance.now());
   }
@@ -2760,9 +2396,14 @@ function onAudioTimeUpdate() {
     && playbackDuration.value - playbackPosition.value <= 30
     && Date.now() - preloadedOnlinePlayback.preparedAt > 90_000
   ) {
-    const index = preloadedOnlinePlayback.index;
+    const entry = nextOnlineQueueEntryForPreload();
     cancelOnlinePreload();
-    void preloadOnlineQueueTrack(index, true);
+    if (entry) void preloadOnlineQueueTrack(entry, true);
+  }
+  const currentSecond = Math.floor(playbackPosition.value);
+  if (Math.abs(currentSecond - lastPersistedPlaybackSecond) >= 5) {
+    lastPersistedPlaybackSecond = currentSecond;
+    void savePlaybackSessionProgress(playbackPosition.value);
   }
 }
 
@@ -2814,9 +2455,6 @@ async function recordPlayCount(track: LocalTrack) {
     if (activeTrack.value?.id === track.id) {
       activeTrack.value = { ...activeTrack.value, playCount };
     }
-    if (queuedLocalTrack.value?.id === track.id) {
-      queuedLocalTrack.value = { ...queuedLocalTrack.value, playCount };
-    }
   } catch (error) {
     appError.value = normalizeError(error);
   }
@@ -2841,6 +2479,8 @@ function seekPlaybackTo(position: number) {
   const nextPosition = Math.min(playbackDuration.value, Math.max(0, position));
   audio.currentTime = nextPosition;
   playbackPosition.value = nextPosition;
+  lastPersistedPlaybackSecond = Math.floor(nextPosition);
+  void savePlaybackSessionProgress(nextPosition);
 }
 
 function seekPlaybackBy(offset: number) {
@@ -2861,25 +2501,17 @@ async function onAudioError() {
     await invalidateCachedPlaybackUrl(failedUrl);
     if (activeOnlineUrl.value !== failedUrl) return;
   }
-  if (
-    activeOnlineTrack.value
-    && (remoteQueueActive.value || collectionQueueActive.value)
-  ) {
+  if (activeOnlineTrack.value && activePlaybackEntryId.value) {
     void recoverOnlinePlayback();
     return;
   }
   appError.value = t("Playback failed for the selected track.");
+  if (activePlaybackEntryId.value) await skipFailedPlaybackSessionItem();
 }
 
 async function recoverOnlinePlayback() {
   const track = activeOnlineTrack.value;
-  if (
-    !track
-    || (!remoteQueueActive.value && !collectionQueueActive.value)
-    || (remoteQueueActive.value && remoteQueueIndex.value < 0)
-  ) {
-    return;
-  }
+  if (!track) return;
   if (activeOnlineAttemptKey.value) {
     failedOnlineAttempts.set(
       `${track.key}::${activeOnlineAttemptKey.value}`,
@@ -2901,10 +2533,9 @@ async function reloadActiveOnlinePlayback(message: string) {
   const wasPlaying = isPlaying.value;
   sourceChangeMessage.value = message;
 
-  const generation = remoteQueueActive.value && remoteQueueIndex.value >= 0
-    ? await playOnlineQueueTrack(remoteQueueIndex.value)
-    : await playStandaloneOnlineTrack(track);
+  const generation = await playStandaloneOnlineTrack(track, priorPosition);
   if (generation === null || !ownsPlaybackRequest(generation)) {
+    if (activePlaybackEntryId.value) await skipFailedPlaybackSessionItem();
     return;
   }
 
@@ -3571,18 +3202,19 @@ function trackSubtitle(track: LocalTrack) {
         </div>
       </div>
 
-      <PlaybackQueue
-        :open="playbackQueueOpen"
-        :items="displayedPlaybackQueue"
-        :total="playbackQueueTotal"
-        :loading="localQueueTracksLoading"
-        :can-load-more="canLoadMoreLocalQueueTracks"
+    <PlaybackQueue
+      :open="playbackQueueOpen"
+      :current="playbackQueueCurrent"
+      :items="displayedPlaybackQueue"
+      :total="playbackQueueTotal"
+      :loading="playbackSessionLoading"
+      :can-load-more="canLoadMorePlaybackQueue"
         @close="playbackQueueOpen = false"
         @clear="clearUpcomingPlaybackQueue"
         @play="playDisplayedPlaybackQueueItem"
         @remove="removePlaybackQueueItem"
         @move="movePlaybackQueueItem"
-        @load-more="loadMoreLocalQueueTracks"
+      @load-more="loadMorePlaybackQueueItems"
       />
 
       <footer
@@ -3667,7 +3299,7 @@ function trackSubtitle(track: LocalTrack) {
                   :aria-label="t('Next track')"
                   :aria-keyshortcuts="appCommandAriaKeys('nextTrack')"
                   :title="shortcutTitle(t('Next'), 'nextTrack')"
-                  @click="playNextTrack"
+              @click="playNextTrack()"
                 >
                   <SkipForward :size="17" aria-hidden="true" />
                 </button>

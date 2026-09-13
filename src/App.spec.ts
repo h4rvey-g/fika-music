@@ -5,6 +5,13 @@ import App from "./App.vue";
 import type { PluginRecord } from "./lib/plugin-api";
 import type { AudioSourceRecord } from "./lib/audio-source-api";
 import type { OnlineTrack } from "./lib/online-music-api";
+import type {
+  LocalTrack,
+  PlaybackMode,
+  PlaybackQueueItem,
+  PlaybackSessionSnapshot,
+  PlaybackTrackInput,
+} from "./generated/bindings";
 import {
   COLLECTION_DRAG_TYPE,
   type MusicCollectionItem,
@@ -92,6 +99,94 @@ let listedAudioSources: AudioSourceRecord[] = [];
 let listedCollections: MusicCollectionSummary[] = [];
 let collectionBrowserPlaybackItems: MusicCollectionItem[] = [];
 let onlineMusicSettings = createOnlineMusicSettings();
+let mockPlaybackSession: PlaybackSessionSnapshot;
+let mockPlaybackContext: PlaybackQueueItem[] = [];
+let mockPlaybackHistory: PlaybackQueueItem[] = [];
+let mockPlaybackSequence = 0;
+let mockLocalTracks = new Map<number, LocalTrack>();
+
+function emptyPlaybackSession(): PlaybackSessionSnapshot {
+  return {
+    revision: 0,
+    mode: "sequential",
+    current: null,
+    upcoming: [],
+    upcomingOffset: 0,
+    upcomingTotal: 0,
+    historyCount: 0,
+    canGoPrevious: false,
+    canGoNext: false,
+    positionSeconds: 0,
+    paused: true,
+    streamOpen: false,
+    consecutiveFailures: 0,
+  };
+}
+
+function playbackItem(input: PlaybackTrackInput): PlaybackQueueItem {
+  mockPlaybackSequence += 1;
+  return input.kind === "online"
+    ? { kind: "online", id: `event-${mockPlaybackSequence}`, track: input.track }
+    : {
+        kind: "local",
+        id: `event-${mockPlaybackSequence}`,
+        track: mockLocalTracks.get(input.trackId)
+          ?? createLocalTrack({ id: input.trackId, title: `Track ${input.trackId}` }),
+      };
+}
+
+function syncMockPlaybackSession() {
+  mockPlaybackSession = {
+    ...mockPlaybackSession,
+    revision: mockPlaybackSession.revision + 1,
+    upcomingTotal: mockPlaybackSession.upcoming.length,
+    historyCount: mockPlaybackHistory.length,
+    canGoPrevious: mockPlaybackHistory.length > 0,
+    canGoNext: mockPlaybackSession.upcoming.length > 0
+      || mockPlaybackSession.streamOpen
+      || (mockPlaybackSession.mode === "repeat" && mockPlaybackContext.length > 0),
+  };
+  return structuredClone(mockPlaybackSession);
+}
+
+function replaceMockPlaybackSession(
+  items: PlaybackQueueItem[],
+  startIndex: number,
+  autoplay: boolean,
+  mode: PlaybackMode,
+  streamOpen = false,
+) {
+  mockPlaybackContext = [...items];
+  mockPlaybackHistory = [];
+  const current = items[startIndex] ?? null;
+  let upcoming = items.slice(startIndex + 1);
+  if (mode === "repeat") upcoming = [...upcoming, ...items.slice(0, startIndex + 1)];
+  mockPlaybackSession = {
+    ...emptyPlaybackSession(),
+    mode,
+    current,
+    upcoming,
+    paused: !autoplay,
+    streamOpen,
+  };
+  return syncMockPlaybackSession();
+}
+
+function localQueueItems(queueId: string) {
+  if (queueId === "library-queue-from-first") {
+    return [
+      createLocalTrack({ id: 1, title: "Local Current" }),
+      createLocalTrack({ id: 2, title: "Local Next" }),
+      createLocalTrack({ id: 3, title: "Local Last" }),
+    ];
+  }
+  if (queueId === "first-queue") return [mockLocalTracks.get(1) ?? createLocalTrack({ id: 1, title: "First" })];
+  if (queueId === "second-queue") return [mockLocalTracks.get(2) ?? createLocalTrack({ id: 2, title: "Second" })];
+  return [
+    mockLocalTracks.get(1) ?? createLocalTrack({ id: 1, title: "Track 1" }),
+    mockLocalTracks.get(2) ?? createLocalTrack({ id: 2, title: "Second" }),
+  ];
+}
 
 vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => path,
@@ -238,6 +333,15 @@ describe("application shell", () => {
     listedCollections = [];
     collectionBrowserPlaybackItems = [];
     onlineMusicSettings = createOnlineMusicSettings();
+    mockPlaybackSession = emptyPlaybackSession();
+    mockPlaybackContext = [];
+    mockPlaybackHistory = [];
+    mockPlaybackSequence = 0;
+    mockLocalTracks = new Map([
+      [1, createLocalTrack({ id: 1, title: "Track 1" })],
+      [2, createLocalTrack({ id: 2, title: "Second" })],
+      [3, createLocalTrack({ id: 3, title: "Local Last" })],
+    ]);
     localStorage.clear();
     document.documentElement.removeAttribute("data-theme");
     document.documentElement.removeAttribute("style");
@@ -259,6 +363,129 @@ describe("application shell", () => {
     tauriMocks.getByLabel.mockResolvedValue(null);
     config.global.plugins = [createTestQueryPlugin()];
     tauriMocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_playback_session") {
+        const limit = Number(args?.limit ?? mockPlaybackSession.upcoming.length);
+        const offset = Number(args?.offset ?? 0);
+        return Promise.resolve({
+          ...structuredClone(mockPlaybackSession),
+          upcoming: structuredClone(mockPlaybackSession.upcoming.slice(offset, offset + limit)),
+          upcomingOffset: offset,
+        });
+      }
+      if (command === "replace_playback_session") {
+        const items = (args?.tracks as PlaybackTrackInput[]).map(playbackItem);
+        return Promise.resolve(replaceMockPlaybackSession(
+          items,
+          Number(args?.startIndex ?? 0),
+          Boolean(args?.autoplay),
+          args?.mode as PlaybackMode,
+          Boolean(args?.streamOpen),
+        ));
+      }
+      if (command === "replace_local_playback_session") {
+        const items = localQueueItems(String(args?.queueId)).map((track) => {
+          mockPlaybackSequence += 1;
+          return { kind: "local" as const, id: `event-${mockPlaybackSequence}`, track };
+        });
+        return Promise.resolve(replaceMockPlaybackSession(
+          items,
+          Number(args?.startIndex ?? 0),
+          Boolean(args?.autoplay),
+          args?.mode as PlaybackMode,
+        ));
+      }
+      if (command === "play_next_in_playback_session") {
+        const additions = (args?.tracks as PlaybackTrackInput[]).map(playbackItem);
+        mockPlaybackSession.upcoming = [...additions, ...mockPlaybackSession.upcoming];
+        return Promise.resolve(syncMockPlaybackSession());
+      }
+      if (command === "append_playback_session_stream") {
+        mockPlaybackSession.upcoming.push(
+          ...(args?.tracks as PlaybackTrackInput[]).map(playbackItem),
+        );
+        return Promise.resolve(syncMockPlaybackSession());
+      }
+      if (command === "close_playback_session_stream") {
+        mockPlaybackSession.streamOpen = false;
+        return Promise.resolve(syncMockPlaybackSession());
+      }
+      if (command === "set_playback_session_mode") {
+        mockPlaybackSession.mode = args?.mode as PlaybackMode;
+        if (
+          mockPlaybackSession.mode === "repeat"
+          && !mockPlaybackSession.upcoming.length
+          && mockPlaybackContext.length
+        ) {
+          mockPlaybackSession.upcoming = [...mockPlaybackContext];
+        }
+        return Promise.resolve(syncMockPlaybackSession());
+      }
+      if (command === "move_playback_session_item") {
+        const [item] = mockPlaybackSession.upcoming.splice(Number(args?.from), 1);
+        if (item) mockPlaybackSession.upcoming.splice(Number(args?.to), 0, item);
+        return Promise.resolve(syncMockPlaybackSession());
+      }
+      if (command === "remove_playback_session_item") {
+        mockPlaybackSession.upcoming.splice(Number(args?.index), 1);
+        return Promise.resolve(syncMockPlaybackSession());
+      }
+      if (command === "clear_playback_session_upcoming") {
+        mockPlaybackSession.upcoming = [];
+        return Promise.resolve(syncMockPlaybackSession());
+      }
+      if (command === "select_playback_session_item") {
+        const selected = mockPlaybackSession.upcoming[Number(args?.index)];
+        if (selected) {
+          if (mockPlaybackSession.current) mockPlaybackHistory.push(mockPlaybackSession.current);
+          mockPlaybackSession.current = selected;
+          mockPlaybackSession.upcoming = mockPlaybackSession.upcoming.slice(Number(args?.index) + 1);
+          mockPlaybackSession.positionSeconds = 0;
+        }
+        return Promise.resolve(syncMockPlaybackSession());
+      }
+      if (command === "next_playback_session_item") {
+        if (!mockPlaybackSession.upcoming.length && mockPlaybackSession.mode === "repeat") {
+          mockPlaybackSession.upcoming = [...mockPlaybackContext];
+        }
+        const next = mockPlaybackSession.upcoming.shift() ?? null;
+        if (next) {
+          if (mockPlaybackSession.current) mockPlaybackHistory.push(mockPlaybackSession.current);
+          mockPlaybackSession.current = next;
+          mockPlaybackSession.positionSeconds = 0;
+        }
+        return Promise.resolve(syncMockPlaybackSession());
+      }
+      if (command === "previous_playback_session_item") {
+        const previous = mockPlaybackHistory.pop() ?? null;
+        if (previous) {
+          if (mockPlaybackSession.current) {
+            mockPlaybackSession.upcoming.unshift(mockPlaybackSession.current);
+          }
+          mockPlaybackSession.current = previous;
+          mockPlaybackSession.positionSeconds = 0;
+        }
+        return Promise.resolve(syncMockPlaybackSession());
+      }
+      if (command === "fail_playback_session_current") {
+        mockPlaybackSession.consecutiveFailures += 1;
+        if (mockPlaybackSession.consecutiveFailures < 3) {
+          mockPlaybackSession.current = mockPlaybackSession.upcoming.shift() ?? null;
+        }
+        return Promise.resolve(syncMockPlaybackSession());
+      }
+      if (command === "mark_playback_session_started") {
+        mockPlaybackSession.paused = false;
+        mockPlaybackSession.consecutiveFailures = 0;
+        return Promise.resolve(syncMockPlaybackSession());
+      }
+      if (command === "set_playback_session_paused") {
+        mockPlaybackSession.paused = Boolean(args?.paused);
+        return Promise.resolve(syncMockPlaybackSession());
+      }
+      if (command === "save_playback_session_progress") {
+        mockPlaybackSession.positionSeconds = Number(args?.positionSeconds ?? 0);
+        return Promise.resolve(null);
+      }
       if (command === "get_scan_status") {
         return Promise.resolve(createScanStatus());
       }
@@ -683,6 +910,7 @@ describe("application shell", () => {
     };
     listedCollections = [collection];
     const track = createLocalTrack({ id: 7, title: "First Song" });
+    mockLocalTracks.set(track.id, track);
     const item: MusicCollectionItem = {
       id: "item-1",
       position: 0,
@@ -732,6 +960,8 @@ describe("application shell", () => {
   it("keeps the newest local track when media source requests resolve out of order", async () => {
     const firstTrack = createLocalTrack({ id: 1, title: "First" });
     const secondTrack = createLocalTrack({ id: 2, title: "Second" });
+    mockLocalTracks.set(firstTrack.id, firstTrack);
+    mockLocalTracks.set(secondTrack.id, secondTrack);
     let resolveFirstSource!: (source: { filePath: string }) => void;
     const firstSource = new Promise<{ filePath: string }>((resolve) => {
       resolveFirstSource = resolve;
@@ -897,6 +1127,7 @@ describe("application shell", () => {
       smartRules: null,
     }];
     const track = createLocalTrack({ id: 7, title: "Queued Song" });
+    mockLocalTracks.set(track.id, track);
     const item: MusicCollectionItem = {
       id: "item-1",
       position: 0,
@@ -1708,7 +1939,8 @@ describe("application shell", () => {
     };
     dynamicThemeMocks.extractCoverTheme.mockResolvedValue(coverTheme);
     localStorage.setItem(UI_PREFERENCES_STORAGE_KEY, JSON.stringify({ theme: "dynamic" }));
-    tauriMocks.invoke.mockImplementation((command: string) => {
+    const defaultInvoke = tauriMocks.invoke.getMockImplementation();
+    tauriMocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "get_scan_status") return Promise.resolve(createScanStatus());
       if (command === "list_plugins") return Promise.resolve([]);
       if (command === "list_audio_sources") return Promise.resolve([]);
@@ -1727,7 +1959,7 @@ describe("application shell", () => {
           lyricsError: null,
         });
       }
-      return Promise.resolve(null);
+      return defaultInvoke?.(command, args);
     });
 
     const wrapper = mount(App);
@@ -1812,7 +2044,8 @@ describe("application shell", () => {
       show: vi.fn().mockResolvedValue(undefined),
       hide: vi.fn().mockResolvedValue(undefined),
     });
-    tauriMocks.invoke.mockImplementation((command: string) => {
+    const defaultInvoke = tauriMocks.invoke.getMockImplementation();
+    tauriMocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "get_scan_status") return Promise.resolve(createScanStatus());
       if (command === "list_plugins") return Promise.resolve([]);
       if (command === "list_audio_sources") return Promise.resolve([]);
@@ -1841,7 +2074,7 @@ describe("application shell", () => {
           },
         });
       }
-      return Promise.resolve(null);
+      return defaultInvoke?.(command, args);
     });
     const wrapper = mount(App);
     await flushPromises();
@@ -1874,7 +2107,8 @@ describe("application shell", () => {
   });
 
   it("seeks the audio timeline from the now playing lyrics panel", async () => {
-    tauriMocks.invoke.mockImplementation((command: string) => {
+    const defaultInvoke = tauriMocks.invoke.getMockImplementation();
+    tauriMocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "get_scan_status") return Promise.resolve(createScanStatus());
       if (command === "list_plugins") return Promise.resolve([]);
       if (command === "list_audio_sources") return Promise.resolve([]);
@@ -1889,7 +2123,7 @@ describe("application shell", () => {
       if (command === "local_track_playback_details") {
         return Promise.resolve({ coverDataUrl: null, lyrics: null, lyricsError: null });
       }
-      return Promise.resolve(null);
+      return defaultInvoke?.(command, args);
     });
     const wrapper = mount(App);
     await flushPromises();
@@ -1914,7 +2148,8 @@ describe("application shell", () => {
   });
 
   it("navigates local tracks and wraps at the end in repeat mode", async () => {
-    tauriMocks.invoke.mockImplementation((command: string, payload?: { trackId?: number; index?: number }) => {
+    const defaultInvoke = tauriMocks.invoke.getMockImplementation();
+    tauriMocks.invoke.mockImplementation((command: string, payload?: Record<string, unknown>) => {
       if (command === "get_scan_status") {
         return Promise.resolve(createScanStatus({
           folderPath: "/music",
@@ -1943,7 +2178,7 @@ describe("application shell", () => {
       if (command === "list_audio_sources") {
         return Promise.resolve(listedAudioSources);
       }
-      return Promise.resolve(null);
+      return defaultInvoke?.(command, payload);
     });
 
     const wrapper = mount(App);
@@ -1961,7 +2196,7 @@ describe("application shell", () => {
 
     await nextButton.trigger("click");
     await flushPromises();
-    expect(tauriMocks.invoke).toHaveBeenLastCalledWith("local_track_playback_details", {
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("local_track_playback_details", {
       trackId: 1,
     });
     expect(wrapper.get('button[aria-label="Previous track"]').attributes("disabled")).toBeUndefined();
@@ -1985,10 +2220,11 @@ describe("application shell", () => {
     await wrapper.get('button[aria-label="Play Second"]').trigger("click");
     await flushPromises();
 
+    const queuedTrack = createLocalTrack({ id: 1, title: "Queued First" });
+    mockLocalTracks.set(queuedTrack.id, queuedTrack);
     wrapper.getComponent({ name: "LibraryBrowser" }).vm.$emit(
       "queueTracks",
-      [createLocalTrack({ id: 1, title: "Queued First" })],
-      "next",
+      [queuedTrack],
     );
     await flushPromises();
 
@@ -2094,9 +2330,32 @@ describe("application shell", () => {
     wrapper.unmount();
   });
 
-  it("routes system previous and next media actions through the local queue", async () => {
+  it("loads a large playback queue in stable pages", async () => {
+    mockPlaybackSession.upcoming = Array.from({ length: 250 }, (_, index) => ({
+      kind: "local" as const,
+      id: `large-${index}`,
+      track: createLocalTrack({ id: index + 1, title: `Large ${index + 1}` }),
+    }));
+    syncMockPlaybackSession();
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get('[data-testid="playback-queue-toggle"]').trigger("click");
+
+    expect(wrapper.findAll("[data-playback-queue-index]")).toHaveLength(200);
+    const loadMore = wrapper.findAll("button")
+      .find((button) => button.text().includes("Load more"));
+    await loadMore?.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.findAll("[data-playback-queue-index]")).toHaveLength(250);
+    expect(wrapper.findAll("[data-playback-queue-index]")[249]?.text()).toContain("Large 250");
+    wrapper.unmount();
+  });
+
+  it("routes system previous and next media actions through the playback session", async () => {
+    const defaultInvoke = tauriMocks.invoke.getMockImplementation();
     tauriMocks.invoke.mockImplementation(
-      (command: string, payload?: { trackId?: number; index?: number }) => {
+      (command: string, payload?: Record<string, unknown>) => {
         if (command === "get_scan_status") {
           return Promise.resolve(createScanStatus({
             folderPath: "/music",
@@ -2108,20 +2367,13 @@ describe("application shell", () => {
         if (command === "local_track_media_source") {
           return Promise.resolve({ filePath: `/music/${payload?.trackId ?? 1}.mp3` });
         }
-        if (command === "local_library_queue_track") {
-          const index = payload?.index ?? 0;
-          return Promise.resolve({
-            index,
-            track: createLocalTrack({ id: index + 1, title: `Track ${index + 1}` }),
-          });
-        }
         if (command === "local_track_playback_details") {
           return Promise.resolve({ coverDataUrl: null, lyrics: null, lyricsError: null });
         }
         if (command === "list_plugins") return Promise.resolve(listedPlugins);
         if (command === "list_audio_sources") return Promise.resolve(listedAudioSources);
         if (command === "list_music_collections") return Promise.resolve(listedCollections);
-        return Promise.resolve(null);
+        return defaultInvoke?.(command, payload);
       },
     );
 
@@ -2130,19 +2382,21 @@ describe("application shell", () => {
     await wrapper.get('button[aria-label="Play Second"]').trigger("click");
     await flushPromises();
 
-    mediaSessionMocks.handlers.get("previoustrack")?.();
+    const modeButton = wrapper.get('[data-testid="playback-mode"]');
+    await modeButton.trigger("click");
     await flushPromises();
-    expect(tauriMocks.invoke).toHaveBeenCalledWith("local_library_queue_track", {
-      queueId: "library-queue",
-      index: 0,
-    });
+    await modeButton.trigger("click");
+    await flushPromises();
 
     mediaSessionMocks.handlers.get("nexttrack")?.();
     await flushPromises();
-    expect(tauriMocks.invoke).toHaveBeenCalledWith("local_library_queue_track", {
-      queueId: "library-queue",
-      index: 1,
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("next_playback_session_item", {
+      manual: true,
     });
+
+    mediaSessionMocks.handlers.get("previoustrack")?.();
+    await flushPromises();
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("previous_playback_session_item");
 
     wrapper.unmount();
     expect(mediaSessionMocks.handlers.get("previoustrack")).toBeNull();

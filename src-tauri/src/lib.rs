@@ -44,6 +44,7 @@ pub mod online_music;
 mod online_settings_commands;
 mod playback_cache;
 mod playback_commands;
+mod playback_session;
 pub mod plugin_system;
 mod registry_support;
 mod source_request_registry;
@@ -84,7 +85,16 @@ use online_settings_commands::{
     update_online_music_settings,
 };
 use playback_commands::{
-    local_track_media_source, local_track_playback_details, resolve_remote_track_lyrics,
+    append_playback_session_stream, clear_playback_session_upcoming, close_playback_session_stream,
+    fail_playback_session_current, get_playback_session, local_track_media_source,
+    local_track_playback_details, mark_playback_session_started, move_playback_session_item,
+    next_playback_session_item, play_next_in_playback_session, previous_playback_session_item,
+    remove_playback_session_item, replace_local_playback_session, replace_playback_session,
+    resolve_remote_track_lyrics, save_playback_session_progress, select_playback_session_item,
+    set_playback_session_mode, set_playback_session_paused,
+};
+pub use playback_session::{
+    PlaybackMode, PlaybackQueueItem, PlaybackSessionSnapshot, PlaybackTrackInput,
 };
 
 const SCAN_PROGRESS_EVENT: &str = "library:scan-progress";
@@ -143,6 +153,23 @@ macro_rules! with_tauri_commands {
             local_track_media_source,
             local_track_playback_details,
             resolve_remote_track_lyrics,
+            get_playback_session,
+            replace_playback_session,
+            replace_local_playback_session,
+            play_next_in_playback_session,
+            append_playback_session_stream,
+            close_playback_session_stream,
+            set_playback_session_mode,
+            move_playback_session_item,
+            remove_playback_session_item,
+            clear_playback_session_upcoming,
+            select_playback_session_item,
+            next_playback_session_item,
+            previous_playback_session_item,
+            fail_playback_session_current,
+            mark_playback_session_started,
+            set_playback_session_paused,
+            save_playback_session_progress,
             set_menu_bar_lyrics,
             get_online_music_settings,
             update_online_music_settings,
@@ -284,6 +311,8 @@ enum AppError {
     OnlineExecution(#[from] online_execution::OnlineExecutionError),
     #[error("playback cache error: {0}")]
     PlaybackCache(#[from] playback_cache::PlaybackCacheError),
+    #[error("playback session error: {0}")]
+    PlaybackSession(#[from] playback_session::PlaybackSessionError),
     #[error("yt-dlp sidecar error: {0}")]
     YtDlp(#[from] yt_dlp_sidecar::YtDlpSidecarError),
     #[error("LX V8 sidecar error: {0}")]
@@ -405,6 +434,7 @@ struct AppState {
     download_source_router: Mutex<download_source_router::DownloadSourceRouter>,
     online_music_cache: Arc<online_music::OnlineMusicCache>,
     playback_cache: Arc<playback_cache::PlaybackCache>,
+    playback_session: Mutex<playback_session::PlaybackSession>,
     online_executor: Arc<online_execution::OnlineExecutor>,
     yt_dlp_sidecar: Arc<yt_dlp_sidecar::YtDlpSidecar>,
     audio_source_registry: Mutex<AudioSourceRegistry>,
@@ -496,6 +526,21 @@ impl AppState {
             library::LibraryService::load(&connection)?
         };
         let library = Arc::new(Mutex::new(library));
+        let mut playback_session = {
+            let connection = db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
+            playback_session::PlaybackSession::load(&connection)?
+        };
+        let session_changed = {
+            let library = library
+                .lock()
+                .map_err(|_| AppError::StatePoisoned("library"))?;
+            playback_session
+                .prune_unavailable_local_tracks(|track_id| library.track(track_id).is_some())
+        };
+        if session_changed {
+            let connection = db.lock().map_err(|_| AppError::StatePoisoned("db"))?;
+            playback_session.persist(&connection)?;
+        }
         let album_art = Arc::new(album_art::AlbumArtService::new(
             Arc::clone(&db),
             Arc::clone(&library),
@@ -601,6 +646,7 @@ impl AppState {
             ),
             online_music_cache: Arc::new(online_music::OnlineMusicCache::default()),
             playback_cache,
+            playback_session: Mutex::new(playback_session),
             online_executor,
             yt_dlp_sidecar,
             audio_source_registry: Mutex::new(audio_source_registry),

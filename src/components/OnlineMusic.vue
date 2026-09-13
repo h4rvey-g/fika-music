@@ -178,7 +178,7 @@ const emit = defineEmits<{
     appendable: boolean,
     loadMore?: () => Promise<OnlineTrack[]>,
   ];
-  queueTracks: [tracks: OnlineTrack[], placement: "next" | "last"];
+  queueTracks: [tracks: OnlineTrack[]];
   openAudioSources: [];
   downloadCompleted: [destination: string];
   togglePlayback: [];
@@ -187,8 +187,8 @@ const emit = defineEmits<{
   createCollection: [tracks: OnlineTrack[]];
 }>();
 
-function handleQueueTracks(tracks: OnlineTrack[], placement: "next" | "last") {
-  emit("queueTracks", tracks, placement);
+function handleQueueTracks(tracks: OnlineTrack[]) {
+  emit("queueTracks", tracks);
 }
 
 const sections: Array<{ id: OnlineSearchSection; label: string; icon: typeof Music2 }> = [

@@ -96,7 +96,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   play: [items: MusicCollectionItem[], index: number, autoplay: boolean];
-  queueTracks: [items: MusicCollectionItem[], placement: "next" | "last"];
+  queueTracks: [items: MusicCollectionItem[]];
   addToCollection: [source: CollectionItemSelection];
   createCollection: [source: CollectionItemSelection];
   changed: [collection: MusicCollectionSummary];
@@ -493,10 +493,10 @@ function playCollection() {
   if (tracks.length) emitQueue(tracks, tracks[0].item.id, true);
 }
 
-function queueSelection(placement: "next" | "last") {
+function queueSelection() {
   const tracks = selectedTracks.value;
   if (!tracks.length) return;
-  emit("queueTracks", tracks.map((track) => track.item), placement);
+  emit("queueTracks", tracks.map((track) => track.item));
   closeMenus();
 }
 
@@ -1544,8 +1544,7 @@ defineExpose({
   >
     <li><button type="button" @click="playSelection(true)"><Play :size="16" aria-hidden="true" />{{ t("Play selection") }}</button></li>
     <li><button type="button" @click="playSelection(false)"><ListMusic :size="16" aria-hidden="true" />{{ t("Set playback queue") }}</button></li>
-    <li><button type="button" @click="queueSelection('next')"><ListPlus :size="16" aria-hidden="true" />{{ t("Play next") }}</button></li>
-    <li><button type="button" @click="queueSelection('last')"><ListMusic :size="16" aria-hidden="true" />{{ t("Add to queue") }}</button></li>
+              <li><button type="button" @click="queueSelection"><ListPlus :size="16" aria-hidden="true" />{{ t("Play next") }}</button></li>
     <li><button type="button" @click="requestCollectionAction(false)"><ListPlus :size="16" aria-hidden="true" />{{ t("Add selection to Collection") }}</button></li>
     <li><button type="button" @click="requestCollectionAction(true)"><FolderPlus :size="16" aria-hidden="true" />{{ t("New Collection from selection") }}</button></li>
     <li v-if="selectedLocalItemIds.length"><button type="button" :disabled="metadataTask?.state === 'running' || metadataTask?.state === 'paused'" @click="requestMetadataLookup"><Tags :size="16" aria-hidden="true" />{{ t("Look up metadata") }}</button></li>

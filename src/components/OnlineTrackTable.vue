@@ -34,7 +34,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   play: [track: OnlineTrack];
-  queueTracks: [tracks: OnlineTrack[], placement: "next" | "last"];
+  queueTracks: [tracks: OnlineTrack[]];
   download: [track: OnlineTrack, artwork: HTMLElement | null];
   downloadSelection: [tracks: OnlineTrack[]];
   favorite: [track: OnlineTrack];
@@ -141,9 +141,9 @@ function downloadSelection() {
   closeContextMenu();
 }
 
-function queueSelection(placement: "next" | "last") {
+function queueSelection() {
   if (selectedTracks.value.length) {
-    emit("queueTracks", [...selectedTracks.value], placement);
+    emit("queueTracks", [...selectedTracks.value]);
   }
   closeContextMenu();
 }
@@ -405,27 +405,15 @@ function artistActionId(track: OnlineTrack, artist: string) {
         </button>
       </li>
       <li>
-        <button type="button" @click="queueSelection('next')">
+              <button type="button" @click="queueSelection">
           <ListPlus :size="16" aria-hidden="true" />
           {{ t("Play next") }}
         </button>
       </li>
       <li>
-        <button type="button" @click="queueSelection('last')">
-          <Music2 :size="16" aria-hidden="true" />
-          {{ t("Add to queue") }}
-        </button>
-      </li>
-      <li>
-        <button type="button" @click="queueSelection('next')">
+              <button type="button" @click="queueSelection">
           <ListPlus :size="16" aria-hidden="true" />
           {{ t("Play next") }}
-        </button>
-      </li>
-      <li>
-        <button type="button" @click="queueSelection('last')">
-          <Music2 :size="16" aria-hidden="true" />
-          {{ t("Add to queue") }}
         </button>
       </li>
       <li>

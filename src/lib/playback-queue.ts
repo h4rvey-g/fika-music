@@ -1,28 +1,12 @@
-import type { LocalTrack, MusicCollectionItem } from "../generated/bindings";
-import type { OnlineTrack } from "./online-music-api";
+import type {
+  LocalTrack,
+  MusicCollectionItem,
+  OnlineTrack,
+  PlaybackQueueItem,
+  PlaybackTrackInput,
+} from "../generated/bindings";
 
-export type PlaybackQueuePlacement = "next" | "last";
-
-export type PlaybackQueueContext = {
-  kind: "local" | "online" | "collection";
-  index: number;
-};
-
-type PlaybackQueueItemBase = {
-  id: string;
-  context?: PlaybackQueueContext;
-};
-
-export type PlaybackQueueItem = PlaybackQueueItemBase & (
-  | {
-      kind: "local";
-      track: LocalTrack;
-    }
-  | {
-      kind: "online";
-      track: OnlineTrack;
-    }
-);
+export type { PlaybackQueueItem } from "../generated/bindings";
 
 export type PlaybackQueueTrack = LocalTrack | OnlineTrack;
 
@@ -39,15 +23,14 @@ export function playbackQueueItemSubtitle(item: PlaybackQueueItem) {
     || "Remote track";
 }
 
-export function playbackQueueItemFromCollectionItem(
+export function playbackTrackInputFromCollectionItem(
   item: MusicCollectionItem,
-  id: string,
-): PlaybackQueueItem | null {
+): PlaybackTrackInput | null {
   if (item.localTrack) {
-    return { id, kind: "local", track: item.localTrack };
+    return { kind: "local", trackId: item.localTrack.id };
   }
   if (item.onlineTrack) {
-    return { id, kind: "online", track: item.onlineTrack };
+    return { kind: "online", track: item.onlineTrack };
   }
   return null;
 }

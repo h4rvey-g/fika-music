@@ -3,7 +3,7 @@ use rusqlite_migration::{Migrations, M};
 use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
-const CURRENT_SCHEMA_VERSION: i64 = 13;
+const CURRENT_SCHEMA_VERSION: i64 = 14;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CredentialStoreError {
@@ -372,6 +372,15 @@ fn migrations() -> Migrations<'static> {
             )?;
             Ok(())
         }),
+        M::up(
+            "
+            CREATE TABLE IF NOT EXISTS playback_session_state (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                state_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            ",
+        ),
     ])
 }
 
@@ -469,6 +478,7 @@ mod tests {
         assert!(has_table(&connection, "account_credentials"));
         assert!(has_table(&connection, "music_collections"));
         assert!(has_table(&connection, "music_collection_items"));
+        assert!(has_table(&connection, "playback_session_state"));
         assert!(has_column(
             &connection,
             "music_collections",

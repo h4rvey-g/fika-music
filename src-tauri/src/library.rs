@@ -712,6 +712,17 @@ impl LibraryService {
             .collect()
     }
 
+    pub(crate) fn playback_queue_track_ids(
+        &self,
+        queue_id: &str,
+    ) -> Result<Vec<i64>, LibraryError> {
+        self.playback_queues
+            .iter()
+            .find(|queue| queue.id == queue_id)
+            .map(|queue| queue.track_ids.clone())
+            .ok_or(LibraryError::QueueExpired)
+    }
+
     pub fn update_play_count(&mut self, track_id: i64, play_count: i64) {
         if let Some(index) = self.track_by_id.get(&track_id).copied() {
             self.tracks[index].track.play_count = play_count;
@@ -846,7 +857,7 @@ impl LibraryService {
             .ok_or(LibraryError::SnapshotExpired)
     }
 
-    fn track(&self, id: i64) -> Option<&LocalTrack> {
+    pub(crate) fn track(&self, id: i64) -> Option<&LocalTrack> {
         self.track_by_id
             .get(&id)
             .map(|index| &self.tracks[*index].track)

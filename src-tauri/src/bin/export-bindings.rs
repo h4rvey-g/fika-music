@@ -34,7 +34,8 @@ use fika_music_lib::{
     LibraryTaskState, LibraryTextField, LibraryViewItem, LibraryViewItemKind, LibraryViewRange,
     LocalTrack, MediaSource, MetadataLookupItemResult, MetadataLookupTaskStatus,
     MusicCollectionDetail, MusicCollectionItem, MusicCollectionItemKind, MusicCollectionMutation,
-    MusicCollectionSummary, NeteaseCommandError, PluginCommandError, RemoteCommandError,
+    MusicCollectionSummary, NeteaseCommandError, PlaybackMode, PlaybackQueueItem,
+    PlaybackSessionSnapshot, PlaybackTrackInput, PluginCommandError, RemoteCommandError,
     ScanProgressEvent, ScanStatus, SmartCollectionField, SmartCollectionOperator,
     SmartCollectionRule, SmartCollectionRules, TAURI_COMMAND_NAMES,
 };
@@ -111,6 +112,10 @@ fn generate(output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     export_all::<SmartCollectionRule>(&config)?;
     export_all::<SmartCollectionRules>(&config)?;
     export_all::<MediaSource>(&config)?;
+    export_all::<PlaybackMode>(&config)?;
+    export_all::<PlaybackTrackInput>(&config)?;
+    export_all::<PlaybackQueueItem>(&config)?;
+    export_all::<PlaybackSessionSnapshot>(&config)?;
     export_all::<LocalTrackPlaybackDetails>(&config)?;
     export_all::<TrackLyricsQuery>(&config)?;
     export_all::<RemoteCommandError>(&config)?;

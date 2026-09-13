@@ -11,7 +11,7 @@ const items = [
 describe("PlaybackQueue", () => {
   it("shows upcoming tracks and emits queue actions", async () => {
     const wrapper = mount(PlaybackQueue, {
-      props: { open: true, items },
+      props: { open: true, current: null, items },
     });
 
     expect(wrapper.get("#playback-queue-title").text()).toBe("Playback queue");
@@ -28,7 +28,7 @@ describe("PlaybackQueue", () => {
 
   it("emits a move when a track is dropped at another position", async () => {
     const wrapper = mount(PlaybackQueue, {
-      props: { open: true, items },
+      props: { open: true, current: null, items },
     });
 
     await wrapper.findAll("[data-playback-queue-index]")[0].trigger("dragstart");
@@ -37,21 +37,21 @@ describe("PlaybackQueue", () => {
     expect(wrapper.emitted("move")?.[0]).toEqual([0, 1]);
   });
 
-  it("keeps playback context tracks read-only and loads more on request", async () => {
+  it("shows a read-only current track while every upcoming item remains editable", async () => {
     const wrapper = mount(PlaybackQueue, {
       props: {
         open: true,
-        items: [{
-          ...items[0],
-          context: { kind: "local" as const, index: 1 },
-        }],
+        current: items[1],
+        items: [items[0]],
         total: 3,
         canLoadMore: true,
       },
     });
 
     expect(wrapper.text()).toContain("3 tracks in queue");
-    expect(wrapper.find('button[aria-label^="Remove "]').exists()).toBe(false);
+    expect(wrapper.text()).toContain("Now playing");
+    expect(wrapper.text()).toContain("Online song");
+    expect(wrapper.find('button[aria-label="Remove Local song from queue"]').exists()).toBe(true);
 
     await wrapper.get('button[aria-label="Play Local song"]').trigger("click");
     const loadMoreButton = wrapper.findAll("button")

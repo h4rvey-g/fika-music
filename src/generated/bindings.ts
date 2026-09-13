@@ -172,6 +172,14 @@ export type OnlineTrackCandidate = { channelId: string, pluginId: string, source
 
 export type OnlineTrackPage = { items: Array<OnlineTrack>, hasMore: boolean, total: number | null, };
 
+export type PlaybackMode = "sequential" | "shuffle" | "repeat";
+
+export type PlaybackQueueItem = { "kind": "local", id: string, track: LocalTrack, } | { "kind": "online", id: string, track: OnlineTrack, };
+
+export type PlaybackSessionSnapshot = { revision: number, mode: PlaybackMode, current: PlaybackQueueItem | null, upcoming: Array<PlaybackQueueItem>, upcomingOffset: number, upcomingTotal: number, historyCount: number, canGoPrevious: boolean, canGoNext: boolean, positionSeconds: number, paused: boolean, streamOpen: boolean, consecutiveFailures: number, };
+
+export type PlaybackTrackInput = { "kind": "local", trackId: number, } | { "kind": "online", track: OnlineTrack, };
+
 export type PluginCommandError = { message: string, diagnostics: Array<PluginDiagnostic>, };
 
 export type PluginDiagnostic = { code: string, level: DiagnosticLevel, sourceId: string | null, message: string, timestamp: number, };
@@ -305,6 +313,23 @@ export const TAURI_COMMANDS = {
   localTrackMediaSource: "local_track_media_source",
   localTrackPlaybackDetails: "local_track_playback_details",
   resolveRemoteTrackLyrics: "resolve_remote_track_lyrics",
+  getPlaybackSession: "get_playback_session",
+  replacePlaybackSession: "replace_playback_session",
+  replaceLocalPlaybackSession: "replace_local_playback_session",
+  playNextInPlaybackSession: "play_next_in_playback_session",
+  appendPlaybackSessionStream: "append_playback_session_stream",
+  closePlaybackSessionStream: "close_playback_session_stream",
+  setPlaybackSessionMode: "set_playback_session_mode",
+  movePlaybackSessionItem: "move_playback_session_item",
+  removePlaybackSessionItem: "remove_playback_session_item",
+  clearPlaybackSessionUpcoming: "clear_playback_session_upcoming",
+  selectPlaybackSessionItem: "select_playback_session_item",
+  nextPlaybackSessionItem: "next_playback_session_item",
+  previousPlaybackSessionItem: "previous_playback_session_item",
+  failPlaybackSessionCurrent: "fail_playback_session_current",
+  markPlaybackSessionStarted: "mark_playback_session_started",
+  setPlaybackSessionPaused: "set_playback_session_paused",
+  savePlaybackSessionProgress: "save_playback_session_progress",
   setMenuBarLyrics: "set_menu_bar_lyrics",
   getOnlineMusicSettings: "get_online_music_settings",
   updateOnlineMusicSettings: "update_online_music_settings",

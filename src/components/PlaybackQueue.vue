@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { GripVertical, ListMusic, LoaderCircle, Trash2, X } from "@lucide/vue";
+import { GripVertical, ListMusic, LoaderCircle, Trash2, Volume2, X } from "@lucide/vue";
 import { formatNumber, t } from "../i18n";
 import {
   playbackQueueItemSubtitle,
@@ -10,6 +10,7 @@ import {
 
 const props = defineProps<{
   open: boolean;
+  current: PlaybackQueueItem | null;
   items: PlaybackQueueItem[];
   total?: number;
   loading?: boolean;
@@ -33,7 +34,7 @@ const queueCountLabel = computed(() => t(
 ));
 
 function startDrag(event: DragEvent, index: number) {
-  if (props.items[index]?.context) return;
+  if (props.loading) return;
   draggedIndex.value = index;
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = "move";
@@ -43,7 +44,7 @@ function startDrag(event: DragEvent, index: number) {
 
 function dropItem(event: DragEvent, index: number) {
   event.preventDefault();
-  if (props.items[index]?.context) return;
+  if (props.loading) return;
   const from = draggedIndex.value;
   draggedIndex.value = null;
   if (from === null || from === index || from < 0 || from >= props.items.length) return;
@@ -84,6 +85,26 @@ function finishDrag() {
       </div>
 
       <div class="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+        <div v-if="current" class="mb-2 border-b border-base-300 px-2 py-3">
+          <p class="mb-2 text-xs font-semibold uppercase text-muted">{{ t("Now playing") }}</p>
+          <div class="flex min-w-0 items-center gap-2">
+            <Volume2 class="shrink-0 text-primary" :size="16" aria-hidden="true" />
+            <div class="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded bg-base-200">
+              <img
+                v-if="current.kind === 'online' && current.track.coverUrl"
+                class="size-full object-cover"
+                :src="current.track.coverUrl"
+                alt=""
+              />
+              <ListMusic v-else :size="16" aria-hidden="true" />
+            </div>
+            <div class="min-w-0 flex-1">
+              <span class="block truncate text-sm font-medium">{{ playbackQueueItemTitle(current) }}</span>
+              <span class="block truncate text-xs text-muted">{{ playbackQueueItemSubtitle(current) }}</span>
+            </div>
+          </div>
+        </div>
+
         <div v-if="!items.length" class="flex min-h-40 flex-col items-center justify-center gap-2 px-4 text-center text-sm text-muted">
           <LoaderCircle v-if="loading" class="animate-spin" :size="28" aria-hidden="true" />
           <ListMusic v-else :size="28" aria-hidden="true" />
@@ -95,16 +116,15 @@ function finishDrag() {
             v-for="(item, index) in items"
             :key="item.id"
             class="list-row min-w-0 items-center gap-2 px-2 py-2"
-            :class="{ 'cursor-grab active:cursor-grabbing': !item.context }"
-            :draggable="!item.context"
+            :class="{ 'cursor-grab active:cursor-grabbing': !loading }"
+            :draggable="!loading"
             :data-playback-queue-index="index"
             @dragstart="startDrag($event, index)"
             @dragover.prevent
             @drop="dropItem($event, index)"
             @dragend="finishDrag"
           >
-            <GripVertical v-if="!item.context" class="shrink-0 text-muted" :size="16" aria-hidden="true" />
-            <span v-else class="w-4 shrink-0" aria-hidden="true"></span>
+            <GripVertical class="shrink-0 text-muted" :size="16" aria-hidden="true" />
             <div class="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded bg-base-200">
               <img
                 v-if="item.kind === 'online' && item.track.coverUrl"
@@ -117,6 +137,7 @@ function finishDrag() {
             <button
               class="list-col-grow min-w-0 text-left"
               type="button"
+              :disabled="loading"
               :aria-label="t('Play {title}', { title: playbackQueueItemTitle(item) })"
               @click="emit('play', index)"
             >
@@ -124,9 +145,9 @@ function finishDrag() {
               <span class="block truncate text-xs text-muted">{{ playbackQueueItemSubtitle(item) }}</span>
             </button>
             <button
-              v-if="!item.context"
               class="btn btn-square btn-ghost btn-sm shrink-0"
               type="button"
+              :disabled="loading"
               :aria-label="t('Remove {title} from queue', { title: playbackQueueItemTitle(item) })"
               :title="t('Remove from queue')"
               @click="emit('remove', index)"
@@ -151,7 +172,7 @@ function finishDrag() {
         <button
           class="btn btn-sm"
           type="button"
-          :disabled="!queueCount"
+          :disabled="!queueCount || loading"
           @click="emit('clear')"
         >
           <Trash2 :size="16" aria-hidden="true" />
