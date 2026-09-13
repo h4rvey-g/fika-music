@@ -86,12 +86,12 @@ use online_settings_commands::{
 };
 use playback_commands::{
     append_playback_session_stream, clear_playback_session_upcoming, close_playback_session_stream,
-    fail_playback_session_current, get_playback_session, local_track_media_source,
-    local_track_playback_details, mark_playback_session_started, move_playback_session_item,
-    next_playback_session_item, play_next_in_playback_session, previous_playback_session_item,
-    remove_playback_session_item, replace_local_playback_session, replace_playback_session,
-    resolve_remote_track_lyrics, save_playback_session_progress, select_playback_session_item,
-    set_playback_session_mode, set_playback_session_paused,
+    fail_playback_session_current, get_playback_session, local_track_cover_data_url,
+    local_track_media_source, local_track_playback_details, mark_playback_session_started,
+    move_playback_session_item, next_playback_session_item, play_next_in_playback_session,
+    previous_playback_session_item, remove_playback_session_item, replace_local_playback_session,
+    replace_playback_session, resolve_remote_track_lyrics, save_playback_session_progress,
+    select_playback_session_item, set_playback_session_mode, set_playback_session_paused,
 };
 pub use playback_session::{
     PlaybackMode, PlaybackQueueItem, PlaybackSessionSnapshot, PlaybackTrackInput,
@@ -152,6 +152,7 @@ macro_rules! with_tauri_commands {
             set_local_track_rating,
             local_track_media_source,
             local_track_playback_details,
+            local_track_cover_data_url,
             resolve_remote_track_lyrics,
             get_playback_session,
             replace_playback_session,

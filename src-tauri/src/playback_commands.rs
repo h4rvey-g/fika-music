@@ -63,6 +63,31 @@ pub(crate) async fn local_track_playback_details(
 }
 
 #[tauri::command]
+pub(crate) async fn local_track_cover_data_url(
+    state: State<'_, AppState>,
+    track_id: i64,
+) -> CommandResult<Option<String>> {
+    let file_path = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| AppError::StatePoisoned("db").to_string())?;
+        track_by_id(&db, track_id)
+            .map_err(|error| error.to_string())?
+            .map(|track| track.file_path)
+            .ok_or_else(|| AppError::TrackNotFound(track_id).to_string())?
+    };
+    let path = PathBuf::from(&file_path);
+    if !path.is_file() {
+        return Err(AppError::TrackFileMissing(file_path).to_string());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || album_art::embedded_cover_data_url(&path))
+        .await
+        .map_err(|error| format!("cover artwork task failed: {error}"))
+}
+
+#[tauri::command]
 pub(crate) async fn resolve_remote_track_lyrics(
     query: lyrics::TrackLyricsQuery,
 ) -> CommandResult<Option<lyrics::ResolvedLyrics>> {

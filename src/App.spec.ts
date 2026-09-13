@@ -2241,7 +2241,7 @@ describe("application shell", () => {
     wrapper.unmount();
   });
 
-  it("shows the remaining local library tracks in the playback queue", async () => {
+  it("selects without playing and consumes the reordered local queue before double-click playback", async () => {
     const upcomingTracks = [
       { index: 1, track: createLocalTrack({ id: 2, title: "Local Next" }) },
       { index: 2, track: createLocalTrack({ id: 3, title: "Local Last" }) },
@@ -2271,6 +2271,28 @@ describe("application shell", () => {
         expect.stringContaining("Local Next"),
         expect.stringContaining("Local Last"),
       ]);
+
+    await wrapper.get('button[aria-label="Select Local Last"]').trigger("click");
+    expect(wrapper.get('[data-testid="playback-track-info"]').text()).toContain("Local Current");
+    expect(tauriMocks.invoke).not.toHaveBeenCalledWith("select_playback_session_item", expect.anything());
+
+    wrapper.getComponent({ name: "PlaybackQueue" }).vm.$emit("move", 1, 0);
+    await flushPromises();
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("move_playback_session_item", { from: 1, to: 0 });
+    expect(wrapper.findAll("[data-playback-queue-index]").map((row) => row.text()))
+      .toEqual([
+        expect.stringContaining("Local Last"),
+        expect.stringContaining("Local Next"),
+      ]);
+
+    await wrapper.get('button[aria-label="Next track"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="playback-track-info"]').text()).toContain("Local Last");
+
+    await wrapper.get('button[aria-label="Select Local Next"]').trigger("dblclick");
+    await flushPromises();
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("select_playback_session_item", { index: 0 });
+    expect(wrapper.get('[data-testid="playback-track-info"]').text()).toContain("Local Next");
     wrapper.unmount();
   });
 

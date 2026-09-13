@@ -312,6 +312,7 @@ export const TAURI_COMMANDS = {
   setLocalTrackRating: "set_local_track_rating",
   localTrackMediaSource: "local_track_media_source",
   localTrackPlaybackDetails: "local_track_playback_details",
+  localTrackCoverDataUrl: "local_track_cover_data_url",
   resolveRemoteTrackLyrics: "resolve_remote_track_lyrics",
   getPlaybackSession: "get_playback_session",
   replacePlaybackSession: "replace_playback_session",
