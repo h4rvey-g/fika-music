@@ -10,6 +10,7 @@
     ]
   },
   "bundle": {
+    "icon": ["icons/icon.png"],
     "createUpdaterArtifacts": false
   }
 }

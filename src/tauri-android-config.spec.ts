@@ -41,6 +41,12 @@ describe("Android Tauri configuration", () => {
     expect(includedAndroidIconFiles).toEqual(androidIconFiles);
   });
 
+  it("uses the Fika icon source for Android bundles", () => {
+    expect((androidConfig as { bundle?: { icon?: string[] } }).bundle?.icon).toEqual([
+      "icons/icon.png",
+    ]);
+  });
+
   it("exposes OS information without enabling the unsupported updater on Android", () => {
     expect(defaultCapability.permissions).toContain("os:default");
     expect(defaultCapability.permissions).not.toContain("updater:default");
