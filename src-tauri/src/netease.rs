@@ -13,9 +13,8 @@ use crate::source_runtime::{
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use netease_music::{
-    ApiResponse, CaptchaParams, LoginCellphoneParams, LoginQrCheckParams, NeteaseMusicClient,
-    PlaylistDetailParams, SearchParams, SearchSuggestParams, SongDetailParams, SongQualityLevel,
-    SongUrlV1Params, UserPlaylistParams,
+    ApiResponse, CaptchaParams, NeteaseMusicClient, PlaylistDetailParams, SearchParams,
+    SearchSuggestParams, SongDetailParams, SongQualityLevel, SongUrlV1Params, UserPlaylistParams,
 };
 use qrcode::render::svg;
 use qrcode::QrCode;
@@ -43,6 +42,8 @@ const MAX_PENDING_QR_SESSIONS: usize = 8;
 const PHONE_LOGIN_SESSION_TTL_SECONDS: i64 = 600;
 const MAX_PENDING_PHONE_LOGIN_SESSIONS: usize = 8;
 const API_TIMEOUT: Duration = Duration::from_secs(8);
+const NETEASE_LOGIN_EAPI_BASE_URL: &str = "https://interfacepc.music.163.com";
+const NETEASE_LEGACY_EAPI_BASE_URL: &str = "https://interface.music.163.com";
 const MAX_API_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 // Playlist detail responses can include every track id and embedded track metadata.
 const MAX_PLAYLIST_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -415,13 +416,12 @@ impl NeteaseServiceBridge {
 
     pub fn start_qr_login(&self) -> Result<NeteaseQrLoginStart, NeteaseBridgeError> {
         let client = new_client()?;
-        let (response, qr_url) = client
-            .login_qr_key()
+        let response = login_eapi(&client, "/api/login/qrcode/unikey", json!({"type": 3}))
             .map_err(|error| bridge_failure("start QR login", error))?;
         let body = checked_body(response, "start QR login")?;
         let key = body
-            .pointer("/data/unikey")
-            .or_else(|| body.get("unikey"))
+            .get("unikey")
+            .or_else(|| body.pointer("/data/unikey"))
             .and_then(JsonValue::as_str)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| NeteaseBridgeError::InvalidResponse {
@@ -429,6 +429,7 @@ impl NeteaseServiceBridge {
                 message: "response did not include a QR key".to_owned(),
             })?
             .to_owned();
+        let qr_url = client.login_qr_url(&key, None);
         let qr_image_data_url = qr_data_url(&qr_url)?;
         let session_id = Uuid::new_v4().to_string();
         let expires_at = now_timestamp() + QR_SESSION_TTL_SECONDS;
@@ -528,14 +529,7 @@ impl NeteaseServiceBridge {
         }
 
         checked_body(
-            session
-                .client
-                .login_cellphone(LoginCellphoneParams {
-                    phone: session.phone.clone(),
-                    countrycode: Some("86".to_owned()),
-                    captcha: Some(verification_code),
-                    ..Default::default()
-                })
+            login_cellphone_with_code(&session.client, &session.phone, &verification_code)
                 .map_err(|error| bridge_failure("log in with verification code", error))?,
             "log in with verification code",
         )?;
@@ -571,12 +565,12 @@ impl NeteaseServiceBridge {
             });
         }
 
-        let response = session
-            .client
-            .login_qr_check(LoginQrCheckParams {
-                unikey: session.key,
-            })
-            .map_err(|error| bridge_failure("poll QR login", error))?;
+        let response = login_eapi(
+            &session.client,
+            "/api/login/qrcode/client/login",
+            json!({"type": 3, "key": session.key}),
+        )
+        .map_err(|error| bridge_failure("poll QR login", error))?;
         validate_response_size(&response, "poll QR login", MAX_API_RESPONSE_BYTES)?;
         let code = response
             .body
@@ -2182,6 +2176,44 @@ fn new_client() -> Result<NeteaseMusicClient, NeteaseBridgeError> {
         .map_err(|error| bridge_failure("create client", error))
 }
 
+fn login_eapi(
+    client: &NeteaseMusicClient,
+    path: &str,
+    data: JsonValue,
+) -> Result<ApiResponse, netease_music::NeteaseError> {
+    client.prepare_login_context();
+    let primary_url = format!("{NETEASE_LOGIN_EAPI_BASE_URL}{path}");
+    match client.raw_eapi(&primary_url, data.clone()) {
+        Ok(response) => Ok(response),
+        Err(primary_error) => {
+            let legacy_url = format!("{NETEASE_LEGACY_EAPI_BASE_URL}{path}");
+            client
+                .raw_eapi(&legacy_url, data)
+                .map_err(|_| primary_error)
+        }
+    }
+}
+
+fn login_cellphone_with_code(
+    client: &NeteaseMusicClient,
+    phone: &str,
+    verification_code: &str,
+) -> Result<ApiResponse, netease_music::NeteaseError> {
+    client.prepare_login_context();
+    client.raw_weapi(
+        "https://music.163.com/api/w/login/cellphone",
+        json!({
+            "phone": phone,
+            "countrycode": "86",
+            "type": "1",
+            "https": "true",
+            "remember": "true",
+            "captcha": verification_code,
+            "secureCaptcha": "",
+        }),
+    )
+}
+
 fn checked_body(
     response: ApiResponse,
     operation: &'static str,
@@ -2246,6 +2278,9 @@ fn api_error(operation: &'static str, code: i64, body: &JsonValue) -> NeteaseBri
     let message = body
         .get("message")
         .or_else(|| body.get("msg"))
+        .or_else(|| body.pointer("/data/blockText"))
+        .or_else(|| body.pointer("/data/message"))
+        .or_else(|| body.get("blockText"))
         .and_then(JsonValue::as_str)
         .filter(|message| !message.trim().is_empty())
         .unwrap_or("upstream request failed")
@@ -2744,6 +2779,32 @@ mod tests {
             validate_verification_code("12ab"),
             Err(NeteaseBridgeError::InvalidVerificationCode)
         ));
+    }
+
+    #[test]
+    fn login_eapi_should_use_the_pc_interface_domain_before_legacy_fallback() {
+        assert_eq!(
+            format!("{NETEASE_LOGIN_EAPI_BASE_URL}/api/login/qrcode/client/login"),
+            "https://interfacepc.music.163.com/api/login/qrcode/client/login"
+        );
+        assert_ne!(NETEASE_LOGIN_EAPI_BASE_URL, NETEASE_LEGACY_EAPI_BASE_URL);
+    }
+
+    #[test]
+    fn api_error_should_preserve_nested_risk_control_message() {
+        let error = api_error(
+            "log in with verification code",
+            -462,
+            &json!({
+                "code": -462,
+                "data": { "blockText": "网络太拥挤，请稍候再试。" },
+            }),
+        );
+
+        assert_eq!(
+            error.to_string(),
+            "NetEase API rejected log in with verification code (code -462): 网络太拥挤，请稍候再试。"
+        );
     }
 
     #[derive(Debug, Default)]
