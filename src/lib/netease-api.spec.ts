@@ -60,6 +60,19 @@ describe("NetEase API", () => {
     ]);
   });
 
+  it("passes a completed web security check to the same QR session", async () => {
+    invokeMock.mockResolvedValue({ status: "waitingForConfirmation", account: null });
+    await pollNeteaseQrLogin("qr-session", {
+      secureCaptcha: "fixture-only-validate",
+      ydDeviceToken: "fixture-only-device-token",
+    });
+    expect(invokeMock).toHaveBeenCalledWith("poll_netease_qr_login", {
+      sessionId: "qr-session",
+      secureCaptcha: "fixture-only-validate",
+      ydDeviceToken: "fixture-only-device-token",
+    });
+  });
+
   it("dispatches recommendation requests through the bundled Plugin", async () => {
     const outcome: SourceRequestOutcome = {
       response: { action: "musicRecommendations", data: { list: [track] } },

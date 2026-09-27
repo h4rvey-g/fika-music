@@ -1,3 +1,4 @@
+import { flushPromises } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   usePhoneLoginSession,
@@ -43,6 +44,69 @@ describe("source workspace lifecycle", () => {
       accountRef: "account-1",
       displayName: "Fika",
     });
+  });
+
+  it("keeps the QR visible when risk control rejects its first poll", async () => {
+    vi.useFakeTimers();
+    const error = {
+      code: "api-failure",
+      message: "NetEase API rejected poll QR login (code -462): 请完成验证操作",
+    };
+    const poll = vi.fn()
+      .mockRejectedValueOnce(error)
+      .mockResolvedValue({ status: "waitingForScan", account: null });
+    const cancel = vi.fn(async () => undefined);
+    const onError = vi.fn();
+    const session = useQrLoginSession({
+      providerName: "NetEase Cloud Music",
+      start: async () => ({ sessionId: "session-1", qrImageDataUrl: "fixture-qr" }),
+      poll,
+      cancel,
+      onConnected: vi.fn(async () => undefined),
+      onError,
+      pollIntervalMs: 10,
+      pauseOnError: (failure) => failure === error,
+    });
+
+    await session.start();
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(onError).toHaveBeenCalledWith(error);
+    expect(session.login.value).toMatchObject({ sessionId: "session-1" });
+    expect(session.isPaused.value).toBe(true);
+    expect(cancel).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(poll).toHaveBeenCalledTimes(1);
+    session.checkAgain();
+    await flushPromises();
+    expect(poll).toHaveBeenCalledTimes(2);
+    expect(session.isPaused.value).toBe(false);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(poll).toHaveBeenCalledTimes(3);
+    expect(session.login.value).toMatchObject({ sessionId: "session-1" });
+    expect(onError).toHaveBeenCalledTimes(1);
+    session.cancel();
+    expect(cancel).toHaveBeenCalledWith("session-1");
+  });
+
+  it("cancels the QR session on unrelated polling errors", async () => {
+    vi.useFakeTimers();
+    const cancel = vi.fn(async () => undefined);
+    const session = useQrLoginSession({
+      providerName: "Music Provider",
+      start: async () => ({ sessionId: "session-1" }),
+      poll: vi.fn().mockRejectedValue(new Error("network unavailable")),
+      cancel,
+      onConnected: vi.fn(async () => undefined),
+      onError: vi.fn(),
+      pollIntervalMs: 10,
+      pauseOnError: () => false,
+    });
+
+    await session.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(session.login.value).toBeNull();
+    expect(cancel).toHaveBeenCalledWith("session-1");
   });
 
   it("cancels the active playback request when abandoned", async () => {

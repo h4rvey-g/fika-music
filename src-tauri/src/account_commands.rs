@@ -52,9 +52,18 @@ pub(crate) async fn start_netease_qr_login(
 pub(crate) async fn poll_netease_qr_login(
     state: State<'_, AppState>,
     session_id: String,
+    secure_captcha: Option<String>,
+    yd_device_token: Option<String>,
 ) -> Result<netease::NeteaseQrLoginPoll, NeteaseCommandError> {
     let bridge = Arc::clone(&state.netease_bridge);
-    let poll = run_netease_task(move || bridge.poll_qr_login(session_id.trim())).await?;
+    let poll = run_netease_task(move || {
+        bridge.poll_qr_login(
+            session_id.trim(),
+            secure_captcha.as_deref(),
+            yd_device_token.as_deref(),
+        )
+    })
+    .await?;
     if poll.account.is_some() {
         state.online_music_cache.invalidate();
     }

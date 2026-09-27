@@ -121,12 +121,18 @@ const qrSession = useQrLoginSession({
   onError: (error) => {
     sourceError.value = normalizeError(error);
   },
+  pauseOnError: (error) => neteaseVerificationNotice(error) !== null,
 });
 const qrLogin = qrSession.login;
 const qrStatus = qrSession.status;
+const isQrPaused = qrSession.isPaused;
 const isConnectingQr = qrSession.isConnecting;
 const isPollingQr = qrSession.isPolling;
 const cancelQrLogin = qrSession.cancel;
+const checkQrLoginAgain = () => {
+  sourceError.value = null;
+  qrSession.checkAgain();
+};
 
 const phoneSession = usePhoneLoginSession({
   start: startNeteasePhoneLogin,
@@ -514,10 +520,24 @@ async function refreshAccountStatuses() {
         <div class="min-w-0">
           <div class="flex items-center gap-2 text-sm font-medium">
             <RefreshCw v-if="isPollingQr" class="animate-spin" :size="16" aria-hidden="true" />
+            <AlertCircle v-else-if="isQrPaused" class="shrink-0 text-warning" :size="16" aria-hidden="true" />
             <Clock3 v-else :size="16" aria-hidden="true" />
             {{ qrStatus }}
           </div>
           <p class="mt-2 text-sm text-muted">{{ t("Scan with the NetEase Cloud Music mobile app.") }}</p>
+          <p v-if="isQrPaused" class="mt-2 text-sm text-warning">
+            {{ t("Complete verification in NetEase Cloud Music before checking again. This QR code may expire.") }}
+          </p>
+          <button
+            v-if="isQrPaused"
+            class="btn btn-sm mt-4"
+            type="button"
+            :disabled="isPollingQr"
+            @click="checkQrLoginAgain"
+          >
+            <RefreshCw :size="16" aria-hidden="true" />
+            {{ t("Check QR login again") }}
+          </button>
           <button class="btn btn-ghost btn-sm mt-4" type="button" @click="cancelQrLogin">
             <X :size="16" aria-hidden="true" />
             {{ t("Cancel QR code") }}

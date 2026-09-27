@@ -28,6 +28,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+mod login;
+use login::LoginClient;
+
 pub const NETEASE_PLUGIN_ID: &str = "fika.netease";
 pub const NETEASE_PROVIDER_ID: &str = "fika-netease";
 pub const NETEASE_PROVIDER_ENTRYPOINT: &str = "builtin:netease";
@@ -42,9 +45,6 @@ const MAX_PENDING_QR_SESSIONS: usize = 8;
 const PHONE_LOGIN_SESSION_TTL_SECONDS: i64 = 600;
 const MAX_PENDING_PHONE_LOGIN_SESSIONS: usize = 8;
 const API_TIMEOUT: Duration = Duration::from_secs(8);
-const NETEASE_LOGIN_EAPI_BASE_URL: &str = "https://interfacepc.music.163.com";
-const NETEASE_LEGACY_EAPI_BASE_URL: &str = "https://interface.music.163.com";
-const NETEASE_CAPTCHA_V1_URL: &str = "https://interfacepc.music.163.com/api/middle/captcha/sent/v1";
 const MAX_API_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 // Playlist detail responses can include every track id and embedded track metadata.
 const MAX_PLAYLIST_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -366,14 +366,15 @@ struct StoredSession {
 #[derive(Clone)]
 struct PendingQrSession {
     key: String,
-    client: NeteaseMusicClient,
+    chain_id: String,
+    client: LoginClient,
     expires_at: i64,
 }
 
 #[derive(Clone)]
 struct PendingPhoneLoginSession {
     phone: String,
-    client: NeteaseMusicClient,
+    client: LoginClient,
     expires_at: i64,
 }
 
@@ -438,9 +439,14 @@ impl NeteaseServiceBridge {
     }
 
     pub fn start_qr_login(&self) -> Result<NeteaseQrLoginStart, NeteaseBridgeError> {
-        let client = new_client()?;
-        let response = login_eapi(&client, "/api/login/qrcode/unikey", json!({"type": 3}))
-            .map_err(|error| bridge_failure("start QR login", error))?;
+        self.start_qr_login_with_client(LoginClient::web()?)
+    }
+
+    fn start_qr_login_with_client(
+        &self,
+        client: LoginClient,
+    ) -> Result<NeteaseQrLoginStart, NeteaseBridgeError> {
+        let response = client.start_qr()?;
         let body = checked_body(response, "start QR login")?;
         let key = body
             .get("unikey")
@@ -452,7 +458,8 @@ impl NeteaseServiceBridge {
                 message: "response did not include a QR key".to_owned(),
             })?
             .to_owned();
-        let qr_url = client.login_qr_url(&key, None);
+        let chain_id = client.chain_id();
+        let qr_url = login::qr_url(&key, &chain_id)?;
         let qr_image_data_url = qr_data_url(&qr_url)?;
         let session_id = Uuid::new_v4().to_string();
         let expires_at = now_timestamp() + QR_SESSION_TTL_SECONDS;
@@ -474,6 +481,7 @@ impl NeteaseServiceBridge {
             session_id.clone(),
             PendingQrSession {
                 key,
+                chain_id,
                 client,
                 expires_at,
             },
@@ -490,13 +498,15 @@ impl NeteaseServiceBridge {
         phone: &str,
     ) -> Result<NeteasePhoneLoginStart, NeteaseBridgeError> {
         let phone = validate_phone(phone)?;
-        let client = new_client()?;
-        checked_phone_login_body(
-            &client,
-            send_phone_verification_code(&client, &phone)
-                .map_err(|error| bridge_failure("send verification code", error))?,
-            "send verification code",
-        )?;
+        self.start_phone_login_with_client(phone, LoginClient::mobile()?)
+    }
+
+    fn start_phone_login_with_client(
+        &self,
+        phone: String,
+        client: LoginClient,
+    ) -> Result<NeteasePhoneLoginStart, NeteaseBridgeError> {
+        checked_phone_login_body(&client, client.send_code(&phone)?, "send verification code")?;
 
         let session_id = Uuid::new_v4().to_string();
         let expires_at = now_timestamp() + PHONE_LOGIN_SESSION_TTL_SECONDS;
@@ -549,8 +559,9 @@ impl NeteaseServiceBridge {
 
         checked_phone_login_body(
             &session.client,
-            login_cellphone_with_code(&session.client, &session.phone, &verification_code)
-                .map_err(|error| bridge_failure("log in with verification code", error))?,
+            session
+                .client
+                .complete_phone(&session.phone, &verification_code)?,
             "log in with verification code",
         )?;
         let account = self.finish_login(&session.client, "verify phone login")?;
@@ -568,6 +579,8 @@ impl NeteaseServiceBridge {
     pub fn poll_qr_login(
         &self,
         session_id: &str,
+        secure_captcha: Option<&str>,
+        yd_device_token: Option<&str>,
     ) -> Result<NeteaseQrLoginPoll, NeteaseBridgeError> {
         let session = self
             .qr_sessions
@@ -585,13 +598,23 @@ impl NeteaseServiceBridge {
             });
         }
 
-        let response = login_eapi(
-            &session.client,
-            "/api/login/qrcode/client/login",
-            json!({"type": 3, "key": session.key}),
-        )
-        .map_err(|error| bridge_failure("poll QR login", error))?;
+        let response = session.client.poll_qr(
+            &session.key,
+            &session.chain_id,
+            secure_captcha,
+            yd_device_token,
+        )?;
         validate_response_size(&response, "poll QR login", MAX_API_RESPONSE_BYTES)?;
+        if response.status == 429 {
+            return Err(NeteaseBridgeError::RateLimited);
+        }
+        if !(200..300).contains(&response.status) {
+            return Err(api_error(
+                "poll QR login",
+                response_code(&response),
+                &response.body,
+            ));
+        }
         let code = response
             .body
             .get("code")
@@ -688,15 +711,17 @@ impl NeteaseServiceBridge {
 
     fn finish_login(
         &self,
-        client: &NeteaseMusicClient,
+        client: &LoginClient,
         operation: &'static str,
     ) -> Result<NeteaseAccount, NeteaseBridgeError> {
-        let body = checked_body(
-            client
-                .account()
-                .map_err(|error| bridge_failure(operation, error))?,
-            operation,
-        )?;
+        if client
+            .api()
+            .cookie("MUSIC_U")
+            .is_none_or(|value| value.is_empty())
+        {
+            return Err(NeteaseBridgeError::CredentialExpired);
+        }
+        let body = checked_body(client.account()?, operation)?;
         let profile = body
             .get("profile")
             .filter(|value| value.is_object())
@@ -715,12 +740,17 @@ impl NeteaseServiceBridge {
         let avatar_url = json_string(profile.get("avatarUrl"));
         let session = StoredSession {
             cookies: client
+                .api()
                 .cookies()
                 .into_iter()
                 .map(|cookie| (cookie.name, cookie.value))
                 .collect(),
         };
-        if !session.cookies.contains_key("MUSIC_U") {
+        if session
+            .cookies
+            .get("MUSIC_U")
+            .is_none_or(|value| value.is_empty())
+        {
             return Err(NeteaseBridgeError::CredentialExpired);
         }
         let secret = serde_json::to_string(&session)
@@ -2196,65 +2226,6 @@ fn new_client() -> Result<NeteaseMusicClient, NeteaseBridgeError> {
         .map_err(|error| bridge_failure("create client", error))
 }
 
-fn login_eapi(
-    client: &NeteaseMusicClient,
-    path: &str,
-    data: JsonValue,
-) -> Result<ApiResponse, netease_music::NeteaseError> {
-    client.prepare_login_context();
-    let primary_url = format!("{NETEASE_LOGIN_EAPI_BASE_URL}{path}");
-    match client.raw_eapi(&primary_url, data.clone()) {
-        Ok(response) => Ok(response),
-        Err(primary_error) => {
-            let legacy_url = format!("{NETEASE_LEGACY_EAPI_BASE_URL}{path}");
-            client
-                .raw_eapi(&legacy_url, data)
-                .map_err(|_| primary_error)
-        }
-    }
-}
-
-fn login_cellphone_with_code(
-    client: &NeteaseMusicClient,
-    phone: &str,
-    verification_code: &str,
-) -> Result<ApiResponse, netease_music::NeteaseError> {
-    client.prepare_login_context();
-    client.raw_weapi(
-        "https://music.163.com/api/w/login/cellphone",
-        json!({
-            "phone": phone,
-            "countrycode": "86",
-            "type": "1",
-            "https": "true",
-            "remember": "true",
-            "captcha": verification_code,
-            "secureCaptcha": "",
-        }),
-    )
-}
-
-fn send_phone_verification_code(
-    client: &NeteaseMusicClient,
-    phone: &str,
-) -> Result<ApiResponse, netease_music::NeteaseError> {
-    client.prepare_login_context();
-    let (url, body) = phone_captcha_v1_request(phone);
-    client.raw_eapi(url, body)
-}
-
-fn phone_captcha_v1_request(phone: &str) -> (&'static str, JsonValue) {
-    (
-        NETEASE_CAPTCHA_V1_URL,
-        json!({
-            "cellphone": phone,
-            "ctcode": "86",
-            "secrete": "music_middleuser_pclogin",
-            "scene": "0",
-        }),
-    )
-}
-
 fn checked_body(
     response: ApiResponse,
     operation: &'static str,
@@ -2263,17 +2234,12 @@ fn checked_body(
 }
 
 fn checked_phone_login_body(
-    client: &NeteaseMusicClient,
+    client: &LoginClient,
     response: ApiResponse,
     operation: &'static str,
 ) -> Result<JsonValue, NeteaseBridgeError> {
     checked_phone_login_body_with(response, operation, |parameters| {
-        client
-            .raw_weapi(
-                "https://music.163.com/api/frontrisk/verify/getqrcode",
-                parameters,
-            )
-            .map_err(|_| ())
+        client.verification_qr(parameters).map_err(|_| ())
     })
 }
 
@@ -2476,17 +2442,25 @@ fn api_error(operation: &'static str, code: i64, body: &JsonValue) -> NeteaseBri
     .find(|message| {
         !message.trim().is_empty() && !message.eq_ignore_ascii_case("upstream request failed")
     })
-    .unwrap_or("upstream request failed")
+    .unwrap_or(if code == 8821 {
+        "NetEase web login requires security verification; login has not succeeded"
+    } else {
+        "upstream request failed"
+    })
     .chars()
     .take(MAX_UPSTREAM_MESSAGE_CHARS)
     .collect();
     if matches!(
         operation,
-        "send verification code" | "log in with verification code"
-    ) && matches!(code, -462 | 460)
-        && (body.pointer("/data/verifyType").is_some()
-            || message.contains("验证")
-            || message.to_ascii_lowercase().contains("verification"))
+        "send verification code"
+            | "log in with verification code"
+            | "poll QR login"
+            | "start QR login"
+    ) && (code == 8821
+        || (matches!(code, -462 | 460)
+            && (body.pointer("/data/verifyType").is_some()
+                || message.contains("验证")
+                || message.to_ascii_lowercase().contains("verification"))))
     {
         return NeteaseBridgeError::VerificationRequired {
             operation,
@@ -2990,33 +2964,6 @@ mod tests {
     }
 
     #[test]
-    fn login_eapi_should_use_the_pc_interface_domain_before_legacy_fallback() {
-        assert_eq!(
-            format!("{NETEASE_LOGIN_EAPI_BASE_URL}/api/login/qrcode/client/login"),
-            "https://interfacepc.music.163.com/api/login/qrcode/client/login"
-        );
-        assert_ne!(NETEASE_LOGIN_EAPI_BASE_URL, NETEASE_LEGACY_EAPI_BASE_URL);
-    }
-
-    #[test]
-    fn phone_captcha_v1_request_should_match_the_current_api_basis() {
-        let (url, body) = phone_captcha_v1_request("13800138000");
-        assert_eq!(
-            url,
-            "https://interfacepc.music.163.com/api/middle/captcha/sent/v1"
-        );
-        assert_eq!(
-            body,
-            json!({
-                "cellphone": "13800138000",
-                "ctcode": "86",
-                "secrete": "music_middleuser_pclogin",
-                "scene": "0",
-            })
-        );
-    }
-
-    #[test]
     fn api_error_should_preserve_nested_risk_control_message() {
         let error = api_error(
             "log in with verification code",
@@ -3072,6 +3019,29 @@ mod tests {
             "send verification code",
             -462,
             &json!({ "code": -462, "message": "请完成验证操作" }),
+        );
+        assert_eq!(error.code(), "verification-required");
+    }
+
+    #[test]
+    fn api_error_should_pause_web_qr_security_verification() {
+        let error = api_error("poll QR login", 8821, &json!({ "code": 8821 }));
+        assert!(matches!(
+            error,
+            NeteaseBridgeError::VerificationRequired {
+                code: 8821,
+                verification: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn api_error_should_classify_qr_risk_control_without_claiming_success() {
+        let error = api_error(
+            "poll QR login",
+            -462,
+            &json!({ "message": "verification required" }),
         );
         assert_eq!(error.code(), "verification-required");
     }
@@ -3154,9 +3124,12 @@ mod tests {
             raw: body.to_string().into_bytes().into(),
             cookies: Vec::new(),
         };
-        let error =
-            checked_phone_login_body(&new_client().unwrap(), response, "send verification code")
-                .unwrap_err();
+        let error = checked_phone_login_body(
+            &LoginClient::mobile().unwrap(),
+            response,
+            "send verification code",
+        )
+        .unwrap_err();
         assert!(matches!(
             error,
             NeteaseBridgeError::VerificationRequired {
@@ -3531,6 +3504,216 @@ mod tests {
         let mut connection = Connection::open_in_memory().expect("test database should open");
         crate::database::initialize(&mut connection).expect("test schema should initialize");
         Arc::new(Mutex::new(connection))
+    }
+
+    #[test]
+    fn web_qr_login_should_keep_a_verified_session_until_account_confirmation() {
+        use login::tests::{mock_server, TestReply};
+        let (host, server) = mock_server(vec![
+            TestReply::json(json!({ "code": 200, "unikey": "fixture-key" }))
+                .cookie("NMTID=fixture-issued; Path=/"),
+            TestReply::json(json!({ "code": 8821 })),
+            TestReply::json(json!({ "code": 801 })),
+            TestReply::json(
+                json!({ "code": 803, "cookie": "MUSIC_U=fixture-session; __csrf=fixture-csrf" }),
+            ),
+            TestReply::json(
+                json!({ "code": 200, "profile": { "userId": 42, "nickname": "Fixture account" } }),
+            ),
+        ]);
+        let credentials = Arc::new(MemoryCredentialStore::default());
+        let bridge = NeteaseServiceBridge::with_credentials(
+            test_database(),
+            Arc::new(DefaultSourceHost::new(Duration::from_secs(1), 1024)),
+            credentials.clone(),
+        )
+        .unwrap();
+        let start = bridge
+            .start_qr_login_with_client(LoginClient::web().unwrap().with_test_host(host))
+            .unwrap();
+        let chain_id = bridge.qr_sessions.lock().unwrap()[&start.session_id]
+            .chain_id
+            .clone();
+        let error = bridge
+            .poll_qr_login(&start.session_id, None, None)
+            .unwrap_err();
+        assert_eq!(error.code(), "verification-required");
+        assert!(bridge
+            .qr_sessions
+            .lock()
+            .unwrap()
+            .contains_key(&start.session_id));
+        assert_eq!(
+            bridge
+                .poll_qr_login(
+                    &start.session_id,
+                    Some("fixture-validate"),
+                    Some("fixture-device")
+                )
+                .unwrap()
+                .status,
+            NeteaseQrLoginStatus::WaitingForScan
+        );
+        let connected = bridge.poll_qr_login(&start.session_id, None, None).unwrap();
+        assert_eq!(connected.status, NeteaseQrLoginStatus::Connected);
+        let account = connected.account.unwrap();
+        let stored: StoredSession =
+            serde_json::from_str(&credentials.load(&account.account_ref).unwrap()).unwrap();
+        assert_eq!(stored.cookies["MUSIC_U"], "fixture-session");
+        assert_eq!(stored.cookies["NMTID"], "fixture-issued");
+        assert!(!bridge
+            .qr_sessions
+            .lock()
+            .unwrap()
+            .contains_key(&start.session_id));
+        let requests = server.join().unwrap();
+        for request in &requests[1..4] {
+            assert_eq!(request.headers["x-login-chain-id"], chain_id);
+        }
+        assert_eq!(requests[4].line, "POST /weapi/w/nuser/account/get HTTP/1.1");
+        assert!(requests[4].headers["cookie"].contains("NMTID=fixture-issued"));
+        assert!(!serde_json::to_string(&account)
+            .unwrap()
+            .contains("fixture-session"));
+    }
+
+    #[test]
+    fn qr_success_without_a_cookie_should_not_connect_or_request_an_account() {
+        use login::tests::{mock_server, TestReply};
+        let (host, server) = mock_server(vec![
+            TestReply::json(json!({ "code": 200, "unikey": "fixture-key" })),
+            TestReply::json(json!({ "code": 803 })),
+        ]);
+        let bridge = NeteaseServiceBridge::with_credentials(
+            test_database(),
+            Arc::new(DefaultSourceHost::new(Duration::from_secs(1), 1024)),
+            Arc::new(MemoryCredentialStore::default()),
+        )
+        .unwrap();
+        let start = bridge
+            .start_qr_login_with_client(LoginClient::web().unwrap().with_test_host(host))
+            .unwrap();
+        assert!(matches!(
+            bridge.poll_qr_login(&start.session_id, None, None),
+            Err(NeteaseBridgeError::CredentialExpired)
+        ));
+        assert!(bridge.accounts().unwrap().is_empty());
+        assert_eq!(server.join().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn qr_expiration_should_release_web_context_without_another_request() {
+        use login::tests::{mock_server, TestReply};
+        let (host, server) = mock_server(vec![TestReply::json(
+            json!({ "code": 200, "unikey": "fixture-key" }),
+        )]);
+        let bridge = NeteaseServiceBridge::with_credentials(
+            test_database(),
+            Arc::new(DefaultSourceHost::new(Duration::from_secs(1), 1024)),
+            Arc::new(MemoryCredentialStore::default()),
+        )
+        .unwrap();
+        let start = bridge
+            .start_qr_login_with_client(LoginClient::web().unwrap().with_test_host(host))
+            .unwrap();
+        bridge
+            .qr_sessions
+            .lock()
+            .unwrap()
+            .get_mut(&start.session_id)
+            .unwrap()
+            .expires_at = now_timestamp() - 1;
+        assert_eq!(
+            bridge
+                .poll_qr_login(&start.session_id, None, None)
+                .unwrap()
+                .status,
+            NeteaseQrLoginStatus::Expired
+        );
+        assert!(bridge.qr_sessions.lock().unwrap().is_empty());
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn mobile_phone_login_should_preserve_cookie_and_confirm_the_account() {
+        use login::tests::{mock_server, TestReply};
+        let (host, server) = mock_server(vec![
+            TestReply::encrypted(json!({ "code": 200 })).cookie("NMTID=fixture-issued; Path=/"),
+            TestReply::encrypted(json!({ "code": 200, "cookie": "MUSIC_U=fixture-session" })),
+            TestReply::json(
+                json!({ "code": 200, "profile": { "userId": 42, "nickname": "Fixture account" } }),
+            ),
+        ]);
+        let credentials = Arc::new(MemoryCredentialStore::default());
+        let bridge = NeteaseServiceBridge::with_credentials(
+            test_database(),
+            Arc::new(DefaultSourceHost::new(Duration::from_secs(1), 1024)),
+            credentials.clone(),
+        )
+        .unwrap();
+        let start = bridge
+            .start_phone_login_with_client(
+                "13800138000".to_owned(),
+                LoginClient::mobile().unwrap().with_test_host(host),
+            )
+            .unwrap();
+        let account = bridge
+            .complete_phone_login(&start.session_id, "123456")
+            .unwrap();
+        let stored: StoredSession =
+            serde_json::from_str(&credentials.load(&account.account_ref).unwrap()).unwrap();
+        assert_eq!(stored.cookies["NMTID"], "fixture-issued");
+        assert!(bridge.phone_login_sessions.lock().unwrap().is_empty());
+        let requests = server.join().unwrap();
+        assert_eq!(requests[1].line, "POST /eapi/login/cellphone HTTP/1.1");
+        assert!(requests[2].headers["cookie"].contains("MUSIC_U=fixture-session"));
+    }
+
+    #[test]
+    fn mobile_risk_control_should_not_repeat_sms_or_invent_a_verification_qr() {
+        use login::tests::{mock_server, TestReply};
+        let mut risk = verification_fixture();
+        risk["code"] = json!(-462);
+        risk["message"] = json!("verification required");
+        let (host, server) = mock_server(vec![
+            TestReply::encrypted(json!({ "code": 200 })).cookie("NMTID=fixture-issued; Path=/"),
+            TestReply::encrypted(risk),
+            TestReply::json(json!({ "data": null })),
+        ]);
+        let bridge = NeteaseServiceBridge::with_credentials(
+            test_database(),
+            Arc::new(DefaultSourceHost::new(Duration::from_secs(1), 1024)),
+            Arc::new(MemoryCredentialStore::default()),
+        )
+        .unwrap();
+        let start = bridge
+            .start_phone_login_with_client(
+                "13800138000".to_owned(),
+                LoginClient::mobile().unwrap().with_test_host(host),
+            )
+            .unwrap();
+        let error = bridge
+            .complete_phone_login(&start.session_id, "123456")
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            NeteaseBridgeError::VerificationRequired {
+                verification: None,
+                ..
+            }
+        ));
+        assert!(error.to_string().contains("QR code missing"));
+        assert!(!error.to_string().contains("fixture-only-token"));
+        assert!(!error.to_string().contains("13800138000"));
+        assert!(!error.to_string().contains("123456"));
+        assert!(bridge.accounts().unwrap().is_empty());
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests[2].line,
+            "POST /weapi/frontrisk/verify/getqrcode HTTP/1.1"
+        );
+        assert!(requests[2].headers["cookie"].contains("NMTID=fixture-issued"));
     }
 
     fn provider_capabilities() -> BTreeSet<SourceCapability> {

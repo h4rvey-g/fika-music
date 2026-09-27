@@ -26,18 +26,21 @@ type QrLoginOptions<Account extends QrAccount, Start extends QrLoginStart> = {
   onConnected: (account: Account) => Promise<void>;
   onError: (error: unknown) => void;
   pollIntervalMs?: number;
+  pauseOnError?: (error: unknown) => boolean;
 };
 
 export function useQrLoginSession<Account extends QrAccount, Start extends QrLoginStart>(
   options: QrLoginOptions<Account, Start>,
 ) {
   const login = shallowRef<Start | null>(null);
-  const statusCode = ref<"" | "waitingForScan" | "waitingForConfirmation">("");
+  const statusCode = ref<"" | "waitingForScan" | "waitingForConfirmation" | "paused">("");
+  const isPaused = computed(() => statusCode.value === "paused");
   const status = computed(() => {
     if (statusCode.value === "waitingForScan") return t("Waiting for scan");
     if (statusCode.value === "waitingForConfirmation") {
       return t("Confirm in {provider}", { provider: options.providerName });
     }
+    if (statusCode.value === "paused") return t("QR login paused for security verification");
     return "";
   });
   const isConnecting = ref(false);
@@ -112,7 +115,12 @@ export function useQrLoginSession<Account extends QrAccount, Start extends QrLog
     } catch (error) {
       if (login.value?.sessionId === sessionId) {
         options.onError(error);
-        cancel();
+        if (options.pauseOnError?.(error)) {
+          stopPolling();
+          statusCode.value = "paused";
+        } else {
+          cancel();
+        }
       }
     } finally {
       isPolling.value = false;
@@ -126,6 +134,12 @@ export function useQrLoginSession<Account extends QrAccount, Start extends QrLog
     }
   }
 
+  function checkAgain(): void {
+    if (statusCode.value === "paused" && login.value && !isPolling.value) {
+      void poll();
+    }
+  }
+
   function cancel(): void {
     const sessionId = login.value?.sessionId;
     stopPolling();
@@ -136,7 +150,7 @@ export function useQrLoginSession<Account extends QrAccount, Start extends QrLog
     }
   }
 
-  return { login, status, isConnecting, isPolling, start, cancel };
+  return { login, status, isPaused, isConnecting, isPolling, start, cancel, checkAgain };
 }
 
 type PhoneLoginStart = {

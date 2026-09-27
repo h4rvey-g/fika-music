@@ -172,6 +172,37 @@ describe("NeteaseSource", () => {
     wrapper.unmount();
   });
 
+  it.each([
+    { code: "api-failure", message: "NetEase API rejected poll QR login (code -462): 请完成验证操作" },
+    { code: "verification-required", message: "NetEase API rejected poll QR login (code 8821): verification required" },
+  ])("pauses a risk-controlled QR poll without hiding the code or retrying automatically: $code", async (error) => {
+    neteaseApiMocks.startNeteaseQrLogin.mockResolvedValue({
+      sessionId: "qr-session",
+      qrImageDataUrl: "data:image/svg+xml;base64,PHN2Zy8+",
+      expiresAt: 300,
+    });
+    neteaseApiMocks.pollNeteaseQrLogin.mockRejectedValue(error);
+    const wrapper = mountNeteaseSource();
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text().trim() === "Connect")?.trigger("click");
+    await wrapper.findAll('[role="tab"]').find((tab) => tab.text().includes("QR code"))?.trigger("click");
+    await wrapper.findAll("button").find((button) => button.text().trim() === "Create QR code")?.trigger("click");
+    await flushPromises();
+
+    await vi.waitFor(() => {
+      expect(wrapper.text()).toContain("QR login paused for security verification");
+    }, { timeout: 3_000 });
+    expect(wrapper.find('img[alt="NetEase login QR code"]').exists()).toBe(true);
+    expect(wrapper.text()).toContain(error.message);
+    expect(neteaseApiMocks.pollNeteaseQrLogin).toHaveBeenCalledTimes(1);
+    expect(neteaseApiMocks.cancelNeteaseQrLogin).not.toHaveBeenCalled();
+
+    await wrapper.findAll("button").find((button) => button.text() === "Check QR login again")?.trigger("click");
+    await flushPromises();
+    expect(neteaseApiMocks.pollNeteaseQrLogin).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
   it("connects with an SMS verification code on one device", async () => {
     const phoneAccount = createSourceAccount({
       accountRef: "netease-account:00000000-0000-4000-8000-000000000002",

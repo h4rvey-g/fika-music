@@ -47,8 +47,11 @@ export function startNeteaseQrLogin() {
   return invoke<NeteaseQrLoginStart>(TAURI_COMMANDS.startNeteaseQrLogin);
 }
 
-export function pollNeteaseQrLogin(sessionId: string) {
-  return invoke<NeteaseQrLoginPoll>(TAURI_COMMANDS.pollNeteaseQrLogin, { sessionId });
+export function pollNeteaseQrLogin(
+  sessionId: string,
+  verification?: { secureCaptcha?: string; ydDeviceToken?: string },
+) {
+  return invoke<NeteaseQrLoginPoll>(TAURI_COMMANDS.pollNeteaseQrLogin, { sessionId, ...verification });
 }
 
 export function cancelNeteaseQrLogin(sessionId: string) {

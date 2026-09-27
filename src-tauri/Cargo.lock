@@ -1316,12 +1316,13 @@ dependencies = [
 
 [[package]]
 name = "fika-music"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "aes",
  "base64 0.22.1",
  "cbc",
  "cipher",
+ "cookie",
  "ecb",
  "flate2",
  "image",
