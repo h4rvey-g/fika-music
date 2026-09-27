@@ -13,8 +13,8 @@ use crate::source_runtime::{
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use netease_music::{
-    ApiResponse, CaptchaParams, NeteaseMusicClient, PlaylistDetailParams, SearchParams,
-    SearchSuggestParams, SongDetailParams, SongQualityLevel, SongUrlV1Params, UserPlaylistParams,
+    ApiResponse, NeteaseMusicClient, PlaylistDetailParams, SearchParams, SearchSuggestParams,
+    SongDetailParams, SongQualityLevel, SongUrlV1Params, UserPlaylistParams,
 };
 use qrcode::render::svg;
 use qrcode::QrCode;
@@ -44,6 +44,7 @@ const MAX_PENDING_PHONE_LOGIN_SESSIONS: usize = 8;
 const API_TIMEOUT: Duration = Duration::from_secs(8);
 const NETEASE_LOGIN_EAPI_BASE_URL: &str = "https://interfacepc.music.163.com";
 const NETEASE_LEGACY_EAPI_BASE_URL: &str = "https://interface.music.163.com";
+const NETEASE_CAPTCHA_V1_URL: &str = "https://interfacepc.music.163.com/api/middle/captcha/sent/v1";
 const MAX_API_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 // Playlist detail responses can include every track id and embedded track metadata.
 const MAX_PLAYLIST_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -492,12 +493,7 @@ impl NeteaseServiceBridge {
         let client = new_client()?;
         checked_phone_login_body(
             &client,
-            client
-                .captcha_sent(CaptchaParams {
-                    phone: phone.clone(),
-                    countrycode: Some("86".to_owned()),
-                    captcha: None,
-                })
+            send_phone_verification_code(&client, &phone)
                 .map_err(|error| bridge_failure("send verification code", error))?,
             "send verification code",
         )?;
@@ -2238,6 +2234,27 @@ fn login_cellphone_with_code(
     )
 }
 
+fn send_phone_verification_code(
+    client: &NeteaseMusicClient,
+    phone: &str,
+) -> Result<ApiResponse, netease_music::NeteaseError> {
+    client.prepare_login_context();
+    let (url, body) = phone_captcha_v1_request(phone);
+    client.raw_eapi(url, body)
+}
+
+fn phone_captcha_v1_request(phone: &str) -> (&'static str, JsonValue) {
+    (
+        NETEASE_CAPTCHA_V1_URL,
+        json!({
+            "cellphone": phone,
+            "ctcode": "86",
+            "secrete": "music_middleuser_pclogin",
+            "scene": "0",
+        }),
+    )
+}
+
 fn checked_body(
     response: ApiResponse,
     operation: &'static str,
@@ -2979,6 +2996,24 @@ mod tests {
             "https://interfacepc.music.163.com/api/login/qrcode/client/login"
         );
         assert_ne!(NETEASE_LOGIN_EAPI_BASE_URL, NETEASE_LEGACY_EAPI_BASE_URL);
+    }
+
+    #[test]
+    fn phone_captcha_v1_request_should_match_the_current_api_basis() {
+        let (url, body) = phone_captcha_v1_request("13800138000");
+        assert_eq!(
+            url,
+            "https://interfacepc.music.163.com/api/middle/captcha/sent/v1"
+        );
+        assert_eq!(
+            body,
+            json!({
+                "cellphone": "13800138000",
+                "ctcode": "86",
+                "secrete": "music_middleuser_pclogin",
+                "scene": "0",
+            })
+        );
     }
 
     #[test]
