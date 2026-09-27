@@ -2250,43 +2250,69 @@ fn checked_phone_login_body(
     response: ApiResponse,
     operation: &'static str,
 ) -> Result<JsonValue, NeteaseBridgeError> {
+    checked_phone_login_body_with(response, operation, |parameters| {
+        client
+            .raw_weapi(
+                "https://music.163.com/api/frontrisk/verify/getqrcode",
+                parameters,
+            )
+            .map_err(|_| ())
+    })
+}
+
+fn checked_phone_login_body_with(
+    response: ApiResponse,
+    operation: &'static str,
+    request_verification: impl FnOnce(JsonValue) -> Result<ApiResponse, ()>,
+) -> Result<JsonValue, NeteaseBridgeError> {
     validate_response_size(&response, operation, MAX_API_RESPONSE_BYTES)?;
     let parameters = phone_verification_parameters(&response.body);
     checked_body(response, operation).map_err(|mut error| {
-        if let NeteaseBridgeError::VerificationRequired { verification, .. } = &mut error {
+        if let NeteaseBridgeError::VerificationRequired {
+            message,
+            verification,
+            ..
+        } = &mut error
+        {
             // Never retry the SMS request automatically or expose the raw risk-control payload.
-            *verification = parameters.and_then(|parameters| {
-                let response = client
-                    .raw_weapi(
-                        "https://music.163.com/api/frontrisk/verify/getqrcode",
-                        parameters.clone(),
-                    )
-                    .ok()?;
-                let body = checked_body(response, "create security verification QR code").ok()?;
-                let qr_code = json_string(body.pointer("/data/qrCode"))?;
-                phone_verification_challenge(&parameters, &qr_code).ok()
-            });
+            match parameters.and_then(|parameters| {
+                let response =
+                    request_verification(parameters.clone()).map_err(|_| "QR request failed")?;
+                let body = checked_body(response, "create security verification QR code")
+                    .map_err(|_| "QR response rejected")?;
+                let qr_code = json_string(body.pointer("/data/qrCode")).ok_or("QR code missing")?;
+                phone_verification_challenge(&parameters, &qr_code).map_err(|_| "QR code invalid")
+            }) {
+                Ok(challenge) => *verification = Some(challenge),
+                Err(reason) => {
+                    message.push_str(" (security verification unavailable: ");
+                    message.push_str(reason);
+                    message.push(')');
+                }
+            }
         }
         error
     })
 }
 
-fn phone_verification_parameters(body: &JsonValue) -> Option<JsonValue> {
-    let data = body.get("data")?;
-    let verify_id = json_id(data.get("verifyId"))?;
-    let verify_type = json_id(data.get("verifyType"))?;
-    verify_id.parse::<u32>().ok()?;
-    verify_type.parse::<u32>().ok()?;
-    let token = json_string(data.get("verifyToken"))?;
-    let event_id = json_string(data.pointer("/params/event_id"))?;
-    let sign = json_string(data.pointer("/params/sign"))?;
+fn phone_verification_parameters(body: &JsonValue) -> Result<JsonValue, &'static str> {
+    let data = body.get("data").ok_or("challenge data missing")?;
+    let verify_id = json_id(data.get("verifyId"))
+        .filter(|id| id.parse::<u32>().is_ok())
+        .ok_or("verifyId missing or invalid")?;
+    let verify_type = json_id(data.get("verifyType"))
+        .filter(|id| id.parse::<u32>().is_ok())
+        .ok_or("verifyType missing or invalid")?;
+    let token = json_string(data.get("verifyToken")).ok_or("verifyToken missing")?;
+    let event_id = json_string(data.pointer("/params/event_id")).ok_or("event_id missing")?;
+    let sign = json_string(data.pointer("/params/sign")).ok_or("sign missing")?;
     if [&token, &event_id, &sign]
         .iter()
         .any(|value| value.len() > 4096)
     {
-        return None;
+        return Err("challenge field too large");
     }
-    Some(json!({
+    Ok(json!({
         "verifyConfigId": verify_id,
         "verifyType": verify_type,
         "token": token,
@@ -2381,18 +2407,22 @@ fn api_error(operation: &'static str, code: i64, body: &JsonValue) -> NeteaseBri
     if matches!(code, 405 | 406 | 429 | 509) {
         return NeteaseBridgeError::RateLimited;
     }
-    let message: String = body
-        .get("message")
-        .or_else(|| body.get("msg"))
-        .or_else(|| body.pointer("/data/blockText"))
-        .or_else(|| body.pointer("/data/message"))
-        .or_else(|| body.get("blockText"))
-        .and_then(JsonValue::as_str)
-        .filter(|message| !message.trim().is_empty())
-        .unwrap_or("upstream request failed")
-        .chars()
-        .take(MAX_UPSTREAM_MESSAGE_CHARS)
-        .collect();
+    let message: String = [
+        body.get("message"),
+        body.get("msg"),
+        body.pointer("/data/blockText"),
+        body.pointer("/data/message"),
+        body.get("blockText"),
+    ]
+    .into_iter()
+    .filter_map(|value| value.and_then(JsonValue::as_str))
+    .find(|message| {
+        !message.trim().is_empty() && !message.eq_ignore_ascii_case("upstream request failed")
+    })
+    .unwrap_or("upstream request failed")
+    .chars()
+    .take(MAX_UPSTREAM_MESSAGE_CHARS)
+    .collect();
     if matches!(
         operation,
         "send verification code" | "log in with verification code"
@@ -2929,6 +2959,39 @@ mod tests {
     }
 
     #[test]
+    fn api_error_should_skip_empty_top_level_message_for_nested_risk_text() {
+        let error = api_error(
+            "log in with verification code",
+            -462,
+            &json!({
+                "code": -462,
+                "message": "",
+                "data": { "verifyType": 50, "blockText": "请完成验证操作" },
+            }),
+        );
+
+        assert_eq!(
+            error.to_string(),
+            "NetEase API rejected log in with verification code (code -462): 请完成验证操作"
+        );
+    }
+
+    #[test]
+    fn api_error_should_prefer_specific_risk_text_over_generic_top_level_message() {
+        let error = api_error(
+            "log in with verification code",
+            -462,
+            &json!({
+                "code": -462,
+                "message": "upstream request failed",
+                "data": { "verifyType": 50, "blockText": "请完成验证操作" },
+            }),
+        );
+
+        assert!(error.to_string().ends_with("请完成验证操作"));
+    }
+
+    #[test]
     fn api_error_should_identify_phone_security_verification_separately() {
         let error = api_error(
             "send verification code",
@@ -2961,7 +3024,7 @@ mod tests {
     fn phone_verification_parameters_should_match_the_upstream_contract() {
         assert_eq!(
             phone_verification_parameters(&verification_fixture()),
-            Some(json!({
+            Ok(json!({
                 "verifyConfigId": "1",
                 "verifyType": "50",
                 "token": "fixture-only-token+&",
@@ -2975,7 +3038,10 @@ mod tests {
     fn phone_verification_parameters_should_not_invent_a_missing_token() {
         let mut body = verification_fixture();
         body["data"].as_object_mut().unwrap().remove("verifyToken");
-        assert!(phone_verification_parameters(&body).is_none());
+        assert_eq!(
+            phone_verification_parameters(&body),
+            Err("verifyToken missing")
+        );
     }
 
     #[test]
@@ -3020,6 +3086,111 @@ mod tests {
             error,
             NeteaseBridgeError::VerificationRequired {
                 verification: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn checked_phone_login_body_should_report_missing_challenge_field_without_request() {
+        let mut body = verification_fixture();
+        body["code"] = json!(-462);
+        body["message"] = json!("upstream request failed");
+        body["data"]["blockText"] = json!("请完成验证操作");
+        body["data"].as_object_mut().unwrap().remove("verifyToken");
+        let response = ApiResponse {
+            status: 200,
+            code: Some(-462),
+            raw: body.to_string().into_bytes().into(),
+            body,
+            cookies: Vec::new(),
+        };
+
+        let error =
+            checked_phone_login_body_with(response, "log in with verification code", |_| {
+                panic!("incomplete challenges must not trigger a QR request")
+            })
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .ends_with("请完成验证操作 (security verification unavailable: verifyToken missing)"));
+    }
+
+    #[test]
+    fn checked_phone_login_body_should_report_qr_request_failure_without_values() {
+        let mut body = verification_fixture();
+        body["code"] = json!(-462);
+        let response = ApiResponse {
+            status: 200,
+            code: Some(-462),
+            raw: body.to_string().into_bytes().into(),
+            body,
+            cookies: Vec::new(),
+        };
+
+        let error = checked_phone_login_body_with(response, "send verification code", |_| Err(()))
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .ends_with("security verification unavailable: QR request failed)"));
+        assert!(!error.to_string().contains("fixture-only-token"));
+    }
+
+    #[test]
+    fn checked_phone_login_body_should_report_qr_response_rejection_without_values() {
+        let mut body = verification_fixture();
+        body["code"] = json!(-462);
+        let response = ApiResponse {
+            status: 200,
+            code: Some(-462),
+            raw: body.to_string().into_bytes().into(),
+            body,
+            cookies: Vec::new(),
+        };
+        let qr_body = json!({ "code": 403, "message": "fixture-only-private-detail" });
+
+        let error = checked_phone_login_body_with(response, "send verification code", |_| {
+            Ok(ApiResponse {
+                status: 200,
+                code: Some(403),
+                raw: qr_body.to_string().into_bytes().into(),
+                body: qr_body,
+                cookies: Vec::new(),
+            })
+        })
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.ends_with("security verification unavailable: QR response rejected)"));
+        assert!(!message.contains("fixture-only-private-detail"));
+    }
+
+    #[test]
+    fn checked_phone_login_body_should_attach_a_valid_challenge() {
+        let mut body = verification_fixture();
+        body["code"] = json!(-462);
+        let response = ApiResponse {
+            status: 200,
+            code: Some(-462),
+            raw: body.to_string().into_bytes().into(),
+            body,
+            cookies: Vec::new(),
+        };
+        let qr_body = json!({ "code": 200, "data": { "qrCode": "fixture-only-qr" } });
+
+        let error = checked_phone_login_body_with(response, "send verification code", |_| {
+            Ok(ApiResponse {
+                status: 200,
+                code: Some(200),
+                raw: qr_body.to_string().into_bytes().into(),
+                body: qr_body,
+                cookies: Vec::new(),
+            })
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            NeteaseBridgeError::VerificationRequired {
+                verification: Some(_),
                 ..
             }
         ));
