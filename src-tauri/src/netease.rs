@@ -114,6 +114,20 @@ pub struct NeteasePhoneLoginStart {
     pub expires_at: i64,
 }
 
+#[derive(Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct NeteaseVerificationChallenge {
+    pub url: String,
+    pub qr_image_data_url: String,
+}
+
+impl fmt::Debug for NeteaseVerificationChallenge {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NeteaseVerificationChallenge(<redacted>)")
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "bindings.ts")]
@@ -168,6 +182,13 @@ pub enum NeteaseBridgeError {
         code: i64,
         message: String,
     },
+    #[error("NetEase API rejected {operation} (code {code}): {message}")]
+    VerificationRequired {
+        operation: &'static str,
+        code: i64,
+        message: String,
+        verification: Option<NeteaseVerificationChallenge>,
+    },
     #[error("NetEase rate limit reached; wait before retrying")]
     RateLimited,
     #[error("unsupported Remote Track: {0}")]
@@ -196,6 +217,7 @@ impl NeteaseBridgeError {
             Self::InvalidVerificationCode => "invalid-verification-code",
             Self::PhoneLoginSessionExpired => "phone-login-session-expired",
             Self::Api { .. } => "api-failure",
+            Self::VerificationRequired { .. } => "verification-required",
             Self::RateLimited => "rate-limited",
             Self::UnsupportedTrack(_) => "unsupported-track",
             Self::InvalidPlaylist => "invalid-playlist",
@@ -468,7 +490,8 @@ impl NeteaseServiceBridge {
     ) -> Result<NeteasePhoneLoginStart, NeteaseBridgeError> {
         let phone = validate_phone(phone)?;
         let client = new_client()?;
-        checked_body(
+        checked_phone_login_body(
+            &client,
             client
                 .captcha_sent(CaptchaParams {
                     phone: phone.clone(),
@@ -528,7 +551,8 @@ impl NeteaseServiceBridge {
             return Err(NeteaseBridgeError::PhoneLoginSessionExpired);
         }
 
-        checked_body(
+        checked_phone_login_body(
+            &session.client,
             login_cellphone_with_code(&session.client, &session.phone, &verification_code)
                 .map_err(|error| bridge_failure("log in with verification code", error))?,
             "log in with verification code",
@@ -2221,6 +2245,88 @@ fn checked_body(
     checked_body_with_limit(response, operation, MAX_API_RESPONSE_BYTES)
 }
 
+fn checked_phone_login_body(
+    client: &NeteaseMusicClient,
+    response: ApiResponse,
+    operation: &'static str,
+) -> Result<JsonValue, NeteaseBridgeError> {
+    validate_response_size(&response, operation, MAX_API_RESPONSE_BYTES)?;
+    let parameters = phone_verification_parameters(&response.body);
+    checked_body(response, operation).map_err(|mut error| {
+        if let NeteaseBridgeError::VerificationRequired { verification, .. } = &mut error {
+            // Never retry the SMS request automatically or expose the raw risk-control payload.
+            *verification = parameters.and_then(|parameters| {
+                let response = client
+                    .raw_weapi(
+                        "https://music.163.com/api/frontrisk/verify/getqrcode",
+                        parameters.clone(),
+                    )
+                    .ok()?;
+                let body = checked_body(response, "create security verification QR code").ok()?;
+                let qr_code = json_string(body.pointer("/data/qrCode"))?;
+                phone_verification_challenge(&parameters, &qr_code).ok()
+            });
+        }
+        error
+    })
+}
+
+fn phone_verification_parameters(body: &JsonValue) -> Option<JsonValue> {
+    let data = body.get("data")?;
+    let verify_id = json_id(data.get("verifyId"))?;
+    let verify_type = json_id(data.get("verifyType"))?;
+    verify_id.parse::<u32>().ok()?;
+    verify_type.parse::<u32>().ok()?;
+    let token = json_string(data.get("verifyToken"))?;
+    let event_id = json_string(data.pointer("/params/event_id"))?;
+    let sign = json_string(data.pointer("/params/sign"))?;
+    if [&token, &event_id, &sign]
+        .iter()
+        .any(|value| value.len() > 4096)
+    {
+        return None;
+    }
+    Some(json!({
+        "verifyConfigId": verify_id,
+        "verifyType": verify_type,
+        "token": token,
+        "params": json!({ "event_id": event_id, "sign": sign }).to_string(),
+        "size": 150,
+    }))
+}
+
+fn phone_verification_challenge(
+    parameters: &JsonValue,
+    qr_code: &str,
+) -> Result<NeteaseVerificationChallenge, NeteaseBridgeError> {
+    let mut url = reqwest::Url::parse("https://st.music.163.com/encrypt-pages")
+        .map_err(|error| NeteaseBridgeError::Bridge(format!("create verification URL: {error}")))?;
+    let mut query = url.query_pairs_mut();
+    query.append_pair("qrCode", qr_code);
+    for (key, parameter) in [
+        ("verifyToken", "token"),
+        ("verifyId", "verifyConfigId"),
+        ("verifyType", "verifyType"),
+        ("params", "params"),
+    ] {
+        let value = parameters
+            .get(parameter)
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| NeteaseBridgeError::InvalidResponse {
+                operation: "create security verification QR code",
+                message: "verification parameters were missing".to_owned(),
+            })?;
+        query.append_pair(key, value);
+    }
+    drop(query);
+    let url = url.to_string();
+    let qr_image_data_url = qr_data_url(&url)?;
+    Ok(NeteaseVerificationChallenge {
+        url,
+        qr_image_data_url,
+    })
+}
+
 fn checked_playlist_body(response: ApiResponse) -> Result<JsonValue, NeteaseBridgeError> {
     checked_body_with_limit(response, "read playlist", MAX_PLAYLIST_RESPONSE_BYTES)
 }
@@ -2275,7 +2381,7 @@ fn api_error(operation: &'static str, code: i64, body: &JsonValue) -> NeteaseBri
     if matches!(code, 405 | 406 | 429 | 509) {
         return NeteaseBridgeError::RateLimited;
     }
-    let message = body
+    let message: String = body
         .get("message")
         .or_else(|| body.get("msg"))
         .or_else(|| body.pointer("/data/blockText"))
@@ -2287,6 +2393,21 @@ fn api_error(operation: &'static str, code: i64, body: &JsonValue) -> NeteaseBri
         .chars()
         .take(MAX_UPSTREAM_MESSAGE_CHARS)
         .collect();
+    if matches!(
+        operation,
+        "send verification code" | "log in with verification code"
+    ) && matches!(code, -462 | 460)
+        && (body.pointer("/data/verifyType").is_some()
+            || message.contains("验证")
+            || message.to_ascii_lowercase().contains("verification"))
+    {
+        return NeteaseBridgeError::VerificationRequired {
+            operation,
+            code,
+            message,
+            verification: None,
+        };
+    }
     NeteaseBridgeError::Api {
         operation,
         code,
@@ -2805,6 +2926,103 @@ mod tests {
             error.to_string(),
             "NetEase API rejected log in with verification code (code -462): 网络太拥挤，请稍候再试。"
         );
+    }
+
+    #[test]
+    fn api_error_should_identify_phone_security_verification_separately() {
+        let error = api_error(
+            "send verification code",
+            -462,
+            &json!({ "code": -462, "message": "请完成验证操作" }),
+        );
+        assert_eq!(error.code(), "verification-required");
+    }
+
+    #[test]
+    fn api_error_should_not_turn_generic_risk_control_into_a_verification_challenge() {
+        let error = api_error(
+            "send verification code",
+            -462,
+            &json!({ "code": -462, "message": "网络太拥挤，请稍候再试。" }),
+        );
+        assert_eq!(error.code(), "api-failure");
+    }
+
+    fn verification_fixture() -> JsonValue {
+        json!({ "data": {
+            "verifyId": 1,
+            "verifyType": 50,
+            "verifyToken": "fixture-only-token+&",
+            "params": { "event_id": "fixture-only-event", "sign": "fixture-only-sign" },
+        } })
+    }
+
+    #[test]
+    fn phone_verification_parameters_should_match_the_upstream_contract() {
+        assert_eq!(
+            phone_verification_parameters(&verification_fixture()),
+            Some(json!({
+                "verifyConfigId": "1",
+                "verifyType": "50",
+                "token": "fixture-only-token+&",
+                "params": json!({ "event_id": "fixture-only-event", "sign": "fixture-only-sign" }).to_string(),
+                "size": 150,
+            }))
+        );
+    }
+
+    #[test]
+    fn phone_verification_parameters_should_not_invent_a_missing_token() {
+        let mut body = verification_fixture();
+        body["data"].as_object_mut().unwrap().remove("verifyToken");
+        assert!(phone_verification_parameters(&body).is_none());
+    }
+
+    #[test]
+    fn phone_verification_challenge_should_encode_the_official_url_and_redact_debug_output() {
+        let parameters = phone_verification_parameters(&verification_fixture()).unwrap();
+        let challenge = phone_verification_challenge(&parameters, "fixture-only-qr?&+").unwrap();
+        let url = reqwest::Url::parse(&challenge.url).unwrap();
+        assert_eq!(
+            url.origin().ascii_serialization(),
+            "https://st.music.163.com"
+        );
+        assert_eq!(url.path(), "/encrypt-pages");
+        let query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(query.get("verifyToken").unwrap(), "fixture-only-token+&");
+        assert_eq!(query.get("qrCode").unwrap(), "fixture-only-qr?&+");
+        assert_eq!(query.get("verifyId").unwrap(), "1");
+        assert_eq!(query.get("verifyType").unwrap(), "50");
+        assert_eq!(
+            query.get("params").unwrap(),
+            parameters["params"].as_str().unwrap()
+        );
+        assert!(challenge
+            .qr_image_data_url
+            .starts_with("data:image/svg+xml;base64,"));
+        assert!(!format!("{challenge:?}").contains("fixture-only-token"));
+    }
+
+    #[test]
+    fn checked_phone_login_body_should_keep_a_verification_rejection_without_parameters() {
+        let body = json!({ "code": -462, "message": "请完成验证操作" });
+        let response = ApiResponse {
+            status: 200,
+            code: Some(-462),
+            body: body.clone(),
+            raw: body.to_string().into_bytes().into(),
+            cookies: Vec::new(),
+        };
+        let error =
+            checked_phone_login_body(&new_client().unwrap(), response, "send verification code")
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            NeteaseBridgeError::VerificationRequired {
+                verification: None,
+                ..
+            }
+        ));
     }
 
     #[derive(Debug, Default)]

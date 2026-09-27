@@ -18,6 +18,8 @@ import {
 import { listPlugins } from "../lib/plugin-api";
 import { usePhoneLoginSession, useQrLoginSession } from "../composables/source-workspace";
 import { normalizeError, queryError } from "../lib/errors";
+import { neteaseVerificationNotice, type NeteaseVerificationNotice } from "../lib/netease-verification";
+import NeteaseVerificationDialog from "./NeteaseVerificationDialog.vue";
 import { t } from "../i18n";
 import type {
   AudioSourceId,
@@ -55,6 +57,7 @@ const showLogin = ref(false);
 const loginMode = ref<"phone" | "qr">("phone");
 const phone = ref("");
 const verificationCode = ref("");
+const securityVerification = ref<NeteaseVerificationNotice | null>(null);
 
 const pluginsQuery = useQuery({
   queryKey: ["plugins"],
@@ -132,6 +135,7 @@ const phoneSession = usePhoneLoginSession({
   onConnected: connectAccount,
   onError: (error) => {
     sourceError.value = normalizeError(error);
+    securityVerification.value = neteaseVerificationNotice(error);
   },
 });
 const phoneLogin = phoneSession.login;
@@ -190,6 +194,7 @@ function openLogin() {
 }
 
 function closeLogin() {
+  securityVerification.value = null;
   qrSession.cancel();
   phoneSession.cancel();
   showLogin.value = false;
@@ -199,6 +204,7 @@ function closeLogin() {
 }
 
 function selectLoginMode(mode: "phone" | "qr") {
+  securityVerification.value = null;
   if (loginMode.value === mode) return;
   if (mode === "phone") {
     qrSession.cancel();
@@ -228,6 +234,12 @@ async function submitPhoneLogin() {
   sourceError.value = null;
   sourceNotice.value = null;
   await phoneSession.complete(verificationCode.value.trim());
+}
+
+async function retrySecurityVerification() {
+  securityVerification.value = null;
+  if (phoneLogin.value) await submitPhoneLogin();
+  else await sendVerificationCode();
 }
 
 function changePhoneNumber() {
@@ -279,6 +291,13 @@ async function refreshAccountStatuses() {
 
 <template>
   <section class="overflow-hidden rounded border border-base-300 bg-base-100">
+    <NeteaseVerificationDialog
+      v-if="securityVerification"
+      :verification="securityVerification"
+      @close="securityVerification = null"
+      @retry="retrySecurityVerification"
+      @use-qr="selectLoginMode('qr')"
+    />
     <header class="flex flex-col gap-3 border-b border-base-300 px-4 py-3 2xl:flex-row 2xl:items-center 2xl:justify-between">
       <div class="flex min-w-0 items-center gap-3">
         <div class="flex size-10 shrink-0 items-center justify-center rounded bg-neutral text-neutral-content">

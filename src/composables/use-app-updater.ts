@@ -177,8 +177,15 @@ export function useAppUpdater(
   }
 
   async function checkForAndroidUpdate(): Promise<AppUpdateResource | null> {
+    if (!currentVersion.value) {
+      try {
+        currentVersion.value = await dependencies.getVersion();
+      } catch {
+        throw new Error("Unable to read the installed Android app version.");
+      }
+    }
     const version = currentVersion.value;
-    if (!version) throw new Error("Unable to check for Android updates.");
+    if (!version) throw new Error("Unable to read the installed Android app version.");
     return dependencies.checkAndroid(version);
   }
 

@@ -6,13 +6,21 @@ use super::*;
 pub struct NeteaseCommandError {
     code: String,
     message: String,
+    verification: Option<netease::NeteaseVerificationChallenge>,
 }
 
 impl From<netease::NeteaseBridgeError> for NeteaseCommandError {
     fn from(error: netease::NeteaseBridgeError) -> Self {
+        let verification = match &error {
+            netease::NeteaseBridgeError::VerificationRequired { verification, .. } => {
+                verification.clone()
+            }
+            _ => None,
+        };
         Self {
             code: error.code().to_owned(),
             message: error.to_string(),
+            verification,
         }
     }
 }
@@ -27,6 +35,7 @@ where
         .map_err(|error| NeteaseCommandError {
             code: "bridge-failure".to_owned(),
             message: format!("NetEase bridge task failed: {error}"),
+            verification: None,
         })?
         .map_err(Into::into)
 }

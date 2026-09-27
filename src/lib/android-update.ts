@@ -16,13 +16,6 @@ type GitHubReleaseAsset = {
   browser_download_url?: unknown;
 };
 
-type GitHubRelease = {
-  tag_name?: unknown;
-  published_at?: unknown;
-  body?: unknown;
-  assets?: unknown;
-};
-
 export type AndroidUpdateRelease = {
   version: string;
   date: string | null;
@@ -39,26 +32,52 @@ export type AndroidUpdateCheckOptions = {
 export async function checkAndroidUpdate(
   options: AndroidUpdateCheckOptions,
 ): Promise<AndroidUpdateRelease | null> {
+  if (!valid(options.currentVersion)) {
+    throw new Error("Unable to read the installed Android app version.");
+  }
+
   const fetcher = options.fetcher ?? fetch;
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), UPDATE_CHECK_TIMEOUT_MS);
-  let response: Response;
+  let release: unknown;
   try {
-    response = await fetcher(LATEST_RELEASE_API, {
-      headers: { Accept: "application/vnd.github+json" },
-      signal: controller.signal,
-    });
+    let response: Response;
+    try {
+      response = await fetcher(LATEST_RELEASE_API, {
+        headers: { Accept: "application/vnd.github+json" },
+        signal: controller.signal,
+      });
+    } catch {
+      throw networkError(controller);
+    }
+
+    if (!response.ok) {
+      if (response.status === 429 || (
+        response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0"
+      )) {
+        throw new Error("GitHub update checks are rate limited. Try again later.");
+      }
+      throw new Error(`Unable to check for Android updates (GitHub HTTP ${response.status}).`);
+    }
+
+    try {
+      release = await response.json();
+    } catch (error) {
+      if (!controller.signal.aborted && error instanceof SyntaxError) {
+        throw new Error("GitHub returned invalid Android update metadata.");
+      }
+      throw networkError(controller);
+    }
   } finally {
     window.clearTimeout(timeout);
   }
-  if (!response.ok) {
-    throw new Error("Unable to check for Android updates.");
-  }
 
-  const release = await response.json() as GitHubRelease;
+  if (!isRecord(release)) {
+    throw new Error("GitHub returned invalid Android update metadata.");
+  }
   const version = releaseVersion(release.tag_name);
-  if (!version || !valid(options.currentVersion)) {
-    throw new Error("Unable to check for Android updates.");
+  if (!version) {
+    throw new Error("GitHub returned invalid Android update metadata.");
   }
   if (!gt(version, options.currentVersion)) return null;
 
@@ -83,6 +102,12 @@ export async function checkAndroidUpdate(
     body: typeof release.body === "string" ? release.body : null,
     downloadUrl,
   };
+}
+
+function networkError(controller: AbortController): Error {
+  return new Error(controller.signal.aborted
+    ? "Android update check timed out. Try again."
+    : "Unable to reach GitHub for Android updates. Check your connection and try again.");
 }
 
 function releaseVersion(tagName: unknown): string | null {

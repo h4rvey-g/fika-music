@@ -104,7 +104,7 @@ export type NeteaseAccount = { accountRef: string, userId: string, displayName: 
 
 export type NeteaseAccountStatus = "active" | "expired";
 
-export type NeteaseCommandError = { code: string, message: string, };
+export type NeteaseCommandError = { code: string, message: string, verification: NeteaseVerificationChallenge | null, };
 
 export type NeteaseMutationAudit = { id: number, accountRef: string, operation: SourcePlaylistMutationKind, playlistId: string, trackId: string, outcome: string, message: string | null, occurredAt: number, };
 
@@ -115,6 +115,8 @@ export type NeteaseQrLoginPoll = { status: NeteaseQrLoginStatus, account: Neteas
 export type NeteaseQrLoginStart = { sessionId: string, qrImageDataUrl: string, expiresAt: number, };
 
 export type NeteaseQrLoginStatus = "waitingForScan" | "waitingForConfirmation" | "connected" | "expired";
+
+export type NeteaseVerificationChallenge = { url: string, qrImageDataUrl: string, };
 
 export type OnlineAlbum = { key: string, title: string, artist: string, releaseYear: number | null, coverUrl: string | null, trackCount: number | null, candidates: Array<OnlineAlbumCandidate>, };
 

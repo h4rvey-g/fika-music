@@ -35,6 +35,27 @@ function createDependencies(
 }
 
 describe("useAppUpdater", () => {
+  it("recovers on manual Android checks after version lookup fails at startup", async () => {
+    const getVersion = vi.fn()
+      .mockRejectedValueOnce(new Error("temporary version lookup failure"))
+      .mockRejectedValueOnce(new Error("temporary version lookup failure"))
+      .mockResolvedValue("0.3.4");
+    const checkAndroid = vi.fn(async () => createUpdate({ installMode: "external" }));
+    const updater = useAppUpdater(createDependencies({
+      platform: () => "android",
+      getVersion,
+      checkAndroid,
+    }));
+
+    await updater.initialize();
+    expect(updater.error.value).toBeNull();
+    await updater.checkForUpdates();
+
+    expect(checkAndroid).toHaveBeenCalledWith("0.3.4");
+    expect(updater.currentVersion.value).not.toBeNull();
+    expect(updater.error.value).toBeNull();
+  });
+
   it("uses the Android release checker instead of the unsupported native updater", async () => {
     const update = createUpdate({ installMode: "external" });
     const nativeCheck = vi.fn(async () => {

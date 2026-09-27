@@ -210,4 +210,27 @@ describe("NeteaseSource", () => {
     expect(wrapper.text()).toContain("Phone User connected.");
     wrapper.unmount();
   });
+
+  it("opens a security-verification dialog when sending an SMS requires verification", async () => {
+    neteaseApiMocks.startNeteasePhoneLogin.mockRejectedValue({
+      code: "api-failure",
+      message: "NetEase API rejected send verification code (code -462): 请完成验证操作",
+    });
+    const wrapper = mountNeteaseSource();
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text().trim() === "Connect")?.trigger("click");
+    await wrapper.get('input[aria-label="NetEase phone number"]').setValue("13800138000");
+    await wrapper.findAll("button").find((button) => button.text().trim() === "Send code")?.trigger("click");
+    await flushPromises();
+
+    const dialog = wrapper.get('[role="dialog"]');
+    expect(dialog.text()).toContain("NetEase security verification");
+    expect(dialog.text()).toContain("No usable verification challenge was returned.");
+    expect(wrapper.find('input[aria-label="NetEase verification code"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("Verification code sent");
+    await dialog.findAll("button").find((button) => button.text().includes("Use QR-code login"))?.trigger("click");
+    expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toContain("QR code");
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
 });
