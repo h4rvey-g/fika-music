@@ -2278,6 +2278,8 @@ fn checked_phone_login_body_with(
             match parameters.and_then(|parameters| {
                 let response =
                     request_verification(parameters.clone()).map_err(|_| "QR request failed")?;
+                #[cfg(target_os = "android")]
+                eprintln!("{}", verification_qr_response_diagnostic(&response));
                 let body = checked_body(response, "create security verification QR code")
                     .map_err(|_| "QR response rejected")?;
                 let qr_code = json_string(body.pointer("/data/qrCode")).ok_or("QR code missing")?;
@@ -2293,6 +2295,44 @@ fn checked_phone_login_body_with(
         }
         error
     })
+}
+
+#[cfg(any(test, target_os = "android"))]
+fn verification_qr_response_diagnostic(response: &ApiResponse) -> String {
+    let data = response.body.get("data");
+    let nonempty_qr = |value: Option<&JsonValue>| {
+        value
+            .and_then(JsonValue::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    let api_code = response
+        .code
+        .map_or_else(|| "none".to_owned(), |code| code.to_string());
+    let json = response.raw.len() <= MAX_API_RESPONSE_BYTES
+        && serde_json::from_slice::<JsonValue>(&response.raw).is_ok();
+    format!(
+        "[DEBUG-net-qr-01] http_status={} api_code={} json={} body={} data={} data_qr={} root_qr={}",
+        response.status,
+        api_code,
+        json,
+        verification_json_kind(Some(&response.body)),
+        verification_json_kind(data),
+        nonempty_qr(response.body.pointer("/data/qrCode")),
+        nonempty_qr(response.body.get("qrCode")),
+    )
+}
+
+#[cfg(any(test, target_os = "android"))]
+fn verification_json_kind(value: Option<&JsonValue>) -> &'static str {
+    match value {
+        None => "missing",
+        Some(JsonValue::Null) => "null",
+        Some(JsonValue::Bool(_)) => "boolean",
+        Some(JsonValue::Number(_)) => "number",
+        Some(JsonValue::String(_)) => "string",
+        Some(JsonValue::Array(_)) => "array",
+        Some(JsonValue::Object(_)) => "object",
+    }
 }
 
 fn phone_verification_parameters(body: &JsonValue) -> Result<JsonValue, &'static str> {
@@ -3162,6 +3202,43 @@ mod tests {
         let message = error.to_string();
         assert!(message.ends_with("security verification unavailable: QR response rejected)"));
         assert!(!message.contains("fixture-only-private-detail"));
+    }
+
+    #[test]
+    fn verification_qr_diagnostic_should_identify_non_json_without_body_content() {
+        let response = ApiResponse {
+            status: 200,
+            code: None,
+            body: JsonValue::Null,
+            raw: b"<html>fixture-only-private-detail</html>".to_vec().into(),
+            cookies: Vec::new(),
+        };
+
+        assert_eq!(
+            verification_qr_response_diagnostic(&response),
+            "[DEBUG-net-qr-01] http_status=200 api_code=none json=false body=null data=missing data_qr=false root_qr=false"
+        );
+    }
+
+    #[test]
+    fn verification_qr_diagnostic_should_not_include_challenge_values() {
+        let body = json!({
+            "code": 200,
+            "data": { "qrCode": "fixture-only-secret-qr", "verifyToken": "fixture-only-secret-token" },
+            "phone": "fixture-only-secret-phone",
+        });
+        let response = ApiResponse {
+            status: 200,
+            code: Some(200),
+            raw: body.to_string().into_bytes().into(),
+            body,
+            cookies: Vec::new(),
+        };
+
+        assert_eq!(
+            verification_qr_response_diagnostic(&response),
+            "[DEBUG-net-qr-01] http_status=200 api_code=200 json=true body=object data=object data_qr=true root_qr=false"
+        );
     }
 
     #[test]
