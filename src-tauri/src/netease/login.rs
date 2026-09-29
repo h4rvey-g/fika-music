@@ -6,6 +6,7 @@ use super::{
     MAX_API_RESPONSE_BYTES,
 };
 use aes::Aes128;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyInit};
 use flate2::read::GzDecoder;
 use netease_music::{eapi_params, weapi_params, Cookie};
@@ -74,14 +75,7 @@ impl LoginClient {
 
     fn new(mode: LoginMode) -> Result<Self, NeteaseBridgeError> {
         let api = new_client()?;
-        let http = Client::builder()
-            .timeout(API_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .build()
-            .map_err(|_| {
-                NeteaseBridgeError::Bridge("create login HTTP client failed".to_owned())
-            })?;
+        let http = login_http_client(cfg!(target_os = "android"))?;
         let client = Self {
             api,
             http,
@@ -108,7 +102,7 @@ impl LoginClient {
                 ),
             ),
             ("WEVNSM", "1.0.0".to_owned()),
-            ("deviceId", uuid::Uuid::new_v4().simple().to_string()),
+            ("deviceId", random_chars(b"0123456789ABCDEF", 52)),
         ] {
             self.api.set_cookie(name, value);
         }
@@ -161,6 +155,27 @@ impl LoginClient {
     }
 
     pub(super) fn start_qr(&self) -> Result<ApiResponse, NeteaseBridgeError> {
+        let device_id = self
+            .api
+            .cookie("deviceId")
+            .ok_or_else(|| invalid_response("prepare QR login", "login device ID was missing"))?;
+        let response = self.request(
+            "/api/register/anonimous",
+            json!({ "username": anonymous_username(&device_id) }),
+            None,
+            "prepare QR login",
+        )?;
+        super::checked_body(response, "prepare QR login")?;
+        if self
+            .api
+            .cookie("MUSIC_A")
+            .is_none_or(|cookie| cookie.is_empty())
+        {
+            return Err(invalid_response(
+                "prepare QR login",
+                "anonymous session cookie was missing",
+            ));
+        }
         self.request(
             "/api/login/qrcode/unikey",
             web_key_data(),
@@ -383,6 +398,38 @@ impl LoginClient {
     }
 }
 
+fn login_http_client(use_bundled_roots: bool) -> Result<Client, NeteaseBridgeError> {
+    let builder = Client::builder()
+        .timeout(API_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never());
+    // Android's platform verifier needs JVM setup that this app does not provide.
+    let builder = if use_bundled_roots {
+        builder.tls_backend_preconfigured(bundled_login_tls_config()?)
+    } else {
+        builder
+    };
+    builder
+        .build()
+        .map_err(|_| NeteaseBridgeError::Bridge("create login HTTP client failed".to_owned()))
+}
+
+fn bundled_login_tls_config() -> Result<rustls::ClientConfig, NeteaseBridgeError> {
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let builder = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|_| NeteaseBridgeError::Bridge("configure login TLS failed".to_owned()))?;
+    Ok(builder
+        .with_root_certificates(bundled_login_roots())
+        .with_no_client_auth())
+}
+
+fn bundled_login_roots() -> rustls::RootCertStore {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    roots
+}
+
 fn cookie_header(
     cookies: &BTreeMap<String, String>,
     operation: &'static str,
@@ -431,6 +478,17 @@ fn response_cookies(headers: &HeaderMap, body: &Value) -> Vec<Cookie> {
 
 fn web_key_data() -> Value {
     json!({ "type": 1, "noCheckToken": true })
+}
+
+fn anonymous_username(device_id: &str) -> String {
+    const KEY: &[u8] = b"3go8&$8*3*3h0k(2)2";
+    let xored = device_id
+        .bytes()
+        .zip(KEY.iter().copied().cycle())
+        .map(|(left, right)| left ^ right)
+        .collect::<Vec<_>>();
+    let digest = BASE64_STANDARD.encode(md5::compute(xored).0);
+    BASE64_STANDARD.encode(format!("{device_id} {digest}"))
 }
 
 fn web_poll_data(
@@ -670,6 +728,27 @@ pub(crate) mod tests {
         assert_eq!(server.join().unwrap()[0].line, "POST /fixture HTTP/1.1");
     }
 
+    #[test]
+    fn login_http_client_should_build_with_android_roots_without_platform_runtime() {
+        let (host, server) = mock_server(vec![TestReply::json(json!({ "code": 200 }))]);
+        let client = login_http_client(true).unwrap();
+        assert_eq!(
+            client
+                .post(format!("{host}/fixture"))
+                .body("fixture")
+                .send()
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        assert_eq!(server.join().unwrap()[0].line, "POST /fixture HTTP/1.1");
+    }
+
+    #[test]
+    fn android_login_tls_should_have_public_root_certificates() {
+        assert!(!bundled_login_roots().is_empty());
+    }
+
     fn encrypt(bytes: &[u8]) -> Vec<u8> {
         ecb::Encryptor::<Aes128>::new(EAPI_KEY.into()).encrypt_padded_vec_mut::<Pkcs7>(bytes)
     }
@@ -699,6 +778,53 @@ pub(crate) mod tests {
         let data = web_poll_data("fixture-key", None, None).unwrap();
         assert!(data.get("secureCaptcha").is_none());
         assert_eq!(data["ydDeviceToken"], "");
+    }
+
+    #[test]
+    fn web_qr_start_should_register_guest_before_requesting_a_key() {
+        let (host, server) = mock_server(vec![
+            TestReply::json(json!({ "code": 200 })).cookie("MUSIC_A=fixture-guest; Path=/"),
+            TestReply::json(json!({ "code": 200, "unikey": "fixture-key" })),
+        ]);
+        let client = LoginClient::web().unwrap().with_test_host(host);
+        let response = client.start_qr().unwrap();
+        assert_eq!(response.body["unikey"], "fixture-key");
+        let requests = server.join().unwrap();
+        assert_eq!(requests[0].line, "POST /weapi/register/anonimous HTTP/1.1");
+        assert_eq!(requests[1].line, "POST /weapi/login/qrcode/unikey HTTP/1.1");
+        assert!(requests[1].headers["cookie"].contains("MUSIC_A=fixture-guest"));
+    }
+
+    #[test]
+    fn web_qr_start_should_refuse_a_missing_guest_cookie() {
+        let (host, server) = mock_server(vec![TestReply::json(json!({ "code": 200 }))]);
+        let client = LoginClient::web().unwrap().with_test_host(host);
+        let result = client.start_qr();
+        assert!(matches!(
+            result,
+            Err(NeteaseBridgeError::InvalidResponse { .. })
+        ));
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn web_qr_start_should_not_request_a_key_when_guest_registration_is_rejected() {
+        let (host, server) = mock_server(vec![TestReply::json(json!({ "code": 400 }))]);
+        let client = LoginClient::web().unwrap().with_test_host(host);
+        let result = client.start_qr();
+        assert!(matches!(
+            result,
+            Err(NeteaseBridgeError::Api { code: 400, .. })
+        ));
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn anonymous_username_should_match_the_upstream_encoding() {
+        assert_eq!(
+            anonymous_username("fixture-device"),
+            "Zml4dHVyZS1kZXZpY2UgT2RQR3c0bVdqeVdXZTF2djFLbythQT09"
+        );
     }
 
     #[test]
@@ -749,6 +875,15 @@ pub(crate) mod tests {
         );
         client.api.set_cookie("MUSIC_U", "fixture-secret");
         assert!(!format!("{client:?}").contains("fixture-secret"));
+    }
+
+    #[test]
+    fn login_device_id_should_match_the_upstream_format() {
+        let device_id = LoginClient::web().unwrap().api.cookie("deviceId").unwrap();
+        assert_eq!(device_id.len(), 52);
+        assert!(device_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte)));
     }
 
     #[test]
@@ -864,6 +999,7 @@ pub(crate) mod tests {
     #[test]
     fn web_transport_should_keep_chain_headers_and_verification_response() {
         let (host, server) = mock_server(vec![
+            TestReply::json(json!({ "code": 200 })).cookie("MUSIC_A=fixture-guest; Path=/"),
             TestReply::json(json!({ "code": 200, "unikey": "fixture-key" }))
                 .cookie("NMTID=fixture-issued; Path=/"),
             TestReply::json(json!({ "code": 8821, "message": "verification required" })),
@@ -878,13 +1014,13 @@ pub(crate) mod tests {
             Some(8821)
         );
         let requests = server.join().unwrap();
-        assert_eq!(requests[0].line, "POST /weapi/login/qrcode/unikey HTTP/1.1");
-        assert_eq!(requests[1].headers["x-login-chain-id"], "fixture-chain");
-        assert_eq!(requests[1].headers["x-loginmethod"], "QrCode");
-        assert_eq!(requests[1].headers["origin"], WEB_HOST);
-        assert_eq!(requests[1].headers["x-os"], "web");
-        assert!(requests[1].headers["cookie"].contains("NMTID=fixture-issued"));
-        let form: BTreeMap<_, _> = url::form_urlencoded::parse(requests[1].body.as_bytes())
+        assert_eq!(requests[1].line, "POST /weapi/login/qrcode/unikey HTTP/1.1");
+        assert_eq!(requests[2].headers["x-login-chain-id"], "fixture-chain");
+        assert_eq!(requests[2].headers["x-loginmethod"], "QrCode");
+        assert_eq!(requests[2].headers["origin"], WEB_HOST);
+        assert_eq!(requests[2].headers["x-os"], "web");
+        assert!(requests[2].headers["cookie"].contains("NMTID=fixture-issued"));
+        let form: BTreeMap<_, _> = url::form_urlencoded::parse(requests[2].body.as_bytes())
             .into_owned()
             .collect();
         assert_eq!(form.keys().collect::<Vec<_>>(), vec!["encSecKey", "params"]);

@@ -17,6 +17,11 @@ pinned `netease-music` crate. No Node runtime or remote API proxy is introduced.
 - Web QR key and polling requests use weapi, `type: 1`, and browser request
   headers. The scan URL is `/st/platform/scanlogin`. One `chainId` and cookie
   context are retained for the entire session.
+- Before requesting a web QR key, the same login client registers an anonymous
+  session with a 52-character uppercase hexadecimal `deviceId` and retains the
+  server-issued `MUSIC_A` cookie. A rejected registration or missing cookie
+  stops QR creation without falling back to an unauthenticated poll. The guest
+  cookie is not treated as a connected account.
 - SMS sending and login use mobile eapi against `interface3.music.163.com`,
   with the PR's iOS/RN login fields, device headers, and empty encrypted header.
 - Mobile eapi starts without NMTID, retains the server-issued value, and carries
@@ -31,6 +36,11 @@ pinned `netease-music` crate. No Node runtime or remote API proxy is introduced.
   encryption, with bounded reads and decompression.
 - Login requests are not retried or redirected automatically. Pending sessions
   retain the existing expiry and count limits.
+- On Android, login requests use a bundled WebPKI root store with rustls certificate
+  and hostname verification. This avoids reqwest's platform verifier, which
+  requires JVM/Kotlin initialization not present in the app. User-installed
+  Android CAs are not trusted by this login client; other platforms keep their
+  existing TLS configuration.
 
 ## Security Verification Boundary
 
@@ -45,5 +55,8 @@ interactive challenge remains separate work. The existing front-risk QR dialog
 still requires an actual `data.qrCode`; a null response never becomes a link.
 
 Offline tests cover request headers, encrypted responses, cookie reuse,
-verification pause/resume, expired sessions, and successful account persistence.
-Real Android account login still requires a device retest with a new build.
+guest registration before QR key creation, verification pause/resume, expired
+sessions, and successful account persistence. A one-shot anonymous desktop
+probe moved the initial QR poll from `-462` to `801` (waiting for scan). A
+separate macOS smoke build subsequently connected an account after a real scan
+and account confirmation. Android still requires a new build and device retest.

@@ -3510,6 +3510,7 @@ mod tests {
     fn web_qr_login_should_keep_a_verified_session_until_account_confirmation() {
         use login::tests::{mock_server, TestReply};
         let (host, server) = mock_server(vec![
+            TestReply::json(json!({ "code": 200 })).cookie("MUSIC_A=fixture-guest; Path=/"),
             TestReply::json(json!({ "code": 200, "unikey": "fixture-key" }))
                 .cookie("NMTID=fixture-issued; Path=/"),
             TestReply::json(json!({ "code": 8821 })),
@@ -3567,11 +3568,11 @@ mod tests {
             .unwrap()
             .contains_key(&start.session_id));
         let requests = server.join().unwrap();
-        for request in &requests[1..4] {
+        for request in &requests[2..5] {
             assert_eq!(request.headers["x-login-chain-id"], chain_id);
         }
-        assert_eq!(requests[4].line, "POST /weapi/w/nuser/account/get HTTP/1.1");
-        assert!(requests[4].headers["cookie"].contains("NMTID=fixture-issued"));
+        assert_eq!(requests[5].line, "POST /weapi/w/nuser/account/get HTTP/1.1");
+        assert!(requests[5].headers["cookie"].contains("NMTID=fixture-issued"));
         assert!(!serde_json::to_string(&account)
             .unwrap()
             .contains("fixture-session"));
@@ -3581,6 +3582,7 @@ mod tests {
     fn qr_success_without_a_cookie_should_not_connect_or_request_an_account() {
         use login::tests::{mock_server, TestReply};
         let (host, server) = mock_server(vec![
+            TestReply::json(json!({ "code": 200 })).cookie("MUSIC_A=fixture-guest; Path=/"),
             TestReply::json(json!({ "code": 200, "unikey": "fixture-key" })),
             TestReply::json(json!({ "code": 803 })),
         ]);
@@ -3598,15 +3600,16 @@ mod tests {
             Err(NeteaseBridgeError::CredentialExpired)
         ));
         assert!(bridge.accounts().unwrap().is_empty());
-        assert_eq!(server.join().unwrap().len(), 2);
+        assert_eq!(server.join().unwrap().len(), 3);
     }
 
     #[test]
     fn qr_expiration_should_release_web_context_without_another_request() {
         use login::tests::{mock_server, TestReply};
-        let (host, server) = mock_server(vec![TestReply::json(
-            json!({ "code": 200, "unikey": "fixture-key" }),
-        )]);
+        let (host, server) = mock_server(vec![
+            TestReply::json(json!({ "code": 200 })).cookie("MUSIC_A=fixture-guest; Path=/"),
+            TestReply::json(json!({ "code": 200, "unikey": "fixture-key" })),
+        ]);
         let bridge = NeteaseServiceBridge::with_credentials(
             test_database(),
             Arc::new(DefaultSourceHost::new(Duration::from_secs(1), 1024)),
@@ -3631,7 +3634,7 @@ mod tests {
             NeteaseQrLoginStatus::Expired
         );
         assert!(bridge.qr_sessions.lock().unwrap().is_empty());
-        assert_eq!(server.join().unwrap().len(), 1);
+        assert_eq!(server.join().unwrap().len(), 2);
     }
 
     #[test]
