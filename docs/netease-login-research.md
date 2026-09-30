@@ -123,7 +123,9 @@ context differences remain hypotheses; none is established by this research.
 The strongest implementation reference is SPlayer-Next's official-web session
 collection: let the official site handle its interactive authentication, then
 validate the resulting account using the existing Service Bridge and persist
-credentials through Fika's secure store. Keep QR login available. This is a
+credentials through Fika's secure store. The initial recommendation retained
+in-app QR login; the later product decision removed it and made official-web
+login the mobile default as well, retaining SMS and security verification. This is a
 research recommendation, not a real-account verification of those reference
 clients. Fika subsequently implemented this flow; on 2026-09-30 the user
 confirmed successful macOS official-web login and session import. See

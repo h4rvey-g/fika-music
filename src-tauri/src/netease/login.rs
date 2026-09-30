@@ -144,23 +144,8 @@ impl LoginClient {
             WEB_HOST,
             "/api/w/nuser/account/get",
             json!({}),
-            None,
             false,
             "verify login account",
-        )
-    }
-
-    pub(super) fn chain_id(&self) -> String {
-        self.api.chain_id()
-    }
-
-    pub(super) fn start_qr(&self) -> Result<ApiResponse, NeteaseBridgeError> {
-        self.ensure_anonymous_session()?;
-        self.request(
-            "/api/login/qrcode/unikey",
-            web_key_data(),
-            None,
-            "start QR login",
         )
     }
 
@@ -181,7 +166,6 @@ impl LoginClient {
         let response = self.request(
             "/api/register/anonimous",
             json!({ "username": anonymous_username(&device_id) }),
-            None,
             "prepare anonymous login session",
         )?;
         super::checked_body(response, "prepare anonymous login session")?;
@@ -198,27 +182,10 @@ impl LoginClient {
         Ok(())
     }
 
-    pub(super) fn poll_qr(
-        &self,
-        key: &str,
-        chain_id: &str,
-        secure_captcha: Option<&str>,
-        yd_device_token: Option<&str>,
-    ) -> Result<ApiResponse, NeteaseBridgeError> {
-        let data = web_poll_data(key, secure_captcha, yd_device_token)?;
-        self.request(
-            "/api/login/qrcode/client/login",
-            data,
-            Some(chain_id),
-            "poll QR login",
-        )
-    }
-
     pub(super) fn send_code(&self, phone: &str) -> Result<ApiResponse, NeteaseBridgeError> {
         self.request(
             "/api/sms/captcha/sent",
             mobile_captcha_data(phone),
-            None,
             "send verification code",
         )
     }
@@ -231,7 +198,6 @@ impl LoginClient {
         self.request(
             "/api/login/cellphone",
             mobile_login_data(phone, code),
-            None,
             "log in with verification code",
         )
     }
@@ -249,7 +215,7 @@ impl LoginClient {
         path: &'static str,
         data: Value,
     ) -> Result<ApiResponse, NeteaseBridgeError> {
-        self.request(path, data, None, "log in with account password")
+        self.request(path, data, "log in with account password")
     }
 
     pub(super) fn verification_qr(&self, data: Value) -> Result<ApiResponse, NeteaseBridgeError> {
@@ -258,7 +224,6 @@ impl LoginClient {
             WEB_HOST,
             "/api/frontrisk/verify/getqrcode",
             data,
-            None,
             false,
             "create security verification QR code",
         )
@@ -268,7 +233,6 @@ impl LoginClient {
         &self,
         path: &str,
         data: Value,
-        chain_id: Option<&str>,
         operation: &'static str,
     ) -> Result<ApiResponse, NeteaseBridgeError> {
         let mobile = self.mode == LoginMode::Mobile;
@@ -276,7 +240,6 @@ impl LoginClient {
             if mobile { MOBILE_HOST } else { WEB_HOST },
             path,
             data,
-            chain_id,
             mobile,
             operation,
         )
@@ -324,7 +287,6 @@ impl LoginClient {
         host: &str,
         path: &str,
         mut data: Value,
-        chain_id: Option<&str>,
         mobile: bool,
         operation: &'static str,
     ) -> Result<ApiResponse, NeteaseBridgeError> {
@@ -381,11 +343,6 @@ impl LoginClient {
                 .header("x-os", "web")
                 .header("X-channelSource", "undefined")
                 .header("Nm-GCore-Status", "1");
-            if let Some(chain_id) = chain_id {
-                request = request
-                    .header("X-loginMethod", "QrCode")
-                    .header("x-login-chain-id", chain_id);
-            }
             data["csrf_token"] = json!(self.api.csrf_token());
             weapi_params(&data)
         }
@@ -506,10 +463,6 @@ fn response_cookies(headers: &HeaderMap, body: &Value) -> Vec<Cookie> {
         .collect()
 }
 
-fn web_key_data() -> Value {
-    json!({ "type": 1, "noCheckToken": true })
-}
-
 fn anonymous_username(device_id: &str) -> String {
     const KEY: &[u8] = b"3go8&$8*3*3h0k(2)2";
     let xored = device_id
@@ -519,39 +472,6 @@ fn anonymous_username(device_id: &str) -> String {
         .collect::<Vec<_>>();
     let digest = BASE64_STANDARD.encode(md5::compute(xored).0);
     BASE64_STANDARD.encode(format!("{device_id} {digest}"))
-}
-
-fn web_poll_data(
-    key: &str,
-    secure_captcha: Option<&str>,
-    yd_device_token: Option<&str>,
-) -> Result<Value, NeteaseBridgeError> {
-    for value in [secure_captcha, yd_device_token].into_iter().flatten() {
-        if value.len() > 4096 || value.chars().any(char::is_control) {
-            return Err(invalid_response(
-                "poll QR login",
-                "invalid security verification result",
-            ));
-        }
-    }
-    let mut data = json!({ "key": key, "type": 1, "noCheckToken": true, "ydDeviceToken": yd_device_token.unwrap_or_default() });
-    if let Some(value) = secure_captcha.filter(|value| !value.is_empty()) {
-        data["secureCaptcha"] = json!(value);
-    }
-    Ok(data)
-}
-
-pub(super) fn qr_url(key: &str, chain_id: &str) -> Result<String, NeteaseBridgeError> {
-    let mut url = reqwest::Url::parse("https://music.163.com/st/platform/scanlogin")
-        .map_err(|_| invalid_response("start QR login", "invalid QR login URL"))?;
-    url.query_pairs_mut().extend_pairs([
-        ("codekey", key),
-        ("chainId", chain_id),
-        ("hdw_device", "web"),
-        ("hdw_appid", "web"),
-        ("hitExp", "1"),
-    ]);
-    Ok(url.to_string())
 }
 
 fn mobile_captcha_data(phone: &str) -> Value {
@@ -836,87 +756,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn web_qr_requests_should_use_type_one_and_real_verification_result() {
-        assert_eq!(web_key_data(), json!({ "type": 1, "noCheckToken": true }));
-        assert_eq!(
-            web_poll_data(
-                "fixture-key",
-                Some("fixture-validate"),
-                Some("fixture-device")
-            )
-            .unwrap(),
-            json!({ "key": "fixture-key", "type": 1, "noCheckToken": true, "secureCaptcha": "fixture-validate", "ydDeviceToken": "fixture-device" })
-        );
-    }
-
-    #[test]
-    fn web_qr_requests_should_not_invent_security_verification() {
-        let data = web_poll_data("fixture-key", None, None).unwrap();
-        assert!(data.get("secureCaptcha").is_none());
-        assert_eq!(data["ydDeviceToken"], "");
-    }
-
-    #[test]
-    fn web_qr_start_should_register_guest_before_requesting_a_key() {
-        let (host, server) = mock_server(vec![
-            TestReply::json(json!({ "code": 200 })).cookie("MUSIC_A=fixture-guest; Path=/"),
-            TestReply::json(json!({ "code": 200, "unikey": "fixture-key" })),
-        ]);
-        let client = LoginClient::web().unwrap().with_test_host(host);
-        let response = client.start_qr().unwrap();
-        assert_eq!(response.body["unikey"], "fixture-key");
-        let requests = server.join().unwrap();
-        assert_eq!(requests[0].line, "POST /weapi/register/anonimous HTTP/1.1");
-        assert_eq!(requests[1].line, "POST /weapi/login/qrcode/unikey HTTP/1.1");
-        assert!(requests[1].headers["cookie"].contains("MUSIC_A=fixture-guest"));
-    }
-
-    #[test]
-    fn web_qr_start_should_refuse_a_missing_guest_cookie() {
-        let (host, server) = mock_server(vec![TestReply::json(json!({ "code": 200 }))]);
-        let client = LoginClient::web().unwrap().with_test_host(host);
-        let result = client.start_qr();
-        assert!(matches!(
-            result,
-            Err(NeteaseBridgeError::InvalidResponse { .. })
-        ));
-        assert_eq!(server.join().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn web_qr_start_should_not_request_a_key_when_guest_registration_is_rejected() {
-        let (host, server) = mock_server(vec![TestReply::json(json!({ "code": 400 }))]);
-        let client = LoginClient::web().unwrap().with_test_host(host);
-        let result = client.start_qr();
-        assert!(matches!(
-            result,
-            Err(NeteaseBridgeError::Api { code: 400, .. })
-        ));
-        assert_eq!(server.join().unwrap().len(), 1);
-    }
-
-    #[test]
     fn anonymous_username_should_match_the_upstream_encoding() {
         assert_eq!(
             anonymous_username("fixture-device"),
             "Zml4dHVyZS1kZXZpY2UgT2RQR3c0bVdqeVdXZTF2djFLbythQT09"
         );
-    }
-
-    #[test]
-    fn web_qr_requests_should_reject_oversized_verification_without_values() {
-        let error = web_poll_data("fixture-key", Some(&"secret".repeat(1000)), None).unwrap_err();
-        assert!(!error.to_string().contains("secret"));
-    }
-
-    #[test]
-    fn qr_url_should_preserve_the_same_chain_id_and_encode_parameters() {
-        let url = reqwest::Url::parse(&qr_url("fixture+&key", "fixture+&chain").unwrap()).unwrap();
-        assert_eq!(url.path(), "/st/platform/scanlogin");
-        let query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
-        assert_eq!(query["codekey"], "fixture+&key");
-        assert_eq!(query["chainId"], "fixture+&chain");
-        assert_eq!(query["hdw_device"], "web");
     }
 
     #[test]
@@ -1125,30 +969,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn web_transport_should_keep_chain_headers_and_verification_response() {
+    fn web_transport_should_keep_official_headers_and_server_cookies() {
         let (host, server) = mock_server(vec![
-            TestReply::json(json!({ "code": 200 })).cookie("MUSIC_A=fixture-guest; Path=/"),
-            TestReply::json(json!({ "code": 200, "unikey": "fixture-key" }))
-                .cookie("NMTID=fixture-issued; Path=/"),
+            TestReply::json(json!({ "code": 200 })).cookie("NMTID=fixture-issued; Path=/"),
             TestReply::json(json!({ "code": 8821, "message": "verification required" })),
         ]);
         let client = LoginClient::web().unwrap().with_test_host(host);
-        client.start_qr().unwrap();
-        assert_eq!(
-            client
-                .poll_qr("fixture-key", "fixture-chain", None, None)
-                .unwrap()
-                .code,
-            Some(8821)
-        );
+        client.account().unwrap();
+        assert_eq!(client.verification_qr(json!({})).unwrap().code, Some(8821));
         let requests = server.join().unwrap();
-        assert_eq!(requests[1].line, "POST /weapi/login/qrcode/unikey HTTP/1.1");
-        assert_eq!(requests[2].headers["x-login-chain-id"], "fixture-chain");
-        assert_eq!(requests[2].headers["x-loginmethod"], "QrCode");
-        assert_eq!(requests[2].headers["origin"], WEB_HOST);
-        assert_eq!(requests[2].headers["x-os"], "web");
-        assert!(requests[2].headers["cookie"].contains("NMTID=fixture-issued"));
-        let form: BTreeMap<_, _> = url::form_urlencoded::parse(requests[2].body.as_bytes())
+        assert_eq!(requests[0].line, "POST /weapi/w/nuser/account/get HTTP/1.1");
+        assert_eq!(
+            requests[1].line,
+            "POST /weapi/frontrisk/verify/getqrcode HTTP/1.1"
+        );
+        assert_eq!(requests[1].headers["origin"], WEB_HOST);
+        assert_eq!(requests[1].headers["x-os"], "web");
+        assert!(requests[1].headers["cookie"].contains("NMTID=fixture-issued"));
+        assert!(!requests[1].headers.contains_key("x-login-chain-id"));
+        assert!(!requests[1].headers.contains_key("x-loginmethod"));
+        let form: BTreeMap<_, _> = url::form_urlencoded::parse(requests[1].body.as_bytes())
             .into_owned()
             .collect();
         assert_eq!(form.keys().collect::<Vec<_>>(), vec!["encSecKey", "params"]);

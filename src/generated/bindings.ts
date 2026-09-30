@@ -110,12 +110,6 @@ export type NeteaseMutationAudit = { id: number, accountRef: string, operation: 
 
 export type NeteasePhoneLoginStart = { sessionId: string, expiresAt: number, };
 
-export type NeteaseQrLoginPoll = { status: NeteaseQrLoginStatus, account: NeteaseAccount | null, };
-
-export type NeteaseQrLoginStart = { sessionId: string, qrImageDataUrl: string, expiresAt: number, };
-
-export type NeteaseQrLoginStatus = "waitingForScan" | "waitingForConfirmation" | "connected" | "expired";
-
 export type NeteaseVerificationChallenge = { url: string, qrImageDataUrl: string, sessionId: string | null, };
 
 export type NeteaseWebLoginPoll = { status: NeteaseWebLoginStatus, account: NeteaseAccount | null, };
@@ -391,13 +385,10 @@ export const TAURI_COMMANDS = {
   removePlugin: "remove_plugin",
   clearPluginDiagnostics: "clear_plugin_diagnostics",
   dispatchPluginRequest: "dispatch_plugin_request",
-  startNeteaseQrLogin: "start_netease_qr_login",
   neteaseWebLoginSupported: "netease_web_login_supported",
   startNeteaseWebLogin: "start_netease_web_login",
   pollNeteaseWebLogin: "poll_netease_web_login",
   cancelNeteaseWebLogin: "cancel_netease_web_login",
-  pollNeteaseQrLogin: "poll_netease_qr_login",
-  cancelNeteaseQrLogin: "cancel_netease_qr_login",
   startNeteasePhoneLogin: "start_netease_phone_login",
   completeNeteasePhoneLogin: "complete_netease_phone_login",
   loginNeteasePassword: "login_netease_password",

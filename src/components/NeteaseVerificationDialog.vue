@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
-import { ExternalLink, QrCode, RefreshCw, ShieldCheck, X } from "@lucide/vue";
+import { ExternalLink, Globe, RefreshCw, ShieldCheck, X } from "@lucide/vue";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { normalizeError } from "../lib/errors";
 import { t } from "../i18n";
 import type { NeteaseVerificationNotice } from "../lib/netease-verification";
 
-const props = defineProps<{ verification: NeteaseVerificationNotice }>();
-const emit = defineEmits<{ close: []; retry: []; useQr: [] }>();
+const props = defineProps<{ verification: NeteaseVerificationNotice; webLoginSupported?: boolean }>();
+const emit = defineEmits<{ close: []; retry: []; useWeb: [] }>();
 const dialog = ref<HTMLDialogElement | null>(null);
 const isOpening = ref(false);
 const error = ref<string | null>(null);
@@ -57,7 +57,7 @@ async function openVerification() {
           {{ t("Complete the security check in NetEase Cloud Music, then retry.") }}
         </template>
         <template v-else>
-          {{ t("No usable verification challenge was returned. Complete the security check in NetEase Cloud Music, or use QR-code login.") }}
+          {{ t("No usable verification challenge was returned. Complete the security check in NetEase Cloud Music, or sign in on the official website.") }}
         </template>
       </div>
       <img
@@ -70,9 +70,9 @@ async function openVerification() {
       />
       <div v-if="error" role="alert" class="alert alert-error mt-4 break-words text-sm">{{ error }}</div>
       <div class="mt-5 flex flex-wrap justify-end gap-2">
-        <button class="btn btn-sm" type="button" @click="emit('useQr')">
-          <QrCode :size="16" aria-hidden="true" />
-          {{ t("Use QR-code login") }}
+        <button v-if="webLoginSupported" class="btn btn-sm" type="button" @click="emit('useWeb')">
+          <Globe :size="16" aria-hidden="true" />
+          {{ t("Use official website login") }}
         </button>
         <button class="btn btn-sm" type="button" @click="emit('retry')">
           <RefreshCw :size="16" aria-hidden="true" />

@@ -4,12 +4,10 @@ import {
   addNeteasePlaylistTrack,
   cancelNeteasePasswordLogin,
   cancelNeteasePhoneLogin,
-  cancelNeteaseQrLogin,
   completeNeteasePasswordLogin,
   completeNeteasePhoneLogin,
   getNeteaseRecommendations,
   loginNeteasePassword,
-  pollNeteaseQrLogin,
   resolveNeteaseTrack,
   startNeteasePhoneLogin,
   neteaseWebLoginSupported,
@@ -33,21 +31,6 @@ const accountRef = "netease-account:00000000-0000-4000-8000-000000000001";
 describe("NetEase API", () => {
   beforeEach(() => {
     invokeMock.mockReset();
-  });
-
-  it("polls QR login with camelCase command arguments", async () => {
-    invokeMock.mockResolvedValue({ status: "waitingForScan", account: null });
-
-    await pollNeteaseQrLogin("qr-session");
-
-    expect(invokeMock).toHaveBeenCalledWith("poll_netease_qr_login", {
-      sessionId: "qr-session",
-    });
-
-    await cancelNeteaseQrLogin("qr-session");
-    expect(invokeMock).toHaveBeenLastCalledWith("cancel_netease_qr_login", {
-      sessionId: "qr-session",
-    });
   });
 
   it("keeps official website credentials in the host and exchanges only a session id", async () => {
@@ -102,19 +85,6 @@ describe("NetEase API", () => {
       ["complete_netease_password_login", { sessionId: "password-session" }],
       ["cancel_netease_password_login", { sessionId: "password-session" }],
     ]);
-  });
-
-  it("passes a completed web security check to the same QR session", async () => {
-    invokeMock.mockResolvedValue({ status: "waitingForConfirmation", account: null });
-    await pollNeteaseQrLogin("qr-session", {
-      secureCaptcha: "fixture-only-validate",
-      ydDeviceToken: "fixture-only-device-token",
-    });
-    expect(invokeMock).toHaveBeenCalledWith("poll_netease_qr_login", {
-      sessionId: "qr-session",
-      secureCaptcha: "fixture-only-validate",
-      ydDeviceToken: "fixture-only-device-token",
-    });
   });
 
   it("dispatches recommendation requests through the bundled Plugin", async () => {

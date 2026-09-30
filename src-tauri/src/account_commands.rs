@@ -81,45 +81,6 @@ pub(crate) async fn cancel_netease_web_login(
 }
 
 #[tauri::command]
-pub(crate) async fn start_netease_qr_login(
-    state: State<'_, AppState>,
-) -> Result<netease::NeteaseQrLoginStart, NeteaseCommandError> {
-    let bridge = Arc::clone(&state.netease_bridge);
-    run_netease_task(move || bridge.start_qr_login()).await
-}
-
-#[tauri::command]
-pub(crate) async fn poll_netease_qr_login(
-    state: State<'_, AppState>,
-    session_id: String,
-    secure_captcha: Option<String>,
-    yd_device_token: Option<String>,
-) -> Result<netease::NeteaseQrLoginPoll, NeteaseCommandError> {
-    let bridge = Arc::clone(&state.netease_bridge);
-    let poll = run_netease_task(move || {
-        bridge.poll_qr_login(
-            session_id.trim(),
-            secure_captcha.as_deref(),
-            yd_device_token.as_deref(),
-        )
-    })
-    .await?;
-    if poll.account.is_some() {
-        state.online_music_cache.invalidate();
-    }
-    Ok(poll)
-}
-
-#[tauri::command]
-pub(crate) async fn cancel_netease_qr_login(
-    state: State<'_, AppState>,
-    session_id: String,
-) -> Result<(), NeteaseCommandError> {
-    let bridge = Arc::clone(&state.netease_bridge);
-    run_netease_task(move || bridge.cancel_qr_login(session_id.trim())).await
-}
-
-#[tauri::command]
 pub(crate) async fn start_netease_phone_login(
     state: State<'_, AppState>,
     phone: String,

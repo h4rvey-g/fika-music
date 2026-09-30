@@ -443,7 +443,9 @@ Important constraints:
   resolution for those Remote Tracks, Playlist list/read, add selected track,
   and remove selected track. Search, lyrics, automatic sync, and bulk mutations
   remain out of scope.
-- Account connection uses NetEase QR login. Sessions are stored in the
+- Account connection defaults to official-web login on desktop and mobile,
+  with SMS as an alternative. The old in-app NetEase QR login is removed;
+  official-site scan options and security verification remain. Sessions are stored in the
   application-private SQLite database and exposed to the Provider only as
   scoped Account Refs.
   Missing/expired credentials fail closed and require reconnection.

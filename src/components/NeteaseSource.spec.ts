@@ -13,7 +13,6 @@ const pluginApiMocks = vi.hoisted(() => ({
 const neteaseApiMocks = vi.hoisted(() => ({
   cancelNeteasePasswordLogin: vi.fn(),
   cancelNeteasePhoneLogin: vi.fn(),
-  cancelNeteaseQrLogin: vi.fn(),
   completeNeteasePasswordLogin: vi.fn(),
   completeNeteasePhoneLogin: vi.fn(),
   disconnectNeteaseAccount: vi.fn(),
@@ -23,9 +22,7 @@ const neteaseApiMocks = vi.hoisted(() => ({
   listNeteaseAccounts: vi.fn(),
   listNeteaseMutationAudit: vi.fn(),
   loginNeteasePassword: vi.fn(),
-  pollNeteaseQrLogin: vi.fn(),
   startNeteasePhoneLogin: vi.fn(),
-  startNeteaseQrLogin: vi.fn(),
   neteaseWebLoginSupported: vi.fn(),
   startNeteaseWebLogin: vi.fn(),
   pollNeteaseWebLogin: vi.fn(),
@@ -85,7 +82,6 @@ describe("NeteaseSource", () => {
       createSourceAccount({ accountRef }),
     ]);
     neteaseApiMocks.cancelNeteasePasswordLogin.mockResolvedValue(undefined);
-    neteaseApiMocks.cancelNeteaseQrLogin.mockResolvedValue(undefined);
     neteaseApiMocks.cancelNeteasePhoneLogin.mockResolvedValue(undefined);
     neteaseApiMocks.neteaseWebLoginSupported.mockResolvedValue(false);
     neteaseApiMocks.cancelNeteaseWebLogin.mockResolvedValue(undefined);
@@ -150,69 +146,6 @@ describe("NeteaseSource", () => {
     wrapper.unmount();
   });
 
-  it("cancels the host QR session when the connection view is dismissed", async () => {
-    neteaseApiMocks.startNeteaseQrLogin.mockResolvedValue({
-      sessionId: "qr-session",
-      qrImageDataUrl: "data:image/svg+xml;base64,PHN2Zy8+",
-      expiresAt: 300,
-    });
-    const wrapper = mountNeteaseSource();
-    await flushPromises();
-
-    const connect = wrapper
-      .findAll("button")
-      .find((button) => button.text().trim() === "Connect");
-    await connect?.trigger("click");
-    await flushPromises();
-    const qrTab = wrapper
-      .findAll('[role="tab"]')
-      .find((tab) => tab.text().includes("QR code"));
-    await qrTab?.trigger("click");
-    const createQr = wrapper
-      .findAll("button")
-      .find((button) => button.text().trim() === "Create QR code");
-    await createQr?.trigger("click");
-    await flushPromises();
-    const cancel = wrapper
-      .findAll("button")
-      .find((button) => button.text().trim() === "Cancel QR code");
-    await cancel?.trigger("click");
-
-    expect(neteaseApiMocks.cancelNeteaseQrLogin).toHaveBeenCalledWith("qr-session");
-    wrapper.unmount();
-  });
-
-  it.each([
-    { code: "api-failure", message: "NetEase API rejected poll QR login (code -462): 请完成验证操作" },
-    { code: "verification-required", message: "NetEase API rejected poll QR login (code 8821): verification required" },
-  ])("pauses a risk-controlled QR poll without hiding the code or retrying automatically: $code", async (error) => {
-    neteaseApiMocks.startNeteaseQrLogin.mockResolvedValue({
-      sessionId: "qr-session",
-      qrImageDataUrl: "data:image/svg+xml;base64,PHN2Zy8+",
-      expiresAt: 300,
-    });
-    neteaseApiMocks.pollNeteaseQrLogin.mockRejectedValue(error);
-    const wrapper = mountNeteaseSource();
-    await flushPromises();
-    await wrapper.findAll("button").find((button) => button.text().trim() === "Connect")?.trigger("click");
-    await wrapper.findAll('[role="tab"]').find((tab) => tab.text().includes("QR code"))?.trigger("click");
-    await wrapper.findAll("button").find((button) => button.text().trim() === "Create QR code")?.trigger("click");
-    await flushPromises();
-
-    await vi.waitFor(() => {
-      expect(wrapper.text()).toContain("QR login paused for security verification");
-    }, { timeout: 3_000 });
-    expect(wrapper.find('img[alt="NetEase login QR code"]').exists()).toBe(true);
-    expect(wrapper.text()).toContain(error.message);
-    expect(neteaseApiMocks.pollNeteaseQrLogin).toHaveBeenCalledTimes(1);
-    expect(neteaseApiMocks.cancelNeteaseQrLogin).not.toHaveBeenCalled();
-
-    await wrapper.findAll("button").find((button) => button.text() === "Check QR login again")?.trigger("click");
-    await flushPromises();
-    expect(neteaseApiMocks.pollNeteaseQrLogin).toHaveBeenCalledTimes(2);
-    wrapper.unmount();
-  });
-
   it("connects with an SMS verification code on one device", async () => {
     const phoneAccount = createSourceAccount({
       accountRef: "netease-account:00000000-0000-4000-8000-000000000002",
@@ -252,7 +185,23 @@ describe("NeteaseSource", () => {
     wrapper.unmount();
   });
 
-  it("defaults to official website login on desktop without collecting credentials", async () => {
+  it("waits for host availability before choosing the default login method", async () => {
+    let resolveSupport!: (supported: boolean) => void;
+    neteaseApiMocks.neteaseWebLoginSupported.mockReturnValue(new Promise<boolean>(resolve => {
+      resolveSupport = resolve;
+    }));
+    const wrapper = mountNeteaseSource();
+    await flushPromises();
+    const connect = wrapper.findAll("button").find(button => button.text().trim() === "Connect")!;
+    expect(connect.attributes("disabled")).toBeDefined();
+    resolveSupport(true);
+    await flushPromises();
+    await connect.trigger("click");
+    expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toBe("Official website");
+    wrapper.unmount();
+  });
+
+  it("defaults to official website login on desktop and mobile without collecting credentials", async () => {
     const webAccount = createSourceAccount({
       accountRef: "netease-account:00000000-0000-4000-8000-000000000003",
       displayName: "Web User",
@@ -269,6 +218,11 @@ describe("NeteaseSource", () => {
     await wrapper.findAll("button").find((button) => button.text().trim() === "Connect")?.trigger("click");
     expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toContain("Official website");
     expect(wrapper.find('input[type="password"]').exists()).toBe(false);
+    expect(wrapper.findAll('[role="tab"]').map(tab => tab.text())).toEqual([
+      "Official website", "Verification code",
+    ]);
+    expect(wrapper.find('img[alt="NetEase login QR code"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("Create QR code");
     await wrapper.findAll("button").find((button) => button.text().trim() === "Sign in on official website")?.trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("Waiting for official website login");
@@ -286,7 +240,7 @@ describe("NeteaseSource", () => {
     await wrapper.findAll("button").find((button) => button.text().trim() === "Connect")?.trigger("click");
     await wrapper.findAll("button").find((button) => button.text().trim() === "Sign in on official website")?.trigger("click");
     await flushPromises();
-    await wrapper.findAll('[role="tab"]').find((tab) => tab.text().includes("QR code"))?.trigger("click");
+    await wrapper.findAll('[role="tab"]').find((tab) => tab.text().includes("Verification code"))?.trigger("click");
     await flushPromises();
     expect(neteaseApiMocks.cancelNeteaseWebLogin).toHaveBeenCalledWith("web-session");
     expect(wrapper.text()).not.toContain("Waiting for official website login");
@@ -302,7 +256,8 @@ describe("NeteaseSource", () => {
     wrapper.unmount();
   });
 
-  it("opens a security-verification dialog when sending an SMS requires verification", async () => {
+  it("offers official web login when sending an SMS requires security verification", async () => {
+    neteaseApiMocks.neteaseWebLoginSupported.mockResolvedValue(true);
     neteaseApiMocks.startNeteasePhoneLogin.mockRejectedValue({
       code: "api-failure",
       message: "NetEase API rejected send verification code (code -462): 请完成验证操作",
@@ -310,6 +265,7 @@ describe("NeteaseSource", () => {
     const wrapper = mountNeteaseSource();
     await flushPromises();
     await wrapper.findAll("button").find((button) => button.text().trim() === "Connect")?.trigger("click");
+    await wrapper.findAll('[role="tab"]').find(tab => tab.text().includes("Verification code"))?.trigger("click");
     await wrapper.get('input[aria-label="NetEase phone number"]').setValue("13800138000");
     await wrapper.findAll("button").find((button) => button.text().trim() === "Send code")?.trigger("click");
     await flushPromises();
@@ -319,8 +275,8 @@ describe("NeteaseSource", () => {
     expect(dialog.text()).toContain("No usable verification challenge was returned.");
     expect(wrapper.find('input[aria-label="NetEase verification code"]').exists()).toBe(false);
     expect(wrapper.text()).not.toContain("Verification code sent");
-    await dialog.findAll("button").find((button) => button.text().includes("Use QR-code login"))?.trigger("click");
-    expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toContain("QR code");
+    await dialog.findAll("button").find((button) => button.text().includes("Use official website login"))?.trigger("click");
+    expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toContain("Official website");
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
     wrapper.unmount();
   });

@@ -1316,7 +1316,7 @@ dependencies = [
 
 [[package]]
 name = "fika-music"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -1361,6 +1361,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-global-shortcut",
+ "tauri-plugin-netease-login",
  "tauri-plugin-opener",
  "tauri-plugin-os",
  "tauri-plugin-process",
@@ -5366,6 +5367,15 @@ dependencies = [
  "tauri",
  "tauri-plugin",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "tauri-plugin-netease-login"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tauri",
+ "tauri-plugin",
 ]
 
 [[package]]

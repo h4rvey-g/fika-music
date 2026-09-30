@@ -49,8 +49,8 @@ describe("source workspace lifecycle", () => {
   it("keeps the QR visible when risk control rejects its first poll", async () => {
     vi.useFakeTimers();
     const error = {
-      code: "api-failure",
-      message: "NetEase API rejected poll QR login (code -462): 请完成验证操作",
+      code: "verification-required",
+      message: "Music Provider requires security verification",
     };
     const poll = vi.fn()
       .mockRejectedValueOnce(error)
@@ -58,7 +58,7 @@ describe("source workspace lifecycle", () => {
     const cancel = vi.fn(async () => undefined);
     const onError = vi.fn();
     const session = useQrLoginSession({
-      providerName: "NetEase Cloud Music",
+      providerName: "Music Provider",
       start: async () => ({ sessionId: "session-1", qrImageDataUrl: "fixture-qr" }),
       poll,
       cancel,

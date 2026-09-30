@@ -10,8 +10,8 @@ use fika_music_lib::kugou::{
 };
 use fika_music_lib::lyrics::{LocalTrackPlaybackDetails, TrackLyricsQuery};
 use fika_music_lib::netease::{
-    NeteaseAccount, NeteaseMutationAudit, NeteasePhoneLoginStart, NeteaseQrLoginPoll,
-    NeteaseQrLoginStart, NeteaseWebLoginPoll, NeteaseWebLoginStart,
+    NeteaseAccount, NeteaseMutationAudit, NeteasePhoneLoginStart, NeteaseWebLoginPoll,
+    NeteaseWebLoginStart,
 };
 use fika_music_lib::online_download::{
     OnlineDownloadItem, OnlineDownloadItemState, OnlineDownloadProgressEvent, OnlineDownloadState,
@@ -133,8 +133,6 @@ fn generate(output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     export_all::<SourceRequestOutcome>(&config)?;
     export_all::<NeteaseAccount>(&config)?;
     export_all::<NeteasePhoneLoginStart>(&config)?;
-    export_all::<NeteaseQrLoginStart>(&config)?;
-    export_all::<NeteaseQrLoginPoll>(&config)?;
     export_all::<NeteaseWebLoginStart>(&config)?;
     export_all::<NeteaseWebLoginPoll>(&config)?;
     export_all::<NeteaseMutationAudit>(&config)?;

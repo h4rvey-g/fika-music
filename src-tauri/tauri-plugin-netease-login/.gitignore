@@ -1,0 +1,8 @@
+/permissions/schemas/
+/target/
+/ios/.build/
+/ios/.swiftpm/
+/android/.gradle/
+/android/build/
+.tauri/
+

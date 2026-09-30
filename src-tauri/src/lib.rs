@@ -57,13 +57,12 @@ mod yt_dlp_sidecar;
 
 use account_commands::{
     cancel_kugou_phone_login, cancel_kugou_qr_login, cancel_netease_password_login,
-    cancel_netease_phone_login, cancel_netease_qr_login, cancel_netease_web_login,
-    complete_kugou_phone_login, complete_netease_password_login, complete_netease_phone_login,
-    disconnect_kugou_account, disconnect_netease_account, list_kugou_accounts,
-    list_netease_accounts, list_netease_mutation_audit, login_netease_password,
-    netease_web_login_supported, poll_kugou_qr_login, poll_netease_qr_login,
-    poll_netease_web_login, start_kugou_phone_login, start_kugou_qr_login,
-    start_netease_phone_login, start_netease_qr_login, start_netease_web_login,
+    cancel_netease_phone_login, cancel_netease_web_login, complete_kugou_phone_login,
+    complete_netease_password_login, complete_netease_phone_login, disconnect_kugou_account,
+    disconnect_netease_account, list_kugou_accounts, list_netease_accounts,
+    list_netease_mutation_audit, login_netease_password, netease_web_login_supported,
+    poll_kugou_qr_login, poll_netease_web_login, start_kugou_phone_login, start_kugou_qr_login,
+    start_netease_phone_login, start_netease_web_login,
 };
 pub use account_commands::{KugouCommandError, NeteaseCommandError};
 pub use album_art::{
@@ -226,13 +225,10 @@ macro_rules! with_tauri_commands {
             remove_plugin,
             clear_plugin_diagnostics,
             dispatch_plugin_request,
-            start_netease_qr_login,
             netease_web_login_supported,
             start_netease_web_login,
             poll_netease_web_login,
             cancel_netease_web_login,
-            poll_netease_qr_login,
-            cancel_netease_qr_login,
             start_netease_phone_login,
             complete_netease_phone_login,
             login_netease_password,
@@ -6327,6 +6323,9 @@ fn prepare_bundled_plugins_dir(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default().plugin(tauri_plugin_os::init());
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let builder = builder.plugin(tauri_plugin_netease_login::init());
     #[cfg(desktop)]
     let builder = builder
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -6408,6 +6407,18 @@ mod tests {
         assert!(super::is_application_webview("desktop-lyrics"));
         assert!(!super::is_application_webview("netease-web-login-fixture"));
         assert!(!super::is_application_webview("main-remote"));
+    }
+
+    #[test]
+    fn removed_netease_qr_commands_should_not_be_registered() {
+        for command in [
+            "start_netease_qr_login",
+            "poll_netease_qr_login",
+            "cancel_netease_qr_login",
+        ] {
+            assert!(!super::TAURI_COMMAND_NAMES.contains(&command));
+        }
+        assert!(super::TAURI_COMMAND_NAMES.contains(&"start_kugou_qr_login"));
     }
     use super::*;
     use std::net::TcpListener;

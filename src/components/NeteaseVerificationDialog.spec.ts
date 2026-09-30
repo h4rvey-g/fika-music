@@ -41,13 +41,16 @@ describe("NeteaseVerificationDialog", () => {
     wrapper.unmount();
   });
 
-  it("offers QR login instead of an invented challenge when parameters are missing", () => {
+  it("offers official website login instead of an invented challenge when parameters are missing", async () => {
     const wrapper = mount(NeteaseVerificationDialog, {
-      props: { verification: { message: "verification required", challenge: null } },
+      props: { verification: { message: "verification required", challenge: null }, webLoginSupported: true },
     });
     expect(wrapper.text()).toContain("No usable verification challenge was returned.");
     expect(wrapper.find("img").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("Open verification");
+    expect(wrapper.text()).not.toContain("Use QR-code login");
+    await wrapper.findAll("button").find(button => button.text() === "Use official website login")?.trigger("click");
+    expect(wrapper.emitted("useWeb")).toHaveLength(1);
     wrapper.unmount();
   });
 

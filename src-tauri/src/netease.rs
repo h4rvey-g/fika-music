@@ -40,8 +40,6 @@ pub const NETEASE_HOST_BRIDGE_ID: &str = "netease-api-enhanced";
 pub const NETEASE_API_BASIS_VERSION: &str = "4.32.1";
 
 const ACCOUNT_REF_PREFIX: &str = "netease-account:";
-const QR_SESSION_TTL_SECONDS: i64 = 300;
-const MAX_PENDING_QR_SESSIONS: usize = 8;
 const PHONE_LOGIN_SESSION_TTL_SECONDS: i64 = 600;
 const MAX_PENDING_PHONE_LOGIN_SESSIONS: usize = 8;
 const PASSWORD_LOGIN_SESSION_TTL_SECONDS: i64 = 600;
@@ -103,15 +101,6 @@ impl NeteaseAccountStatus {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "bindings.ts")]
-pub struct NeteaseQrLoginStart {
-    pub session_id: String,
-    pub qr_image_data_url: String,
-    pub expires_at: i64,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export_to = "bindings.ts")]
 pub struct NeteasePhoneLoginStart {
     pub session_id: String,
     pub expires_at: i64,
@@ -158,24 +147,6 @@ impl fmt::Debug for NeteaseVerificationChallenge {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export_to = "bindings.ts")]
-pub enum NeteaseQrLoginStatus {
-    WaitingForScan,
-    WaitingForConfirmation,
-    Connected,
-    Expired,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export_to = "bindings.ts")]
-pub struct NeteaseQrLoginPoll {
-    pub status: NeteaseQrLoginStatus,
-    pub account: Option<NeteaseAccount>,
-}
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "bindings.ts")]
@@ -198,8 +169,6 @@ pub enum NeteaseBridgeError {
     CredentialExpired,
     #[error("NetEase account was not found")]
     AccountNotFound,
-    #[error("NetEase QR login session was not found or has expired")]
-    QrSessionExpired,
     #[error("enter a valid 11-digit mainland China phone number")]
     InvalidPhone,
     #[error("enter the verification code from the SMS message")]
@@ -216,7 +185,7 @@ pub enum NeteaseBridgeError {
     WebLoginSessionExpired,
     #[error("NetEase official website login was cancelled")]
     WebLoginCancelled,
-    #[error("NetEase official website login is only available on desktop")]
+    #[error("NetEase official website login is unavailable on this platform")]
     WebLoginUnsupported,
     #[error("NetEase API rejected {operation} (code {code}): {message}")]
     Api {
@@ -254,7 +223,6 @@ impl NeteaseBridgeError {
             Self::Bridge(_) => "bridge-failure",
             Self::CredentialExpired => "credential-expired",
             Self::AccountNotFound => "account-not-found",
-            Self::QrSessionExpired => "qr-session-expired",
             Self::InvalidPhone => "invalid-phone",
             Self::InvalidVerificationCode => "invalid-verification-code",
             Self::InvalidLoginAccount => "invalid-login-account",
@@ -411,14 +379,6 @@ struct StoredSession {
 }
 
 #[derive(Clone)]
-struct PendingQrSession {
-    key: String,
-    chain_id: String,
-    client: LoginClient,
-    expires_at: i64,
-}
-
-#[derive(Clone)]
 struct PendingPhoneLoginSession {
     phone: String,
     client: LoginClient,
@@ -437,18 +397,12 @@ pub struct NeteaseServiceBridge {
     db: SharedConnection,
     credentials: Arc<dyn CredentialStore>,
     source_host: Arc<source_runtime::DefaultSourceHost>,
-    qr_sessions: Mutex<BTreeMap<String, PendingQrSession>>,
     phone_login_sessions: Mutex<BTreeMap<String, PendingPhoneLoginSession>>,
     password_login_sessions: Mutex<BTreeMap<String, PendingPasswordLoginSession>>,
 }
 
 impl fmt::Debug for NeteaseServiceBridge {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let pending_sessions = self
-            .qr_sessions
-            .lock()
-            .map(|sessions| sessions.len())
-            .unwrap_or_default();
         let pending_phone_login_sessions = self
             .phone_login_sessions
             .lock()
@@ -462,7 +416,6 @@ impl fmt::Debug for NeteaseServiceBridge {
         formatter
             .debug_struct("NeteaseServiceBridge")
             .field("api_basis_version", &NETEASE_API_BASIS_VERSION)
-            .field("pending_qr_sessions", &pending_sessions)
             .field(
                 "pending_phone_login_sessions",
                 &pending_phone_login_sessions,
@@ -496,67 +449,11 @@ impl NeteaseServiceBridge {
             db,
             credentials,
             source_host,
-            qr_sessions: Mutex::new(BTreeMap::new()),
             phone_login_sessions: Mutex::new(BTreeMap::new()),
             password_login_sessions: Mutex::new(BTreeMap::new()),
         };
         bridge.restore_account_refs()?;
         Ok(bridge)
-    }
-
-    pub fn start_qr_login(&self) -> Result<NeteaseQrLoginStart, NeteaseBridgeError> {
-        self.start_qr_login_with_client(LoginClient::web()?)
-    }
-
-    fn start_qr_login_with_client(
-        &self,
-        client: LoginClient,
-    ) -> Result<NeteaseQrLoginStart, NeteaseBridgeError> {
-        let response = client.start_qr()?;
-        let body = checked_body(response, "start QR login")?;
-        let key = body
-            .get("unikey")
-            .or_else(|| body.pointer("/data/unikey"))
-            .and_then(JsonValue::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| NeteaseBridgeError::InvalidResponse {
-                operation: "start QR login",
-                message: "response did not include a QR key".to_owned(),
-            })?
-            .to_owned();
-        let chain_id = client.chain_id();
-        let qr_url = login::qr_url(&key, &chain_id)?;
-        let qr_image_data_url = qr_data_url(&qr_url)?;
-        let session_id = Uuid::new_v4().to_string();
-        let expires_at = now_timestamp() + QR_SESSION_TTL_SECONDS;
-        let mut sessions = self
-            .qr_sessions
-            .lock()
-            .map_err(|_| NeteaseBridgeError::Bridge("QR session lock was poisoned".to_owned()))?;
-        sessions.retain(|_, session| session.expires_at > now_timestamp());
-        if sessions.len() >= MAX_PENDING_QR_SESSIONS {
-            if let Some(oldest_id) = sessions
-                .iter()
-                .min_by_key(|(_, session)| session.expires_at)
-                .map(|(id, _)| id.clone())
-            {
-                sessions.remove(&oldest_id);
-            }
-        }
-        sessions.insert(
-            session_id.clone(),
-            PendingQrSession {
-                key,
-                chain_id,
-                client,
-                expires_at,
-            },
-        );
-        Ok(NeteaseQrLoginStart {
-            session_id,
-            qr_image_data_url,
-            expires_at,
-        })
     }
 
     pub fn start_phone_login(
@@ -788,92 +685,11 @@ impl NeteaseServiceBridge {
         self.remove_phone_login_session(session_id)
     }
 
-    pub fn poll_qr_login(
-        &self,
-        session_id: &str,
-        secure_captcha: Option<&str>,
-        yd_device_token: Option<&str>,
-    ) -> Result<NeteaseQrLoginPoll, NeteaseBridgeError> {
-        let session = self
-            .qr_sessions
-            .lock()
-            .map_err(|_| NeteaseBridgeError::Bridge("QR session lock was poisoned".to_owned()))?
-            .get(session_id)
-            .cloned()
-            .ok_or(NeteaseBridgeError::QrSessionExpired)?;
-
-        if session.expires_at <= now_timestamp() {
-            self.remove_qr_session(session_id)?;
-            return Ok(NeteaseQrLoginPoll {
-                status: NeteaseQrLoginStatus::Expired,
-                account: None,
-            });
-        }
-
-        let response = session.client.poll_qr(
-            &session.key,
-            &session.chain_id,
-            secure_captcha,
-            yd_device_token,
-        )?;
-        validate_response_size(&response, "poll QR login", MAX_API_RESPONSE_BYTES)?;
-        if response.status == 429 {
-            return Err(NeteaseBridgeError::RateLimited);
-        }
-        if !(200..300).contains(&response.status) {
-            return Err(api_error(
-                "poll QR login",
-                response_code(&response),
-                &response.body,
-            ));
-        }
-        let code = response
-            .body
-            .get("code")
-            .and_then(JsonValue::as_i64)
-            .or(response.code)
-            .unwrap_or_default();
-
-        match code {
-            800 => {
-                self.remove_qr_session(session_id)?;
-                Ok(NeteaseQrLoginPoll {
-                    status: NeteaseQrLoginStatus::Expired,
-                    account: None,
-                })
-            }
-            801 => Ok(NeteaseQrLoginPoll {
-                status: NeteaseQrLoginStatus::WaitingForScan,
-                account: None,
-            }),
-            802 => Ok(NeteaseQrLoginPoll {
-                status: NeteaseQrLoginStatus::WaitingForConfirmation,
-                account: None,
-            }),
-            803 => {
-                let account = self.finish_login(&session.client, "verify QR login")?;
-                self.remove_qr_session(session_id)?;
-                Ok(NeteaseQrLoginPoll {
-                    status: NeteaseQrLoginStatus::Connected,
-                    account: Some(account),
-                })
-            }
-            _ => Err(api_error("poll QR login", code, &response.body)),
-        }
-    }
-
     pub fn accounts(&self) -> Result<Vec<NeteaseAccount>, NeteaseBridgeError> {
         let db = self.db.lock().map_err(|_| {
             NeteaseBridgeError::Persistence("database lock was poisoned".to_owned())
         })?;
         load_accounts(&db)
-    }
-
-    pub fn cancel_qr_login(&self, session_id: &str) -> Result<(), NeteaseBridgeError> {
-        if session_id.trim().is_empty() {
-            return Err(NeteaseBridgeError::QrSessionExpired);
-        }
-        self.remove_qr_session(session_id)
     }
 
     pub fn disconnect_account(&self, account_ref: &str) -> Result<(), NeteaseBridgeError> {
@@ -1095,14 +911,6 @@ impl NeteaseServiceBridge {
                 )
                 .map_err(|error| NeteaseBridgeError::Bridge(error.to_string()))?;
         }
-        Ok(())
-    }
-
-    fn remove_qr_session(&self, session_id: &str) -> Result<(), NeteaseBridgeError> {
-        self.qr_sessions
-            .lock()
-            .map_err(|_| NeteaseBridgeError::Bridge("QR session lock was poisoned".to_owned()))?
-            .remove(session_id);
         Ok(())
     }
 
@@ -2713,11 +2521,7 @@ fn api_error(operation: &'static str, code: i64, body: &JsonValue) -> NeteaseBri
     .collect();
     if matches!(
         operation,
-        "send verification code"
-            | "log in with verification code"
-            | "log in with account password"
-            | "poll QR login"
-            | "start QR login"
+        "send verification code" | "log in with verification code" | "log in with account password"
     ) && (code == 8821
         || (matches!(code, -462 | 460)
             && (body.pointer("/data/verifyType").is_some()
@@ -3286,29 +3090,6 @@ mod tests {
     }
 
     #[test]
-    fn api_error_should_pause_web_qr_security_verification() {
-        let error = api_error("poll QR login", 8821, &json!({ "code": 8821 }));
-        assert!(matches!(
-            error,
-            NeteaseBridgeError::VerificationRequired {
-                code: 8821,
-                verification: None,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn api_error_should_classify_qr_risk_control_without_claiming_success() {
-        let error = api_error(
-            "poll QR login",
-            -462,
-            &json!({ "message": "verification required" }),
-        );
-        assert_eq!(error.code(), "verification-required");
-    }
-
-    #[test]
     fn api_error_should_not_turn_generic_risk_control_into_a_verification_challenge() {
         let error = api_error(
             "send verification code",
@@ -3821,78 +3602,6 @@ mod tests {
         assert_eq!(requests[4].line, "POST /weapi/w/nuser/account/get HTTP/1.1");
     }
 
-    #[test]
-    fn web_qr_login_should_keep_a_verified_session_until_account_confirmation() {
-        use login::tests::{mock_server, TestReply};
-        let (host, server) = mock_server(vec![
-            TestReply::json(json!({ "code": 200 })).cookie("MUSIC_A=fixture-guest; Path=/"),
-            TestReply::json(json!({ "code": 200, "unikey": "fixture-key" }))
-                .cookie("NMTID=fixture-issued; Path=/"),
-            TestReply::json(json!({ "code": 8821 })),
-            TestReply::json(json!({ "code": 801 })),
-            TestReply::json(
-                json!({ "code": 803, "cookie": "MUSIC_U=fixture-session; __csrf=fixture-csrf" }),
-            ),
-            TestReply::json(
-                json!({ "code": 200, "profile": { "userId": 42, "nickname": "Fixture account" } }),
-            ),
-        ]);
-        let credentials = Arc::new(MemoryCredentialStore::default());
-        let bridge = NeteaseServiceBridge::with_credentials(
-            test_database(),
-            Arc::new(DefaultSourceHost::new(Duration::from_secs(1), 1024)),
-            credentials.clone(),
-        )
-        .unwrap();
-        let start = bridge
-            .start_qr_login_with_client(LoginClient::web().unwrap().with_test_host(host))
-            .unwrap();
-        let chain_id = bridge.qr_sessions.lock().unwrap()[&start.session_id]
-            .chain_id
-            .clone();
-        let error = bridge
-            .poll_qr_login(&start.session_id, None, None)
-            .unwrap_err();
-        assert_eq!(error.code(), "verification-required");
-        assert!(bridge
-            .qr_sessions
-            .lock()
-            .unwrap()
-            .contains_key(&start.session_id));
-        assert_eq!(
-            bridge
-                .poll_qr_login(
-                    &start.session_id,
-                    Some("fixture-validate"),
-                    Some("fixture-device")
-                )
-                .unwrap()
-                .status,
-            NeteaseQrLoginStatus::WaitingForScan
-        );
-        let connected = bridge.poll_qr_login(&start.session_id, None, None).unwrap();
-        assert_eq!(connected.status, NeteaseQrLoginStatus::Connected);
-        let account = connected.account.unwrap();
-        let stored: StoredSession =
-            serde_json::from_str(&credentials.load(&account.account_ref).unwrap()).unwrap();
-        assert_eq!(stored.cookies["MUSIC_U"], "fixture-session");
-        assert_eq!(stored.cookies["NMTID"], "fixture-issued");
-        assert!(!bridge
-            .qr_sessions
-            .lock()
-            .unwrap()
-            .contains_key(&start.session_id));
-        let requests = server.join().unwrap();
-        for request in &requests[2..5] {
-            assert_eq!(request.headers["x-login-chain-id"], chain_id);
-        }
-        assert_eq!(requests[5].line, "POST /weapi/w/nuser/account/get HTTP/1.1");
-        assert!(requests[5].headers["cookie"].contains("NMTID=fixture-issued"));
-        assert!(!serde_json::to_string(&account)
-            .unwrap()
-            .contains("fixture-session"));
-    }
-
     fn web_import_bridge() -> (NeteaseServiceBridge, Arc<MemoryCredentialStore>) {
         let credentials = Arc::new(MemoryCredentialStore::default());
         let bridge = NeteaseServiceBridge::with_credentials(
@@ -4002,65 +3711,6 @@ mod tests {
             ),
             Err(NeteaseBridgeError::CredentialExpired)
         ));
-    }
-
-    #[test]
-    fn qr_success_without_a_cookie_should_not_connect_or_request_an_account() {
-        use login::tests::{mock_server, TestReply};
-        let (host, server) = mock_server(vec![
-            TestReply::json(json!({ "code": 200 })).cookie("MUSIC_A=fixture-guest; Path=/"),
-            TestReply::json(json!({ "code": 200, "unikey": "fixture-key" })),
-            TestReply::json(json!({ "code": 803 })),
-        ]);
-        let bridge = NeteaseServiceBridge::with_credentials(
-            test_database(),
-            Arc::new(DefaultSourceHost::new(Duration::from_secs(1), 1024)),
-            Arc::new(MemoryCredentialStore::default()),
-        )
-        .unwrap();
-        let start = bridge
-            .start_qr_login_with_client(LoginClient::web().unwrap().with_test_host(host))
-            .unwrap();
-        assert!(matches!(
-            bridge.poll_qr_login(&start.session_id, None, None),
-            Err(NeteaseBridgeError::CredentialExpired)
-        ));
-        assert!(bridge.accounts().unwrap().is_empty());
-        assert_eq!(server.join().unwrap().len(), 3);
-    }
-
-    #[test]
-    fn qr_expiration_should_release_web_context_without_another_request() {
-        use login::tests::{mock_server, TestReply};
-        let (host, server) = mock_server(vec![
-            TestReply::json(json!({ "code": 200 })).cookie("MUSIC_A=fixture-guest; Path=/"),
-            TestReply::json(json!({ "code": 200, "unikey": "fixture-key" })),
-        ]);
-        let bridge = NeteaseServiceBridge::with_credentials(
-            test_database(),
-            Arc::new(DefaultSourceHost::new(Duration::from_secs(1), 1024)),
-            Arc::new(MemoryCredentialStore::default()),
-        )
-        .unwrap();
-        let start = bridge
-            .start_qr_login_with_client(LoginClient::web().unwrap().with_test_host(host))
-            .unwrap();
-        bridge
-            .qr_sessions
-            .lock()
-            .unwrap()
-            .get_mut(&start.session_id)
-            .unwrap()
-            .expires_at = now_timestamp() - 1;
-        assert_eq!(
-            bridge
-                .poll_qr_login(&start.session_id, None, None)
-                .unwrap()
-                .status,
-            NeteaseQrLoginStatus::Expired
-        );
-        assert!(bridge.qr_sessions.lock().unwrap().is_empty());
-        assert_eq!(server.join().unwrap().len(), 2);
     }
 
     #[test]
