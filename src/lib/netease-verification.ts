@@ -31,7 +31,11 @@ export function neteaseVerificationNotice(error: unknown): NeteaseVerificationNo
         && url.pathname === "/encrypt-pages"
         && !url.username && !url.password
       ) {
-        challenge = { url: verification.url, qrImageDataUrl: verification.qrImageDataUrl };
+        challenge = {
+          url: verification.url,
+          qrImageDataUrl: verification.qrImageDataUrl,
+          sessionId: typeof verification.sessionId === "string" ? verification.sessionId : null,
+        };
       }
     } catch { /* Invalid verification URLs remain unavailable. */ }
   }

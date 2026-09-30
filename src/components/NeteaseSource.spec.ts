@@ -11,8 +11,10 @@ const pluginApiMocks = vi.hoisted(() => ({
 }));
 
 const neteaseApiMocks = vi.hoisted(() => ({
+  cancelNeteasePasswordLogin: vi.fn(),
   cancelNeteasePhoneLogin: vi.fn(),
   cancelNeteaseQrLogin: vi.fn(),
+  completeNeteasePasswordLogin: vi.fn(),
   completeNeteasePhoneLogin: vi.fn(),
   disconnectNeteaseAccount: vi.fn(),
   getNeteasePlaylist: vi.fn(),
@@ -20,9 +22,14 @@ const neteaseApiMocks = vi.hoisted(() => ({
   getNeteaseRecommendations: vi.fn(),
   listNeteaseAccounts: vi.fn(),
   listNeteaseMutationAudit: vi.fn(),
+  loginNeteasePassword: vi.fn(),
   pollNeteaseQrLogin: vi.fn(),
   startNeteasePhoneLogin: vi.fn(),
   startNeteaseQrLogin: vi.fn(),
+  neteaseWebLoginSupported: vi.fn(),
+  startNeteaseWebLogin: vi.fn(),
+  pollNeteaseWebLogin: vi.fn(),
+  cancelNeteaseWebLogin: vi.fn(),
 }));
 
 vi.mock("../lib/plugin-api", () => pluginApiMocks);
@@ -77,8 +84,11 @@ describe("NeteaseSource", () => {
     neteaseApiMocks.listNeteaseAccounts.mockResolvedValue([
       createSourceAccount({ accountRef }),
     ]);
+    neteaseApiMocks.cancelNeteasePasswordLogin.mockResolvedValue(undefined);
     neteaseApiMocks.cancelNeteaseQrLogin.mockResolvedValue(undefined);
     neteaseApiMocks.cancelNeteasePhoneLogin.mockResolvedValue(undefined);
+    neteaseApiMocks.neteaseWebLoginSupported.mockResolvedValue(false);
+    neteaseApiMocks.cancelNeteaseWebLogin.mockResolvedValue(undefined);
   });
 
   it("shows login and audio source controls without loading music content", async () => {
@@ -239,6 +249,56 @@ describe("NeteaseSource", () => {
       "123456",
     );
     expect(wrapper.text()).toContain("Phone User connected.");
+    wrapper.unmount();
+  });
+
+  it("defaults to official website login on desktop without collecting credentials", async () => {
+    const webAccount = createSourceAccount({
+      accountRef: "netease-account:00000000-0000-4000-8000-000000000003",
+      displayName: "Web User",
+    });
+    neteaseApiMocks.neteaseWebLoginSupported.mockResolvedValue(true);
+    neteaseApiMocks.listNeteaseAccounts
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([webAccount]);
+    neteaseApiMocks.startNeteaseWebLogin.mockResolvedValue({ sessionId: "web-session", expiresAt: 600 });
+    neteaseApiMocks.pollNeteaseWebLogin.mockResolvedValue({ status: "connected", account: webAccount });
+    const wrapper = mountNeteaseSource();
+    await flushPromises();
+
+    await wrapper.findAll("button").find((button) => button.text().trim() === "Connect")?.trigger("click");
+    expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toContain("Official website");
+    expect(wrapper.find('input[type="password"]').exists()).toBe(false);
+    await wrapper.findAll("button").find((button) => button.text().trim() === "Sign in on official website")?.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("Waiting for official website login");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("Web User connected."), { timeout: 3_000 });
+    expect(neteaseApiMocks.pollNeteaseWebLogin).toHaveBeenCalledWith("web-session");
+    expect(neteaseApiMocks.loginNeteasePassword).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("closes the official login window when switching login methods", async () => {
+    neteaseApiMocks.neteaseWebLoginSupported.mockResolvedValue(true);
+    neteaseApiMocks.startNeteaseWebLogin.mockResolvedValue({ sessionId: "web-session", expiresAt: 600 });
+    const wrapper = mountNeteaseSource();
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text().trim() === "Connect")?.trigger("click");
+    await wrapper.findAll("button").find((button) => button.text().trim() === "Sign in on official website")?.trigger("click");
+    await flushPromises();
+    await wrapper.findAll('[role="tab"]').find((tab) => tab.text().includes("QR code"))?.trigger("click");
+    await flushPromises();
+    expect(neteaseApiMocks.cancelNeteaseWebLogin).toHaveBeenCalledWith("web-session");
+    expect(wrapper.text()).not.toContain("Waiting for official website login");
+    wrapper.unmount();
+  });
+
+  it("does not expose official website login on unsupported platforms", async () => {
+    const wrapper = mountNeteaseSource();
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text().trim() === "Connect")?.trigger("click");
+    expect(wrapper.text()).not.toContain("Official website");
+    expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toContain("Verification code");
     wrapper.unmount();
   });
 

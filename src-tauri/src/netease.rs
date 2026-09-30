@@ -44,6 +44,8 @@ const QR_SESSION_TTL_SECONDS: i64 = 300;
 const MAX_PENDING_QR_SESSIONS: usize = 8;
 const PHONE_LOGIN_SESSION_TTL_SECONDS: i64 = 600;
 const MAX_PENDING_PHONE_LOGIN_SESSIONS: usize = 8;
+const PASSWORD_LOGIN_SESSION_TTL_SECONDS: i64 = 600;
+const MAX_PENDING_PASSWORD_LOGIN_SESSIONS: usize = 8;
 const API_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_API_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 // Playlist detail responses can include every track id and embedded track metadata.
@@ -115,12 +117,39 @@ pub struct NeteasePhoneLoginStart {
     pub expires_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct NeteaseWebLoginStart {
+    pub session_id: String,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub enum NeteaseWebLoginStatus {
+    Waiting,
+    Connected,
+    Cancelled,
+    Expired,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "bindings.ts")]
+pub struct NeteaseWebLoginPoll {
+    pub status: NeteaseWebLoginStatus,
+    pub account: Option<NeteaseAccount>,
+}
+
 #[derive(Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "bindings.ts")]
 pub struct NeteaseVerificationChallenge {
     pub url: String,
     pub qr_image_data_url: String,
+    pub session_id: Option<String>,
 }
 
 impl fmt::Debug for NeteaseVerificationChallenge {
@@ -175,8 +204,20 @@ pub enum NeteaseBridgeError {
     InvalidPhone,
     #[error("enter the verification code from the SMS message")]
     InvalidVerificationCode,
+    #[error("enter an email address or an 11-digit mainland China phone number")]
+    InvalidLoginAccount,
+    #[error("enter a password")]
+    InvalidLoginPassword,
     #[error("NetEase verification-code login session was not found or has expired")]
     PhoneLoginSessionExpired,
+    #[error("NetEase account-password login session was not found or has expired")]
+    PasswordLoginSessionExpired,
+    #[error("NetEase official website login session expired")]
+    WebLoginSessionExpired,
+    #[error("NetEase official website login was cancelled")]
+    WebLoginCancelled,
+    #[error("NetEase official website login is only available on desktop")]
+    WebLoginUnsupported,
     #[error("NetEase API rejected {operation} (code {code}): {message}")]
     Api {
         operation: &'static str,
@@ -216,7 +257,13 @@ impl NeteaseBridgeError {
             Self::QrSessionExpired => "qr-session-expired",
             Self::InvalidPhone => "invalid-phone",
             Self::InvalidVerificationCode => "invalid-verification-code",
+            Self::InvalidLoginAccount => "invalid-login-account",
+            Self::InvalidLoginPassword => "invalid-login-password",
             Self::PhoneLoginSessionExpired => "phone-login-session-expired",
+            Self::PasswordLoginSessionExpired => "password-login-session-expired",
+            Self::WebLoginSessionExpired => "web-login-session-expired",
+            Self::WebLoginCancelled => "web-login-cancelled",
+            Self::WebLoginUnsupported => "web-login-unsupported",
             Self::Api { .. } => "api-failure",
             Self::VerificationRequired { .. } => "verification-required",
             Self::RateLimited => "rate-limited",
@@ -378,12 +425,21 @@ struct PendingPhoneLoginSession {
     expires_at: i64,
 }
 
+#[derive(Clone)]
+struct PendingPasswordLoginSession {
+    path: &'static str,
+    data: JsonValue,
+    client: LoginClient,
+    expires_at: i64,
+}
+
 pub struct NeteaseServiceBridge {
     db: SharedConnection,
     credentials: Arc<dyn CredentialStore>,
     source_host: Arc<source_runtime::DefaultSourceHost>,
     qr_sessions: Mutex<BTreeMap<String, PendingQrSession>>,
     phone_login_sessions: Mutex<BTreeMap<String, PendingPhoneLoginSession>>,
+    password_login_sessions: Mutex<BTreeMap<String, PendingPasswordLoginSession>>,
 }
 
 impl fmt::Debug for NeteaseServiceBridge {
@@ -398,6 +454,11 @@ impl fmt::Debug for NeteaseServiceBridge {
             .lock()
             .map(|sessions| sessions.len())
             .unwrap_or_default();
+        let pending_password_login_sessions = self
+            .password_login_sessions
+            .lock()
+            .map(|sessions| sessions.len())
+            .unwrap_or_default();
         formatter
             .debug_struct("NeteaseServiceBridge")
             .field("api_basis_version", &NETEASE_API_BASIS_VERSION)
@@ -405,6 +466,10 @@ impl fmt::Debug for NeteaseServiceBridge {
             .field(
                 "pending_phone_login_sessions",
                 &pending_phone_login_sessions,
+            )
+            .field(
+                "pending_password_login_sessions",
+                &pending_password_login_sessions,
             )
             .finish_non_exhaustive()
     }
@@ -433,6 +498,7 @@ impl NeteaseServiceBridge {
             source_host,
             qr_sessions: Mutex::new(BTreeMap::new()),
             phone_login_sessions: Mutex::new(BTreeMap::new()),
+            password_login_sessions: Mutex::new(BTreeMap::new()),
         };
         bridge.restore_account_refs()?;
         Ok(bridge)
@@ -535,6 +601,152 @@ impl NeteaseServiceBridge {
             session_id,
             expires_at,
         })
+    }
+
+    pub fn login_with_password(
+        &self,
+        account: &str,
+        password: &str,
+    ) -> Result<NeteaseAccount, NeteaseBridgeError> {
+        self.login_with_password_with_client(account, password, LoginClient::web()?)
+    }
+
+    fn login_with_password_with_client(
+        &self,
+        account: &str,
+        password: &str,
+        client: LoginClient,
+    ) -> Result<NeteaseAccount, NeteaseBridgeError> {
+        let (path, data) = client.password_login_payload(account, password)?;
+        client.ensure_anonymous_session()?;
+        let response = client.password_login_with_payload(path, data.clone())?;
+        match checked_password_login_body(&client, response, "log in with account password") {
+            Ok(_) => self.finish_login(&client, "verify account password login"),
+            Err(NeteaseBridgeError::VerificationRequired {
+                operation,
+                code,
+                message,
+                mut verification,
+            }) => {
+                if let Some(challenge) = verification.as_mut() {
+                    let session_id = self.insert_password_login_session(path, data, client)?;
+                    challenge.session_id = Some(session_id);
+                }
+                Err(NeteaseBridgeError::VerificationRequired {
+                    operation,
+                    code,
+                    message,
+                    verification,
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn complete_password_login(
+        &self,
+        session_id: &str,
+    ) -> Result<NeteaseAccount, NeteaseBridgeError> {
+        let session = self
+            .password_login_sessions
+            .lock()
+            .map_err(|_| {
+                NeteaseBridgeError::Bridge(
+                    "account-password login session lock was poisoned".to_owned(),
+                )
+            })?
+            .get(session_id)
+            .cloned()
+            .ok_or(NeteaseBridgeError::PasswordLoginSessionExpired)?;
+        if session.expires_at <= now_timestamp() {
+            self.remove_password_login_session(session_id)?;
+            return Err(NeteaseBridgeError::PasswordLoginSessionExpired);
+        }
+
+        let response = match session
+            .client
+            .password_login_with_payload(session.path, session.data.clone())
+        {
+            Ok(response) => response,
+            Err(error) => {
+                self.remove_password_login_session(session_id)?;
+                return Err(error);
+            }
+        };
+        let result =
+            checked_password_login_body(&session.client, response, "log in with account password");
+        match result {
+            Ok(_) => {
+                let account =
+                    self.finish_login(&session.client, "verify account password login")?;
+                self.remove_password_login_session(session_id)?;
+                Ok(account)
+            }
+            Err(NeteaseBridgeError::VerificationRequired {
+                operation,
+                code,
+                message,
+                mut verification,
+            }) => {
+                if let Some(challenge) = verification.as_mut() {
+                    challenge.session_id = Some(session_id.to_owned());
+                } else {
+                    self.remove_password_login_session(session_id)?;
+                }
+                Err(NeteaseBridgeError::VerificationRequired {
+                    operation,
+                    code,
+                    message,
+                    verification,
+                })
+            }
+            Err(error) => {
+                self.remove_password_login_session(session_id)?;
+                Err(error)
+            }
+        }
+    }
+
+    pub fn cancel_password_login(&self, session_id: &str) -> Result<(), NeteaseBridgeError> {
+        if session_id.trim().is_empty() {
+            return Err(NeteaseBridgeError::PasswordLoginSessionExpired);
+        }
+        self.remove_password_login_session(session_id)
+    }
+
+    fn insert_password_login_session(
+        &self,
+        path: &'static str,
+        data: JsonValue,
+        client: LoginClient,
+    ) -> Result<String, NeteaseBridgeError> {
+        let session_id = Uuid::new_v4().to_string();
+        let expires_at = now_timestamp() + PASSWORD_LOGIN_SESSION_TTL_SECONDS;
+        let mut sessions = self.password_login_sessions.lock().map_err(|_| {
+            NeteaseBridgeError::Bridge(
+                "account-password login session lock was poisoned".to_owned(),
+            )
+        })?;
+        sessions.retain(|_, session| session.expires_at > now_timestamp());
+        if sessions.len() >= MAX_PENDING_PASSWORD_LOGIN_SESSIONS {
+            if let Some(oldest_id) = sessions
+                .iter()
+                .min_by_key(|(_, session)| session.expires_at)
+                .map(|(id, _)| id.clone())
+            {
+                sessions.remove(&oldest_id);
+            }
+        }
+        sessions.insert(
+            session_id.clone(),
+            PendingPasswordLoginSession {
+                path,
+                data,
+                client,
+                expires_at,
+            },
+        );
+        Ok(session_id)
     }
 
     pub fn complete_phone_login(
@@ -714,6 +926,42 @@ impl NeteaseServiceBridge {
         client: &LoginClient,
         operation: &'static str,
     ) -> Result<NeteaseAccount, NeteaseBridgeError> {
+        self.finish_login_if(client, operation, || true)
+    }
+
+    pub(crate) fn import_web_session(
+        &self,
+        cookies: BTreeMap<String, String>,
+        claim_completion: impl FnOnce() -> bool,
+    ) -> Result<NeteaseAccount, NeteaseBridgeError> {
+        self.import_web_session_with_client(cookies, LoginClient::web()?, claim_completion)
+    }
+
+    fn import_web_session_with_client(
+        &self,
+        cookies: BTreeMap<String, String>,
+        client: LoginClient,
+        claim_completion: impl FnOnce() -> bool,
+    ) -> Result<NeteaseAccount, NeteaseBridgeError> {
+        for (name, value) in cookies {
+            if !["MUSIC_U", "__csrf", "NMTID", "MUSIC_A"].contains(&name.as_str())
+                || value.is_empty()
+                || value.len() > 8192
+                || value.chars().any(char::is_control)
+            {
+                return Err(NeteaseBridgeError::CredentialExpired);
+            }
+            client.api().set_cookie(name, value);
+        }
+        self.finish_login_if(&client, "verify official website login", claim_completion)
+    }
+
+    fn finish_login_if(
+        &self,
+        client: &LoginClient,
+        operation: &'static str,
+        claim_completion: impl FnOnce() -> bool,
+    ) -> Result<NeteaseAccount, NeteaseBridgeError> {
         if client
             .api()
             .cookie("MUSIC_U")
@@ -722,6 +970,13 @@ impl NeteaseServiceBridge {
             return Err(NeteaseBridgeError::CredentialExpired);
         }
         let body = checked_body(client.account()?, operation)?;
+        if body
+            .pointer("/account/anonimous")
+            .and_then(JsonValue::as_bool)
+            == Some(true)
+        {
+            return Err(NeteaseBridgeError::CredentialExpired);
+        }
         let profile = body
             .get("profile")
             .filter(|value| value.is_object())
@@ -755,6 +1010,10 @@ impl NeteaseServiceBridge {
         }
         let secret = serde_json::to_string(&session)
             .map_err(|error| NeteaseBridgeError::Persistence(error.to_string()))?;
+        // A closed or expired browser must not commit a login after its network check finishes.
+        if !claim_completion() {
+            return Err(NeteaseBridgeError::WebLoginCancelled);
+        }
         self.persist_account(user_id, display_name, avatar_url, &secret)
     }
 
@@ -852,6 +1111,18 @@ impl NeteaseServiceBridge {
             .lock()
             .map_err(|_| {
                 NeteaseBridgeError::Bridge("phone login session lock was poisoned".to_owned())
+            })?
+            .remove(session_id);
+        Ok(())
+    }
+
+    fn remove_password_login_session(&self, session_id: &str) -> Result<(), NeteaseBridgeError> {
+        self.password_login_sessions
+            .lock()
+            .map_err(|_| {
+                NeteaseBridgeError::Bridge(
+                    "account-password login session lock was poisoned".to_owned(),
+                )
             })?
             .remove(session_id);
         Ok(())
@@ -2233,17 +2504,35 @@ fn checked_body(
     checked_body_with_limit(response, operation, MAX_API_RESPONSE_BYTES)
 }
 
+fn checked_password_login_body(
+    client: &LoginClient,
+    response: ApiResponse,
+    operation: &'static str,
+) -> Result<JsonValue, NeteaseBridgeError> {
+    checked_password_login_body_with(response, operation, |parameters| {
+        client.verification_qr(parameters).map_err(|_| ())
+    })
+}
+
+fn checked_password_login_body_with(
+    response: ApiResponse,
+    operation: &'static str,
+    request_verification: impl FnOnce(JsonValue) -> Result<ApiResponse, ()>,
+) -> Result<JsonValue, NeteaseBridgeError> {
+    checked_login_body_with(response, operation, request_verification)
+}
+
 fn checked_phone_login_body(
     client: &LoginClient,
     response: ApiResponse,
     operation: &'static str,
 ) -> Result<JsonValue, NeteaseBridgeError> {
-    checked_phone_login_body_with(response, operation, |parameters| {
+    checked_login_body_with(response, operation, |parameters| {
         client.verification_qr(parameters).map_err(|_| ())
     })
 }
 
-fn checked_phone_login_body_with(
+fn checked_login_body_with(
     response: ApiResponse,
     operation: &'static str,
     request_verification: impl FnOnce(JsonValue) -> Result<ApiResponse, ()>,
@@ -2258,20 +2547,21 @@ fn checked_phone_login_body_with(
         } = &mut error
         {
             // Never retry the SMS request automatically or expose the raw risk-control payload.
-            match parameters.and_then(|parameters| {
-                let response =
-                    request_verification(parameters.clone()).map_err(|_| "QR request failed")?;
-                #[cfg(target_os = "android")]
-                eprintln!("{}", verification_qr_response_diagnostic(&response));
+            match parameters.map_err(str::to_owned).and_then(|parameters| {
+                let response = request_verification(parameters.clone())
+                    .map_err(|_| "QR request failed".to_owned())?;
+                let rejection_reason = verification_qr_rejection_reason(&response);
                 let body = checked_body(response, "create security verification QR code")
-                    .map_err(|_| "QR response rejected")?;
-                let qr_code = json_string(body.pointer("/data/qrCode")).ok_or("QR code missing")?;
-                phone_verification_challenge(&parameters, &qr_code).map_err(|_| "QR code invalid")
+                    .map_err(|_| rejection_reason)?;
+                let qr_code = json_string(body.pointer("/data/qrCode"))
+                    .ok_or_else(|| "QR code missing".to_owned())?;
+                phone_verification_challenge(&parameters, &qr_code)
+                    .map_err(|_| "QR code invalid".to_owned())
             }) {
                 Ok(challenge) => *verification = Some(challenge),
                 Err(reason) => {
                     message.push_str(" (security verification unavailable: ");
-                    message.push_str(reason);
+                    message.push_str(&reason);
                     message.push(')');
                 }
             }
@@ -2280,42 +2570,12 @@ fn checked_phone_login_body_with(
     })
 }
 
-#[cfg(any(test, target_os = "android"))]
-fn verification_qr_response_diagnostic(response: &ApiResponse) -> String {
-    let data = response.body.get("data");
-    let nonempty_qr = |value: Option<&JsonValue>| {
-        value
-            .and_then(JsonValue::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    let api_code = response
-        .code
-        .map_or_else(|| "none".to_owned(), |code| code.to_string());
-    let json = response.raw.len() <= MAX_API_RESPONSE_BYTES
-        && serde_json::from_slice::<JsonValue>(&response.raw).is_ok();
+fn verification_qr_rejection_reason(response: &ApiResponse) -> String {
     format!(
-        "[DEBUG-net-qr-01] http_status={} api_code={} json={} body={} data={} data_qr={} root_qr={}",
+        "QR response rejected (HTTP status {}, API code {})",
         response.status,
-        api_code,
-        json,
-        verification_json_kind(Some(&response.body)),
-        verification_json_kind(data),
-        nonempty_qr(response.body.pointer("/data/qrCode")),
-        nonempty_qr(response.body.get("qrCode")),
+        response_code(response)
     )
-}
-
-#[cfg(any(test, target_os = "android"))]
-fn verification_json_kind(value: Option<&JsonValue>) -> &'static str {
-    match value {
-        None => "missing",
-        Some(JsonValue::Null) => "null",
-        Some(JsonValue::Bool(_)) => "boolean",
-        Some(JsonValue::Number(_)) => "number",
-        Some(JsonValue::String(_)) => "string",
-        Some(JsonValue::Array(_)) => "array",
-        Some(JsonValue::Object(_)) => "object",
-    }
 }
 
 fn phone_verification_parameters(body: &JsonValue) -> Result<JsonValue, &'static str> {
@@ -2373,6 +2633,7 @@ fn phone_verification_challenge(
     Ok(NeteaseVerificationChallenge {
         url,
         qr_image_data_url,
+        session_id: None,
     })
 }
 
@@ -2454,6 +2715,7 @@ fn api_error(operation: &'static str, code: i64, body: &JsonValue) -> NeteaseBri
         operation,
         "send verification code"
             | "log in with verification code"
+            | "log in with account password"
             | "poll QR login"
             | "start QR login"
     ) && (code == 8821
@@ -3154,11 +3416,10 @@ mod tests {
             cookies: Vec::new(),
         };
 
-        let error =
-            checked_phone_login_body_with(response, "log in with verification code", |_| {
-                panic!("incomplete challenges must not trigger a QR request")
-            })
-            .unwrap_err();
+        let error = checked_login_body_with(response, "log in with verification code", |_| {
+            panic!("incomplete challenges must not trigger a QR request")
+        })
+        .unwrap_err();
         assert!(error
             .to_string()
             .ends_with("请完成验证操作 (security verification unavailable: verifyToken missing)"));
@@ -3176,8 +3437,8 @@ mod tests {
             cookies: Vec::new(),
         };
 
-        let error = checked_phone_login_body_with(response, "send verification code", |_| Err(()))
-            .unwrap_err();
+        let error =
+            checked_login_body_with(response, "send verification code", |_| Err(())).unwrap_err();
         assert!(error
             .to_string()
             .ends_with("security verification unavailable: QR request failed)"));
@@ -3197,7 +3458,7 @@ mod tests {
         };
         let qr_body = json!({ "code": 403, "message": "fixture-only-private-detail" });
 
-        let error = checked_phone_login_body_with(response, "send verification code", |_| {
+        let error = checked_login_body_with(response, "send verification code", |_| {
             Ok(ApiResponse {
                 status: 200,
                 code: Some(403),
@@ -3208,45 +3469,10 @@ mod tests {
         })
         .unwrap_err();
         let message = error.to_string();
-        assert!(message.ends_with("security verification unavailable: QR response rejected)"));
+        assert!(message.ends_with(
+            "security verification unavailable: QR response rejected (HTTP status 200, API code 403))"
+        ));
         assert!(!message.contains("fixture-only-private-detail"));
-    }
-
-    #[test]
-    fn verification_qr_diagnostic_should_identify_non_json_without_body_content() {
-        let response = ApiResponse {
-            status: 200,
-            code: None,
-            body: JsonValue::Null,
-            raw: b"<html>fixture-only-private-detail</html>".to_vec().into(),
-            cookies: Vec::new(),
-        };
-
-        assert_eq!(
-            verification_qr_response_diagnostic(&response),
-            "[DEBUG-net-qr-01] http_status=200 api_code=none json=false body=null data=missing data_qr=false root_qr=false"
-        );
-    }
-
-    #[test]
-    fn verification_qr_diagnostic_should_not_include_challenge_values() {
-        let body = json!({
-            "code": 200,
-            "data": { "qrCode": "fixture-only-secret-qr", "verifyToken": "fixture-only-secret-token" },
-            "phone": "fixture-only-secret-phone",
-        });
-        let response = ApiResponse {
-            status: 200,
-            code: Some(200),
-            raw: body.to_string().into_bytes().into(),
-            body,
-            cookies: Vec::new(),
-        };
-
-        assert_eq!(
-            verification_qr_response_diagnostic(&response),
-            "[DEBUG-net-qr-01] http_status=200 api_code=200 json=true body=object data=object data_qr=true root_qr=false"
-        );
     }
 
     #[test]
@@ -3262,7 +3488,7 @@ mod tests {
         };
         let qr_body = json!({ "code": 200, "data": { "qrCode": "fixture-only-qr" } });
 
-        let error = checked_phone_login_body_with(response, "send verification code", |_| {
+        let error = checked_login_body_with(response, "send verification code", |_| {
             Ok(ApiResponse {
                 status: 200,
                 code: Some(200),
@@ -3272,6 +3498,39 @@ mod tests {
             })
         })
         .unwrap_err();
+        assert!(matches!(
+            error,
+            NeteaseBridgeError::VerificationRequired {
+                verification: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn checked_password_login_body_should_attach_a_valid_challenge() {
+        let mut body = verification_fixture();
+        body["code"] = json!(-462);
+        let response = ApiResponse {
+            status: 200,
+            code: Some(-462),
+            raw: body.to_string().into_bytes().into(),
+            body,
+            cookies: Vec::new(),
+        };
+        let qr_body = json!({ "code": 200, "data": { "qrCode": "fixture-only-qr" } });
+
+        let error =
+            checked_password_login_body_with(response, "log in with account password", |_| {
+                Ok(ApiResponse {
+                    status: 200,
+                    code: Some(200),
+                    raw: qr_body.to_string().into_bytes().into(),
+                    body: qr_body,
+                    cookies: Vec::new(),
+                })
+            })
+            .unwrap_err();
         assert!(matches!(
             error,
             NeteaseBridgeError::VerificationRequired {
@@ -3507,6 +3766,62 @@ mod tests {
     }
 
     #[test]
+    fn password_login_should_reuse_the_verified_web_session() {
+        use login::tests::{mock_server, TestReply};
+        let mut risk = verification_fixture();
+        risk["code"] = json!(-462);
+        let (host, server) = mock_server(vec![
+            TestReply::json(json!({ "code": 200 })).cookie("MUSIC_A=fixture-guest; Path=/"),
+            TestReply::json(risk),
+            TestReply::json(json!({ "code": 200, "data": { "qrCode": "fixture-only-qr" } })),
+            TestReply::json(
+                json!({ "code": 200, "cookie": "MUSIC_U=fixture-session; __csrf=fixture-csrf" }),
+            ),
+            TestReply::json(
+                json!({ "code": 200, "profile": { "userId": 42, "nickname": "Fixture account" } }),
+            ),
+        ]);
+        let credentials = Arc::new(MemoryCredentialStore::default());
+        let bridge = NeteaseServiceBridge::with_credentials(
+            test_database(),
+            Arc::new(DefaultSourceHost::new(Duration::from_secs(1), 1024)),
+            credentials.clone(),
+        )
+        .unwrap();
+        let error = bridge
+            .login_with_password_with_client(
+                "user@example.com",
+                "fixture-password",
+                LoginClient::web().unwrap().with_test_host(host),
+            )
+            .unwrap_err();
+        let session_id = match error {
+            NeteaseBridgeError::VerificationRequired {
+                verification: Some(challenge),
+                ..
+            } => challenge
+                .session_id
+                .expect("password challenge should carry a session"),
+            other => panic!("expected a password verification challenge, got {other:?}"),
+        };
+        let account = bridge.complete_password_login(&session_id).unwrap();
+        let stored: StoredSession =
+            serde_json::from_str(&credentials.load(&account.account_ref).unwrap()).unwrap();
+        assert_eq!(stored.cookies["MUSIC_U"], "fixture-session");
+        assert!(bridge.password_login_sessions.lock().unwrap().is_empty());
+        let requests = server.join().unwrap();
+        assert_eq!(requests[0].line, "POST /weapi/register/anonimous HTTP/1.1");
+        assert_eq!(requests[1].line, "POST /weapi/w/login HTTP/1.1");
+        assert!(requests[1].headers["cookie"].contains("MUSIC_A=fixture-guest"));
+        assert_eq!(
+            requests[2].line,
+            "POST /weapi/frontrisk/verify/getqrcode HTTP/1.1"
+        );
+        assert_eq!(requests[3].line, "POST /weapi/w/login HTTP/1.1");
+        assert_eq!(requests[4].line, "POST /weapi/w/nuser/account/get HTTP/1.1");
+    }
+
+    #[test]
     fn web_qr_login_should_keep_a_verified_session_until_account_confirmation() {
         use login::tests::{mock_server, TestReply};
         let (host, server) = mock_server(vec![
@@ -3576,6 +3891,117 @@ mod tests {
         assert!(!serde_json::to_string(&account)
             .unwrap()
             .contains("fixture-session"));
+    }
+
+    fn web_import_bridge() -> (NeteaseServiceBridge, Arc<MemoryCredentialStore>) {
+        let credentials = Arc::new(MemoryCredentialStore::default());
+        let bridge = NeteaseServiceBridge::with_credentials(
+            test_database(),
+            Arc::new(DefaultSourceHost::new(Duration::from_secs(1), 1024)),
+            credentials.clone(),
+        )
+        .unwrap();
+        (bridge, credentials)
+    }
+
+    #[test]
+    fn web_session_import_should_confirm_and_securely_store_the_account() {
+        use login::tests::{mock_server, TestReply};
+        let (host, server) = mock_server(vec![TestReply::json(json!({
+            "code": 200, "account": { "anonimous": false },
+            "profile": { "userId": 42, "nickname": "Web fixture" }
+        }))]);
+        let (bridge, credentials) = web_import_bridge();
+        let account = bridge
+            .import_web_session_with_client(
+                BTreeMap::from([
+                    ("MUSIC_U".into(), "fixture-web-session".into()),
+                    ("__csrf".into(), "fixture-web-csrf".into()),
+                    ("NMTID".into(), "fixture-web-nmtid".into()),
+                ]),
+                LoginClient::web().unwrap().with_test_host(host),
+                || true,
+            )
+            .unwrap();
+        let stored: StoredSession =
+            serde_json::from_str(&credentials.load(&account.account_ref).unwrap()).unwrap();
+        assert_eq!(stored.cookies["MUSIC_U"], "fixture-web-session");
+        assert_eq!(stored.cookies["__csrf"], "fixture-web-csrf");
+        assert!(!serde_json::to_string(&account)
+            .unwrap()
+            .contains("fixture-web-session"));
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].line, "POST /weapi/w/nuser/account/get HTTP/1.1");
+        assert!(requests[0].headers["cookie"].contains("MUSIC_U=fixture-web-session"));
+    }
+
+    #[test]
+    fn web_session_import_should_not_persist_a_cancelled_verification() {
+        use login::tests::{mock_server, TestReply};
+        let (host, server) = mock_server(vec![TestReply::json(json!({
+            "code": 200, "profile": { "userId": 42, "nickname": "Web fixture" }
+        }))]);
+        let (bridge, _) = web_import_bridge();
+        let error = bridge
+            .import_web_session_with_client(
+                BTreeMap::from([("MUSIC_U".into(), "fixture-web-session".into())]),
+                LoginClient::web().unwrap().with_test_host(host),
+                || false,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "web-login-cancelled");
+        assert!(bridge.accounts().unwrap().is_empty());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn web_session_import_should_reject_an_anonymous_account() {
+        use login::tests::{mock_server, TestReply};
+        let (host, server) = mock_server(vec![TestReply::json(json!({
+            "code": 200, "account": { "anonimous": true },
+            "profile": { "userId": 42, "nickname": "Anonymous fixture" }
+        }))]);
+        let (bridge, _) = web_import_bridge();
+        let error = bridge
+            .import_web_session_with_client(
+                BTreeMap::from([("MUSIC_U".into(), "fixture-web-session".into())]),
+                LoginClient::web().unwrap().with_test_host(host),
+                || true,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "credential-expired");
+        assert!(bridge.accounts().unwrap().is_empty());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn web_session_import_should_reject_an_invalid_server_session() {
+        use login::tests::{mock_server, TestReply};
+        let (host, server) = mock_server(vec![TestReply::json(json!({ "code": 301 }))]);
+        let (bridge, _) = web_import_bridge();
+        let error = bridge
+            .import_web_session_with_client(
+                BTreeMap::from([("MUSIC_U".into(), "fixture-web-session".into())]),
+                LoginClient::web().unwrap().with_test_host(host),
+                || true,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "credential-expired");
+        assert!(bridge.accounts().unwrap().is_empty());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn web_session_import_should_refuse_guest_cookies_without_a_network_request() {
+        let (bridge, _) = web_import_bridge();
+        assert!(matches!(
+            bridge.import_web_session(
+                BTreeMap::from([("MUSIC_A".into(), "fixture-guest".into())]),
+                || true,
+            ),
+            Err(NeteaseBridgeError::CredentialExpired)
+        ));
     }
 
     #[test]

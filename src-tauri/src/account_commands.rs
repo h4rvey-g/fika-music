@@ -41,6 +41,46 @@ where
 }
 
 #[tauri::command]
+pub(crate) fn netease_web_login_supported() -> bool {
+    netease_web_login::supported()
+}
+
+#[tauri::command]
+pub(crate) async fn start_netease_web_login(
+    app: AppHandle,
+    web_login: State<'_, Arc<netease_web_login::WebLoginState>>,
+) -> Result<netease::NeteaseWebLoginStart, NeteaseCommandError> {
+    let web_login = Arc::clone(&web_login);
+    run_netease_task(move || web_login.start(&app)).await
+}
+
+#[tauri::command]
+pub(crate) async fn poll_netease_web_login(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    web_login: State<'_, Arc<netease_web_login::WebLoginState>>,
+    session_id: String,
+) -> Result<netease::NeteaseWebLoginPoll, NeteaseCommandError> {
+    let web_login = Arc::clone(&web_login);
+    let bridge = Arc::clone(&state.netease_bridge);
+    let poll = run_netease_task(move || web_login.poll(&app, session_id.trim(), &bridge)).await?;
+    if poll.account.is_some() {
+        state.online_music_cache.invalidate();
+    }
+    Ok(poll)
+}
+
+#[tauri::command]
+pub(crate) async fn cancel_netease_web_login(
+    app: AppHandle,
+    web_login: State<'_, Arc<netease_web_login::WebLoginState>>,
+    session_id: String,
+) -> Result<(), NeteaseCommandError> {
+    let web_login = Arc::clone(&web_login);
+    run_netease_task(move || web_login.cancel(&app, session_id.trim())).await
+}
+
+#[tauri::command]
 pub(crate) async fn start_netease_qr_login(
     state: State<'_, AppState>,
 ) -> Result<netease::NeteaseQrLoginStart, NeteaseCommandError> {
@@ -101,6 +141,40 @@ pub(crate) async fn complete_netease_phone_login(
     .await?;
     state.online_music_cache.invalidate();
     Ok(account)
+}
+
+#[tauri::command]
+pub(crate) async fn login_netease_password(
+    state: State<'_, AppState>,
+    account: String,
+    password: String,
+) -> Result<netease::NeteaseAccount, NeteaseCommandError> {
+    let bridge = Arc::clone(&state.netease_bridge);
+    let account = account.trim().to_owned();
+    let account = run_netease_task(move || bridge.login_with_password(&account, &password)).await?;
+    state.online_music_cache.invalidate();
+    Ok(account)
+}
+
+#[tauri::command]
+pub(crate) async fn complete_netease_password_login(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<netease::NeteaseAccount, NeteaseCommandError> {
+    let bridge = Arc::clone(&state.netease_bridge);
+    let account =
+        run_netease_task(move || bridge.complete_password_login(session_id.trim())).await?;
+    state.online_music_cache.invalidate();
+    Ok(account)
+}
+
+#[tauri::command]
+pub(crate) async fn cancel_netease_password_login(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), NeteaseCommandError> {
+    let bridge = Arc::clone(&state.netease_bridge);
+    run_netease_task(move || bridge.cancel_password_login(session_id.trim())).await
 }
 
 #[tauri::command]

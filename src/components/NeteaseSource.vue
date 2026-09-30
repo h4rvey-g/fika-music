@@ -5,6 +5,7 @@ import {
   AlertCircle,
   CircleCheck,
   Clock3,
+  Globe,
   ListMusic,
   LogIn,
   LogOut,
@@ -17,6 +18,7 @@ import {
 } from "@lucide/vue";
 import { listPlugins } from "../lib/plugin-api";
 import { usePhoneLoginSession, useQrLoginSession } from "../composables/source-workspace";
+import { useNeteaseWebLogin } from "../composables/netease-web-login";
 import { normalizeError, queryError } from "../lib/errors";
 import { neteaseVerificationNotice, type NeteaseVerificationNotice } from "../lib/netease-verification";
 import NeteaseVerificationDialog from "./NeteaseVerificationDialog.vue";
@@ -32,6 +34,7 @@ import {
   completeNeteasePhoneLogin,
   disconnectNeteaseAccount,
   listNeteaseAccounts,
+  neteaseWebLoginSupported,
   pollNeteaseQrLogin,
   startNeteasePhoneLogin,
   startNeteaseQrLogin,
@@ -54,10 +57,23 @@ const manualError = ref<string | null>(null);
 const dismissedQueryError = ref("");
 const sourceNotice = ref<string | null>(null);
 const showLogin = ref(false);
-const loginMode = ref<"phone" | "qr">("phone");
+const loginMode = ref<"web" | "phone" | "qr">("phone");
 const phone = ref("");
 const verificationCode = ref("");
 const securityVerification = ref<NeteaseVerificationNotice | null>(null);
+const webLoginSupportQuery = useQuery({
+  queryKey: ["netease", "web-login-supported"],
+  queryFn: neteaseWebLoginSupported,
+  staleTime: Infinity,
+  retry: false,
+});
+const isWebLoginSupported = computed(() => webLoginSupportQuery.data.value === true);
+const webSession = useNeteaseWebLogin({
+  onConnected: connectAccount,
+  onError: (error) => { sourceError.value = normalizeError(error); },
+});
+const webLogin = webSession.login;
+const isStartingWebLogin = webSession.isStarting;
 
 const pluginsQuery = useQuery({
   queryKey: ["plugins"],
@@ -180,6 +196,7 @@ watch(queryErrorMessage, (message, previousMessage) => {
 onBeforeUnmount(() => {
   qrSession.cancel();
   phoneSession.cancel();
+  webSession.cancel();
 });
 
 async function startQrLogin() {
@@ -196,10 +213,11 @@ function openLogin() {
   sourceError.value = null;
   sourceNotice.value = null;
   showLogin.value = true;
-  loginMode.value = "phone";
+  loginMode.value = isWebLoginSupported.value ? "web" : "phone";
 }
 
 function closeLogin() {
+  webSession.cancel();
   securityVerification.value = null;
   qrSession.cancel();
   phoneSession.cancel();
@@ -209,12 +227,12 @@ function closeLogin() {
   verificationCode.value = "";
 }
 
-function selectLoginMode(mode: "phone" | "qr") {
+function selectLoginMode(mode: "web" | "phone" | "qr") {
   securityVerification.value = null;
   if (loginMode.value === mode) return;
-  if (mode === "phone") {
-    qrSession.cancel();
-  } else {
+  if (mode !== "web") webSession.cancel();
+  if (mode !== "qr") qrSession.cancel();
+  if (mode !== "phone") {
     phoneSession.cancel();
     verificationCode.value = "";
   }
@@ -242,10 +260,22 @@ async function submitPhoneLogin() {
   await phoneSession.complete(verificationCode.value.trim());
 }
 
+async function startOfficialWebLogin() {
+  if (!isPluginReady.value || !isWebLoginSupported.value) return;
+  sourceError.value = null;
+  sourceNotice.value = null;
+  securityVerification.value = null;
+  await webSession.start();
+}
+
 async function retrySecurityVerification() {
   securityVerification.value = null;
   if (phoneLogin.value) await submitPhoneLogin();
   else await sendVerificationCode();
+}
+
+function dismissSecurityVerification() {
+  securityVerification.value = null;
 }
 
 function changePhoneNumber() {
@@ -300,7 +330,7 @@ async function refreshAccountStatuses() {
     <NeteaseVerificationDialog
       v-if="securityVerification"
       :verification="securityVerification"
-      @close="securityVerification = null"
+      @close="dismissSecurityVerification"
       @retry="retrySecurityVerification"
       @use-qr="selectLoginMode('qr')"
     />
@@ -357,7 +387,7 @@ async function refreshAccountStatuses() {
         <button
           class="btn btn-sm"
           type="button"
-          :disabled="!isPluginReady || showLogin || isConnectingQr || isSendingCode || isCompletingPhoneLogin"
+          :disabled="!isPluginReady || showLogin || isConnectingQr || isSendingCode || isCompletingPhoneLogin || isStartingWebLogin"
           @click="openLogin"
         >
           <LogIn :size="16" aria-hidden="true" />
@@ -418,6 +448,18 @@ async function refreshAccountStatuses() {
     <div v-else-if="showLogin" class="p-5">
       <div role="tablist" class="tabs tabs-box w-full sm:w-fit" :aria-label="t('NetEase login method')">
         <button
+          v-if="isWebLoginSupported"
+          role="tab"
+          class="tab flex-1 gap-2 sm:flex-none"
+          :class="{ 'tab-active': loginMode === 'web' }"
+          type="button"
+          :aria-selected="loginMode === 'web'"
+          @click="selectLoginMode('web')"
+        >
+          <Globe :size="16" aria-hidden="true" />
+          {{ t("Official website") }}
+        </button>
+        <button
           role="tab"
           class="tab flex-1 gap-2 sm:flex-none"
           :class="{ 'tab-active': loginMode === 'phone' }"
@@ -441,7 +483,33 @@ async function refreshAccountStatuses() {
         </button>
       </div>
 
-      <form v-if="loginMode === 'phone'" class="mt-5 max-w-md" @submit.prevent="submitPhoneLogin">
+      <div v-if="loginMode === 'web'" class="mt-5 max-w-md">
+        <div class="flex items-center gap-2 text-sm text-base-content/70">
+          <Globe :size="16" aria-hidden="true" />
+          <span>music.163.com</span>
+        </div>
+        <div v-if="isStartingWebLogin || webLogin" role="status" class="mt-3 flex items-center gap-2 text-sm">
+          <span class="loading loading-spinner loading-xs" aria-hidden="true"></span>
+          {{ isStartingWebLogin ? t("Opening official website") : t("Waiting for official website login") }}
+        </div>
+        <div class="mt-5 flex flex-wrap gap-2">
+          <button
+            class="btn btn-primary btn-sm"
+            type="button"
+            :disabled="isStartingWebLogin || Boolean(webLogin)"
+            @click="startOfficialWebLogin"
+          >
+            <LogIn :size="16" aria-hidden="true" />
+            {{ t("Sign in on official website") }}
+          </button>
+          <button class="btn btn-ghost btn-sm" type="button" @click="closeLogin">
+            <X :size="16" aria-hidden="true" />
+            {{ t("Cancel") }}
+          </button>
+        </div>
+      </div>
+
+      <form v-else-if="loginMode === 'phone'" class="mt-5 max-w-md" @submit.prevent="submitPhoneLogin">
         <fieldset class="fieldset">
           <legend class="fieldset-legend">{{ t("Phone number") }}</legend>
           <label class="input input-sm flex w-full items-center gap-2">

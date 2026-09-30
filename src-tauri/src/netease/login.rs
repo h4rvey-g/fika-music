@@ -155,33 +155,47 @@ impl LoginClient {
     }
 
     pub(super) fn start_qr(&self) -> Result<ApiResponse, NeteaseBridgeError> {
-        let device_id = self
-            .api
-            .cookie("deviceId")
-            .ok_or_else(|| invalid_response("prepare QR login", "login device ID was missing"))?;
-        let response = self.request(
-            "/api/register/anonimous",
-            json!({ "username": anonymous_username(&device_id) }),
-            None,
-            "prepare QR login",
-        )?;
-        super::checked_body(response, "prepare QR login")?;
-        if self
-            .api
-            .cookie("MUSIC_A")
-            .is_none_or(|cookie| cookie.is_empty())
-        {
-            return Err(invalid_response(
-                "prepare QR login",
-                "anonymous session cookie was missing",
-            ));
-        }
+        self.ensure_anonymous_session()?;
         self.request(
             "/api/login/qrcode/unikey",
             web_key_data(),
             None,
             "start QR login",
         )
+    }
+
+    pub(super) fn ensure_anonymous_session(&self) -> Result<(), NeteaseBridgeError> {
+        if self
+            .api
+            .cookie("MUSIC_A")
+            .is_some_and(|cookie| !cookie.is_empty())
+        {
+            return Ok(());
+        }
+        let device_id = self.api.cookie("deviceId").ok_or_else(|| {
+            invalid_response(
+                "prepare anonymous login session",
+                "login device ID was missing",
+            )
+        })?;
+        let response = self.request(
+            "/api/register/anonimous",
+            json!({ "username": anonymous_username(&device_id) }),
+            None,
+            "prepare anonymous login session",
+        )?;
+        super::checked_body(response, "prepare anonymous login session")?;
+        if self
+            .api
+            .cookie("MUSIC_A")
+            .is_none_or(|cookie| cookie.is_empty())
+        {
+            return Err(invalid_response(
+                "prepare anonymous login session",
+                "anonymous session cookie was missing",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn poll_qr(
@@ -220,6 +234,22 @@ impl LoginClient {
             None,
             "log in with verification code",
         )
+    }
+
+    pub(super) fn password_login_payload(
+        &self,
+        account: &str,
+        password: &str,
+    ) -> Result<(&'static str, Value), NeteaseBridgeError> {
+        password_login_request(account, password)
+    }
+
+    pub(super) fn password_login_with_payload(
+        &self,
+        path: &'static str,
+        data: Value,
+    ) -> Result<ApiResponse, NeteaseBridgeError> {
+        self.request(path, data, None, "log in with account password")
     }
 
     pub(super) fn verification_qr(&self, data: Value) -> Result<ApiResponse, NeteaseBridgeError> {
@@ -530,6 +560,52 @@ fn mobile_captcha_data(phone: &str) -> Value {
 
 fn mobile_login_data(phone: &str, code: &str) -> Value {
     json!({ "phone": phone, "countrycode": "86", "type": "1", "https": "true", "remember": "true", "rememberLogin": "true", "captcha": code, "os": "iOS", "fromPage": "RN", "rnBundleVersion": "0.0.5", "rnBundleName": "new-rn-login", "verifyId": 1, "e_r": true })
+}
+
+fn password_login_request(
+    account: &str,
+    password: &str,
+) -> Result<(&'static str, Value), NeteaseBridgeError> {
+    let account = account.trim();
+    if account.is_empty() || account.len() > 256 || account.chars().any(char::is_control) {
+        return Err(NeteaseBridgeError::InvalidLoginAccount);
+    }
+    if password.is_empty() || password.len() > 256 || password.chars().any(char::is_control) {
+        return Err(NeteaseBridgeError::InvalidLoginPassword);
+    }
+
+    let password = format!("{:x}", md5::compute(password.as_bytes()));
+    if is_mainland_phone(account) {
+        Ok((
+            "/api/w/login/cellphone",
+            json!({
+                "type": "1",
+                "https": "true",
+                "phone": account,
+                "countrycode": "86",
+                "password": password,
+                "remember": "true",
+                "secureCaptcha": "",
+            }),
+        ))
+    } else {
+        Ok((
+            "/api/w/login",
+            json!({
+                "type": "0",
+                "https": "true",
+                "username": account,
+                "password": password,
+                "rememberLogin": "true",
+            }),
+        ))
+    }
+}
+
+fn is_mainland_phone(account: &str) -> bool {
+    account.len() == 11
+        && account.starts_with('1')
+        && account.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn read_limited(reader: impl Read, operation: &'static str) -> Result<Vec<u8>, NeteaseBridgeError> {
@@ -922,6 +998,58 @@ pub(crate) mod tests {
         assert_eq!(
             mobile_captcha_data("13800138000")["cellphone"],
             "13800138000"
+        );
+    }
+
+    #[test]
+    fn password_login_should_hash_an_email_password_and_use_the_web_endpoint() {
+        let (path, data) = password_login_request("user@example.com", "fixture-password")
+            .expect("email password login should be valid");
+        assert_eq!(path, "/api/w/login");
+        assert_eq!(data["type"], "0");
+        assert_eq!(data["username"], "user@example.com");
+        assert_eq!(data["password"], "c8bb92c7cea0c507b569cf2ddc73896c");
+        assert_eq!(data["rememberLogin"], "true");
+    }
+
+    #[test]
+    fn password_login_should_use_the_cellphone_endpoint_for_a_mainland_phone() {
+        let (path, data) = password_login_request("13800138000", "fixture-password")
+            .expect("phone password login should be valid");
+        assert_eq!(path, "/api/w/login/cellphone");
+        assert_eq!(data["type"], "1");
+        assert_eq!(data["phone"], "13800138000");
+        assert_eq!(data["countrycode"], "86");
+        assert_eq!(data["secureCaptcha"], "");
+    }
+
+    #[test]
+    fn password_login_should_reject_an_empty_password_without_request_data() {
+        let error = password_login_request("user@example.com", "").unwrap_err();
+        assert!(matches!(error, NeteaseBridgeError::InvalidLoginPassword));
+    }
+
+    #[test]
+    fn web_password_login_should_not_send_the_plaintext_password() {
+        let (host, server) = mock_server(vec![TestReply::json(json!({
+            "code": 200,
+            "cookie": "MUSIC_U=fixture-session; __csrf=fixture-csrf"
+        }))]);
+        let client = LoginClient::web().unwrap().with_test_host(host);
+        let (path, data) = client
+            .password_login_payload("user@example.com", "fixture-password")
+            .unwrap();
+        assert_eq!(
+            client.password_login_with_payload(path, data).unwrap().code,
+            Some(200)
+        );
+        let requests = server.join().unwrap();
+        let request = &requests[0];
+        assert_eq!(request.line, "POST /weapi/w/login HTTP/1.1");
+        assert!(!request.body.contains("fixture-password"));
+        assert_eq!(
+            client.api.cookie("MUSIC_U").as_deref(),
+            Some("fixture-session")
         );
     }
 

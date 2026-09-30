@@ -4,6 +4,7 @@ import { neteaseVerificationNotice } from "./netease-verification";
 const challenge = {
   url: "https://st.music.163.com/encrypt-pages?qrCode=fixture-only",
   qrImageDataUrl: "data:image/svg+xml;base64,PHN2Zy8+",
+  sessionId: null,
 };
 const rejection = {
   code: "verification-required",
@@ -21,6 +22,14 @@ describe("neteaseVerificationNotice", () => {
 
   it("recognizes JSON-serialized command errors", () => {
     expect(neteaseVerificationNotice(JSON.stringify(rejection))?.challenge).toEqual(challenge);
+  });
+
+  it("preserves the password-login session for a security-check retry", () => {
+    const sessionId = "fixture-password-session";
+    expect(neteaseVerificationNotice({
+      ...rejection,
+      verification: { ...challenge, sessionId },
+    })?.challenge).toEqual({ ...challenge, sessionId });
   });
 
   it.each([

@@ -10,6 +10,7 @@ const verification = {
   challenge: {
     url: "https://st.music.163.com/encrypt-pages?qrCode=fixture-only",
     qrImageDataUrl: "data:image/svg+xml;base64,PHN2Zy8+",
+    sessionId: null,
   },
 };
 

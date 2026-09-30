@@ -6,6 +6,8 @@ import type {
   NeteasePhoneLoginStart,
   NeteaseQrLoginPoll,
   NeteaseQrLoginStart,
+  NeteaseWebLoginStart,
+  NeteaseWebLoginPoll,
 } from "../generated/bindings";
 import {
   dispatchPluginRequest,
@@ -29,6 +31,8 @@ export type {
   NeteasePhoneLoginStart,
   NeteaseQrLoginPoll,
   NeteaseQrLoginStart,
+  NeteaseWebLoginStart,
+  NeteaseWebLoginPoll,
 } from "../generated/bindings";
 
 export type NeteaseOperationResult<T> = {
@@ -45,6 +49,22 @@ export type NeteasePlayback = {
 
 export function startNeteaseQrLogin() {
   return invoke<NeteaseQrLoginStart>(TAURI_COMMANDS.startNeteaseQrLogin);
+}
+
+export function neteaseWebLoginSupported() {
+  return invoke<boolean>(TAURI_COMMANDS.neteaseWebLoginSupported);
+}
+
+export function startNeteaseWebLogin() {
+  return invoke<NeteaseWebLoginStart>(TAURI_COMMANDS.startNeteaseWebLogin);
+}
+
+export function pollNeteaseWebLogin(sessionId: string) {
+  return invoke<NeteaseWebLoginPoll>(TAURI_COMMANDS.pollNeteaseWebLogin, { sessionId });
+}
+
+export function cancelNeteaseWebLogin(sessionId: string) {
+  return invoke<void>(TAURI_COMMANDS.cancelNeteaseWebLogin, { sessionId });
 }
 
 export function pollNeteaseQrLogin(
@@ -67,6 +87,18 @@ export function completeNeteasePhoneLogin(sessionId: string, verificationCode: s
     sessionId,
     verificationCode,
   });
+}
+
+export function loginNeteasePassword(account: string, password: string) {
+  return invoke<NeteaseAccount>(TAURI_COMMANDS.loginNeteasePassword, { account, password });
+}
+
+export function completeNeteasePasswordLogin(sessionId: string) {
+  return invoke<NeteaseAccount>(TAURI_COMMANDS.completeNeteasePasswordLogin, { sessionId });
+}
+
+export function cancelNeteasePasswordLogin(sessionId: string) {
+  return invoke<void>(TAURI_COMMANDS.cancelNeteasePasswordLogin, { sessionId });
 }
 
 export function cancelNeteasePhoneLogin(sessionId: string) {

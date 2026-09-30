@@ -38,6 +38,7 @@ mod lx_v8_sidecar;
 pub mod lyrics;
 mod menu_bar_lyrics;
 pub mod netease;
+mod netease_web_login;
 pub mod online_download;
 mod online_execution;
 pub mod online_music;
@@ -55,12 +56,14 @@ pub mod youtube_music_playback;
 mod yt_dlp_sidecar;
 
 use account_commands::{
-    cancel_kugou_phone_login, cancel_kugou_qr_login, cancel_netease_phone_login,
-    cancel_netease_qr_login, complete_kugou_phone_login, complete_netease_phone_login,
+    cancel_kugou_phone_login, cancel_kugou_qr_login, cancel_netease_password_login,
+    cancel_netease_phone_login, cancel_netease_qr_login, cancel_netease_web_login,
+    complete_kugou_phone_login, complete_netease_password_login, complete_netease_phone_login,
     disconnect_kugou_account, disconnect_netease_account, list_kugou_accounts,
-    list_netease_accounts, list_netease_mutation_audit, poll_kugou_qr_login, poll_netease_qr_login,
-    start_kugou_phone_login, start_kugou_qr_login, start_netease_phone_login,
-    start_netease_qr_login,
+    list_netease_accounts, list_netease_mutation_audit, login_netease_password,
+    netease_web_login_supported, poll_kugou_qr_login, poll_netease_qr_login,
+    poll_netease_web_login, start_kugou_phone_login, start_kugou_qr_login,
+    start_netease_phone_login, start_netease_qr_login, start_netease_web_login,
 };
 pub use account_commands::{KugouCommandError, NeteaseCommandError};
 pub use album_art::{
@@ -224,10 +227,17 @@ macro_rules! with_tauri_commands {
             clear_plugin_diagnostics,
             dispatch_plugin_request,
             start_netease_qr_login,
+            netease_web_login_supported,
+            start_netease_web_login,
+            poll_netease_web_login,
+            cancel_netease_web_login,
             poll_netease_qr_login,
             cancel_netease_qr_login,
             start_netease_phone_login,
             complete_netease_phone_login,
+            login_netease_password,
+            complete_netease_password_login,
+            cancel_netease_password_login,
             cancel_netease_phone_login,
             list_netease_accounts,
             disconnect_netease_account,
@@ -257,6 +267,10 @@ macro_rules! generate_command_handler {
 }
 
 with_tauri_commands!(declare_command_names);
+
+fn is_application_webview(label: &str) -> bool {
+    matches!(label, "main" | "desktop-lyrics")
+}
 
 type AppResult<T> = Result<T, AppError>;
 type CommandResult<T> = Result<T, String>;
@@ -6367,13 +6381,34 @@ pub fn run() {
                 window.app_handle().exit(0);
             }
         })
-        .invoke_handler(with_tauri_commands!(generate_command_handler))
+        .manage(Arc::new(netease_web_login::WebLoginState::default()))
+        .invoke_handler({
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool =
+                with_tauri_commands!(generate_command_handler);
+            move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+                // App commands are otherwise globally available, even without a capability.
+                if !is_application_webview(invoke.message.webview().label()) {
+                    invoke
+                        .resolver
+                        .reject("Application commands are unavailable in this window");
+                    return true;
+                }
+                handler(invoke)
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn application_commands_should_reject_remote_login_windows() {
+        assert!(super::is_application_webview("main"));
+        assert!(super::is_application_webview("desktop-lyrics"));
+        assert!(!super::is_application_webview("netease-web-login-fixture"));
+        assert!(!super::is_application_webview("main-remote"));
+    }
     use super::*;
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

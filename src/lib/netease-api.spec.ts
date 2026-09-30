@@ -2,13 +2,20 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SourceRequestOutcome } from "./plugin-api";
 import {
   addNeteasePlaylistTrack,
+  cancelNeteasePasswordLogin,
   cancelNeteasePhoneLogin,
   cancelNeteaseQrLogin,
+  completeNeteasePasswordLogin,
   completeNeteasePhoneLogin,
   getNeteaseRecommendations,
+  loginNeteasePassword,
   pollNeteaseQrLogin,
   resolveNeteaseTrack,
   startNeteasePhoneLogin,
+  neteaseWebLoginSupported,
+  startNeteaseWebLogin,
+  pollNeteaseWebLogin,
+  cancelNeteaseWebLogin,
 } from "./netease-api";
 import { createNeteaseTrack } from "../test/fixtures";
 
@@ -43,6 +50,20 @@ describe("NetEase API", () => {
     });
   });
 
+  it("keeps official website credentials in the host and exchanges only a session id", async () => {
+    invokeMock.mockResolvedValue(undefined);
+    await neteaseWebLoginSupported();
+    await startNeteaseWebLogin();
+    await pollNeteaseWebLogin("web-session");
+    await cancelNeteaseWebLogin("web-session");
+    expect(invokeMock.mock.calls).toEqual([
+      ["netease_web_login_supported"],
+      ["start_netease_web_login"],
+      ["poll_netease_web_login", { sessionId: "web-session" }],
+      ["cancel_netease_web_login", { sessionId: "web-session" }],
+    ]);
+  });
+
   it("uses an opaque session for verification-code login", async () => {
     invokeMock.mockResolvedValue({ sessionId: "phone-session", expiresAt: 600 });
 
@@ -57,6 +78,29 @@ describe("NetEase API", () => {
         verificationCode: "123456",
       }],
       ["cancel_netease_phone_login", { sessionId: "phone-session" }],
+    ]);
+  });
+
+  it("passes account-password credentials to the host command", async () => {
+    invokeMock.mockResolvedValue({ accountRef, displayName: "Password User" });
+
+    await loginNeteasePassword("user@example.com", "fixture-password");
+
+    expect(invokeMock).toHaveBeenCalledWith("login_netease_password", {
+      account: "user@example.com",
+      password: "fixture-password",
+    });
+  });
+
+  it("retries and cancels a verified account-password login session", async () => {
+    invokeMock.mockResolvedValue({ accountRef, displayName: "Password User" });
+
+    await completeNeteasePasswordLogin("password-session");
+    await cancelNeteasePasswordLogin("password-session");
+
+    expect(invokeMock.mock.calls).toEqual([
+      ["complete_netease_password_login", { sessionId: "password-session" }],
+      ["cancel_netease_password_login", { sessionId: "password-session" }],
     ]);
   });
 
