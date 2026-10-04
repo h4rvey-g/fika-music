@@ -27,7 +27,6 @@ import app.tauri.plugin.Plugin
 
 private const val LOGIN_URL = "https://music.163.com/#/login"
 private const val COOKIE_URL = "https://music.163.com/"
-private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 private val SESSION_COOKIES = setOf("MUSIC_U", "__csrf", "NMTID", "MUSIC_A")
 
 @InvokeArg
@@ -105,12 +104,13 @@ class NeteaseLoginPlugin(private val activity: Activity) : Plugin(activity) {
         web.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
-            userAgentString = USER_AGENT
+            userAgentString = WebSettings.getDefaultUserAgent(activity)
             allowFileAccess = false
             allowContentAccess = false
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            // Honor the page viewport without zooming out to a desktop-sized overview.
             useWideViewPort = true
-            loadWithOverviewMode = true
+            loadWithOverviewMode = false
             builtInZoomControls = true
             displayZoomControls = false
             setSupportMultipleWindows(true)

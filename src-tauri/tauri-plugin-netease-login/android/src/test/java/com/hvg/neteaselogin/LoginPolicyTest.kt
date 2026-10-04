@@ -15,10 +15,19 @@ class LoginPolicyTest {
     }
 
     @Test
+    fun allowsOfficialMobileLoginRedirect() {
+        assertTrue(LoginPolicy.allowedNavigation("https://y.music.163.com/m/login"))
+    }
+
+    @Test
     fun rejectsUntrustedNavigationAndSchemeEscapes() {
         for (url in listOf(
             "http://music.163.com/",
             "https://music.163.com.evil.test/",
+            "https://y.music.163.com.evil.test/m/login",
+            "http://y.music.163.com/m/login",
+            "https://y.music.163.com:444/m/login",
+            "https://user@y.music.163.com/m/login",
             "https://evil.test/",
             "https://music.163.com:444/",
             "https://user@music.163.com/",

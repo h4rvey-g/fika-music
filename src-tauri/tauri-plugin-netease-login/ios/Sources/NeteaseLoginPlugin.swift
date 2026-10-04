@@ -5,11 +5,10 @@ import WebKit
 
 private let loginURL = URL(string: "https://music.163.com/#/login")!
 private let sessionKeys: Set<String> = ["MUSIC_U", "__csrf", "NMTID", "MUSIC_A"]
-private let browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 private func allowedNavigation(_ url: URL) -> Bool {
     url.scheme == "https" && url.user == nil && url.password == nil &&
-        (url.port == nil || url.port == 443) && ["music.163.com", "st.music.163.com"].contains(url.host ?? "")
+        (url.port == nil || url.port == 443) && ["music.163.com", "y.music.163.com", "st.music.163.com"].contains(url.host ?? "")
 }
 
 private struct SessionArgs: Decodable { let sessionId: String }
@@ -21,12 +20,12 @@ private final class LoginController: UIViewController, WKNavigationDelegate, WKU
     init() {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
+        configuration.defaultWebpagePreferences.preferredContentMode = .mobile
         // No script message handlers or Tauri initialization scripts are installed.
         browser = WKWebView(frame: .zero, configuration: configuration)
         super.init(nibName: nil, bundle: nil)
         browser.navigationDelegate = self
         browser.uiDelegate = self
-        browser.customUserAgent = browserUA
         modalPresentationStyle = .fullScreen
     }
 

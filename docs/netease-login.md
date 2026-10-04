@@ -21,20 +21,29 @@ pinned `netease-music` crate. No Node runtime or remote API proxy is introduced.
 - [Third-party login research](netease-login-research.md), inspected on
   2026-09-30: recent client snapshots, official-web login alternatives, and
   limits of the available evidence for password-login risk control.
+- [Mobile client login research](netease-mobile-login-research.md), inspected on
+  2026-10-04: FMP's released Android WebView flow and the mobile browser identity
+  adjustment adopted by Fika.
 
 ## Adopted Behavior
 
 - Desktop and mobile login default to the official NetEase website in a separate
   native WebView. Desktop and iOS use a temporary browsing store; Android uses a
   plain WebView without the application bridge. Credentials and security checks remain
-  on `https://music.163.com/#/login`; Fika does not collect the password in its
-  own frontend. SMS login remains available. Fika's in-app login QR generation,
+  on the official site opened at `https://music.163.com/#/login`; mobile browser
+  identities redirect to `https://y.music.163.com/m/login`. Fika does not collect
+  the password in its own frontend. SMS login remains available. Fika's in-app login QR generation,
   display, polling, sessions, and commands have been removed. Scan options on the
   official website and SMS security-verification QR challenges are unaffected.
+- Mobile official-login pages use the platform WebView's default mobile user agent,
+  rather than the desktop Chrome identity. Android honors the page viewport without
+  zooming out to a desktop overview; iOS explicitly selects mobile content mode,
+  including on iPad. API request identities remain separate from browser settings.
 - The official-login window has no application capability grants, and the host
   command handler rejects application commands from its window label. Navigation
-  is restricted to HTTPS on `music.163.com` and `st.music.163.com`, with new
-  windows and downloads denied.
+  is restricted to HTTPS on `music.163.com` and `st.music.163.com`; mobile
+  additionally accepts the official `y.music.163.com` login redirect. New windows
+  and downloads are denied.
 - The host reads only root-path `MUSIC_U`, `__csrf`, `NMTID`, and `MUSIC_A`
   cookies from the music origin. It confirms a non-anonymous account before
   using the existing secure persistence path. The frontend receives only a
@@ -47,7 +56,8 @@ pinned `netease-music` crate. No Node runtime or remote API proxy is introduced.
   Android reads HttpOnly cookies through `CookieManager` for the fixed root URL;
   iOS reads root-path cookies from a nonpersistent WKWebView store. Raw cookies
   go directly to Rust, not the application frontend. Native pages have no Tauri
-  IPC, and allow only the same official HTTPS origins, denying popups and downloads.
+  IPC, and allow only the three explicit official HTTPS origins listed above,
+  denying popups and downloads.
   Android clears only the four NetEase session-cookie names before and after an
   attempt, including cancellation, without resetting other application cookies
   or caches. It checks that old `MUSIC_U` is absent before opening the page.
@@ -134,3 +144,14 @@ absence of in-app QR/password controls, layout fit, and cancellation forwarding
 using a mocked host. They do not establish native session import on a device.
 The available Android emulator was offline; iOS Swift syntax was checked, but
 the local iOS SDK was unavailable for a complete build or device test.
+
+On 2026-10-04, the mobile browser identity change passed Android native plugin
+compilation, three Android navigation-policy tests, and 17 frontend login tests.
+The new redirect regression failed before accepting `y.music.163.com` and passed
+afterward; lookalike hosts, HTTP, credentials in URLs, and nonstandard ports
+remain rejected. Swift syntax and eight Foundation-only checks of the actual iOS
+navigation function passed. Edge public-page checks emulating Android WebView
+and iPhone mobile identities both reached the official mobile login page and
+showed the phone-login entry at a 390-pixel viewport. Those checks submitted no
+credentials or SMS and do not verify native cookie import or real-account login.
+No Android device was connected, and the local iOS SDK remains unavailable.
