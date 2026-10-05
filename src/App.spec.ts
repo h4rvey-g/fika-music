@@ -512,12 +512,12 @@ describe("application shell", () => {
         listedCollections = [...listedCollections, collection];
         return Promise.resolve(collection);
       }
-      if (command === "add_online_tracks_to_music_collection") {
+      if (command === "add_local_selection_to_music_collection") {
         const collection = listedCollections.find(
           (candidate) => candidate.id === args?.collectionId,
         )!;
-        const added = Array.isArray(args?.tracks) ? args.tracks.length : 0;
-        const updated = { ...collection, itemCount: collection.itemCount + added };
+        const added = 1;
+        const updated = { ...collection, itemCount: collection.itemCount + added, localCount: collection.localCount + added };
         listedCollections = listedCollections.map((candidate) =>
           candidate.id === updated.id ? updated : candidate
         );
@@ -1026,7 +1026,7 @@ describe("application shell", () => {
     wrapper.unmount();
   });
 
-  it("accepts dragged search results on a sidebar Collection", async () => {
+  it("accepts only local track drops on a sidebar Collection", async () => {
     listedCollections = [{
       id: "collection-1",
       name: "Drop Target",
@@ -1054,11 +1054,50 @@ describe("application shell", () => {
     await target.trigger("drop", { dataTransfer });
     await flushPromises();
 
-    expect(tauriMocks.invoke).toHaveBeenCalledWith(
-      "add_online_tracks_to_music_collection",
-      { collectionId: "collection-1", tracks: [track] },
-    );
+    expect(tauriMocks.invoke.mock.calls.filter(([command]) =>
+      String(command).startsWith("add_") && String(command).endsWith("_to_music_collection"),
+    )).toHaveLength(0);
+    expect(target.text()).toContain("0");
+
+    const selection = { selectAll: false, ranges: [{ start: 0, end: 0 }], excludedRanges: [] };
+    await target.trigger("drop", { dataTransfer: {
+      ...dataTransfer,
+      getData: () => JSON.stringify({ kind: "local", snapshotId: "snapshot-1", selection }),
+    } });
+    await flushPromises();
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("add_local_selection_to_music_collection", {
+      collectionId: "collection-1",
+      snapshotId: "snapshot-1",
+      selection,
+    });
     expect(target.text()).toContain("1");
+    wrapper.unmount();
+  });
+
+  it("creates a Collection from a Local Music selection", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    const selection = { selectAll: false, ranges: [{ start: 0, end: 0 }], excludedRanges: [] };
+    wrapper.getComponent({ name: "LibraryBrowser" }).vm.$emit("createCollection", {
+      snapshotId: "snapshot-1",
+      selection,
+    });
+    await wrapper.vm.$nextTick();
+    const nameInput = new DOMWrapper(document.body.querySelector('input[aria-label="Collection name"]')!);
+    await nameInput.setValue("Local Collection");
+    const form = new DOMWrapper(nameInput.element.closest("form")!);
+    await form.trigger("submit");
+    await flushPromises();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("create_music_collection", {
+      name: "Local Collection",
+      smartRules: null,
+    });
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("add_local_selection_to_music_collection", {
+      collectionId: "collection-1",
+      snapshotId: "snapshot-1",
+      selection,
+    });
     wrapper.unmount();
   });
 

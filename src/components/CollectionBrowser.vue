@@ -194,6 +194,10 @@ const selectedLocalItemIds = computed(() =>
     .filter((track) => track.item.localTrack)
     .map((track) => track.item.id),
 );
+const selectionSupportsCollections = computed(() =>
+  selectedTracks.value.length > 0
+  && selectedLocalItemIds.value.length === selectedTracks.value.length,
+);
 const totalDurationSeconds = computed(() =>
   visibleTracks.value.reduce((total, track) => total + (track.durationSeconds ?? 0), 0),
 );
@@ -501,7 +505,7 @@ function queueSelection() {
 }
 
 function requestCollectionAction(createNew: boolean) {
-  if (!selectedItemIds.value.size) return;
+  if (!selectionSupportsCollections.value) return;
   const source: CollectionItemSelection = {
     sourceCollectionId: props.collectionId,
     itemIds: selectedTracks.value.map((track) => track.item.id),
@@ -516,7 +520,7 @@ function beginTrackDrag(event: DragEvent, track: CollectionTrackView) {
     selectedItemIds.value = new Set([track.item.id]);
     selectionAnchor.value = visibleTrackIndex(track.item.id);
   }
-  writeSelectedDragPayload(event.dataTransfer);
+  if (!writeSelectedDragPayload(event.dataTransfer)) event.preventDefault();
   closeMenus();
 }
 
@@ -525,12 +529,13 @@ function beginGroupDrag(event: DragEvent, group: CollectionAlbumGroup) {
     selectedItemIds.value = new Set(group.tracks.map((track) => track.item.id));
     selectionAnchor.value = visibleTrackIndex(group.tracks[0]?.item.id ?? "");
   }
-  writeSelectedDragPayload(event.dataTransfer);
+  if (!writeSelectedDragPayload(event.dataTransfer)) event.preventDefault();
   closeMenus();
 }
 
 function writeSelectedDragPayload(dataTransfer: DataTransfer | null) {
-  writeCollectionDragPayload(dataTransfer, {
+  if (!selectionSupportsCollections.value) return false;
+  return writeCollectionDragPayload(dataTransfer, {
     kind: "collection",
     sourceCollectionId: props.collectionId,
     itemIds: selectedTracks.value.map((track) => track.item.id),
@@ -1545,8 +1550,8 @@ defineExpose({
     <li><button type="button" @click="playSelection(true)"><Play :size="16" aria-hidden="true" />{{ t("Play selection") }}</button></li>
     <li><button type="button" @click="playSelection(false)"><ListMusic :size="16" aria-hidden="true" />{{ t("Set playback queue") }}</button></li>
               <li><button type="button" @click="queueSelection"><ListPlus :size="16" aria-hidden="true" />{{ t("Play next") }}</button></li>
-    <li><button type="button" @click="requestCollectionAction(false)"><ListPlus :size="16" aria-hidden="true" />{{ t("Add selection to Collection") }}</button></li>
-    <li><button type="button" @click="requestCollectionAction(true)"><FolderPlus :size="16" aria-hidden="true" />{{ t("New Collection from selection") }}</button></li>
+    <li v-if="selectionSupportsCollections"><button type="button" @click="requestCollectionAction(false)"><ListPlus :size="16" aria-hidden="true" />{{ t("Add selection to Collection") }}</button></li>
+    <li v-if="selectionSupportsCollections"><button type="button" @click="requestCollectionAction(true)"><FolderPlus :size="16" aria-hidden="true" />{{ t("New Collection from selection") }}</button></li>
     <li v-if="selectedLocalItemIds.length"><button type="button" :disabled="metadataTask?.state === 'running' || metadataTask?.state === 'paused'" @click="requestMetadataLookup"><Tags :size="16" aria-hidden="true" />{{ t("Look up metadata") }}</button></li>
     <li v-if="rowMenu.track.item.localTrack" class="my-1 h-px bg-base-300"></li>
     <li v-if="rowMenu.track.item.localTrack"><button type="button" @click="revealContextTrack"><FolderSearch :size="16" aria-hidden="true" />{{ t("Show in file manager") }}</button></li>
@@ -1565,8 +1570,8 @@ defineExpose({
   >
     <li><button type="button" @click="playGroup(groupMenu.group, true)"><Play :size="16" aria-hidden="true" />{{ t("Play album group") }}</button></li>
     <li><button type="button" @click="playGroup(groupMenu.group, false)"><ListMusic :size="16" aria-hidden="true" />{{ t("Set group as queue") }}</button></li>
-    <li><button type="button" @click="requestCollectionAction(false)"><ListPlus :size="16" aria-hidden="true" />{{ t("Add selection to Collection") }}</button></li>
-    <li><button type="button" @click="requestCollectionAction(true)"><FolderPlus :size="16" aria-hidden="true" />{{ t("New Collection from selection") }}</button></li>
+    <li v-if="selectionSupportsCollections"><button type="button" @click="requestCollectionAction(false)"><ListPlus :size="16" aria-hidden="true" />{{ t("Add selection to Collection") }}</button></li>
+    <li v-if="selectionSupportsCollections"><button type="button" @click="requestCollectionAction(true)"><FolderPlus :size="16" aria-hidden="true" />{{ t("New Collection from selection") }}</button></li>
     <li v-if="selectedLocalItemIds.length"><button type="button" :disabled="metadataTask?.state === 'running' || metadataTask?.state === 'paused'" @click="requestMetadataLookup"><Tags :size="16" aria-hidden="true" />{{ t("Look up metadata") }}</button></li>
     <li v-if="coverResult(groupMenu.group)?.status === 'needsReview'"><button type="button" @click="reviewGroupCover(groupMenu.group)"><Info :size="16" aria-hidden="true" />{{ t("Review cover matches") }}</button></li>
     <li class="my-1 h-px bg-base-300"></li>

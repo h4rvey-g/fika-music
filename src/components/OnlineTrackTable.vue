@@ -2,7 +2,6 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   Download,
-  FolderPlus,
   Heart,
   ListPlus,
   MessageCircle,
@@ -16,7 +15,6 @@ import {
   splitOnlineArtistNames,
   type OnlineTrack,
 } from "../lib/online-music-api";
-import { writeCollectionDragPayload } from "../lib/collection-api";
 import { formatNumber, t } from "../i18n";
 import { viewportMenuPosition } from "../lib/viewport-layout";
 
@@ -40,8 +38,6 @@ const emit = defineEmits<{
   favorite: [track: OnlineTrack];
   addToPlaylist: [track: OnlineTrack];
   addSelectionToPlaylist: [tracks: OnlineTrack[]];
-  addToCollection: [tracks: OnlineTrack[]];
-  createCollection: [tracks: OnlineTrack[]];
   viewComments: [track: OnlineTrack];
   openArtist: [track: OnlineTrack, artist: string];
   openAlbum: [track: OnlineTrack];
@@ -163,29 +159,6 @@ function addSelectionToPlaylist() {
   closeContextMenu();
 }
 
-function requestCollectionAction(createNew: boolean) {
-  if (selectedTracks.value.length) {
-    const tracks = [...selectedTracks.value];
-    if (createNew) emit("createCollection", tracks);
-    else emit("addToCollection", tracks);
-  }
-  closeContextMenu();
-}
-
-function beginTrackDrag(event: DragEvent, index: number) {
-  const track = props.tracks[index];
-  if (!track) return;
-  if (!selectedKeys.value.has(track.key)) {
-    selectedKeys.value = new Set([track.key]);
-    selectionAnchor.value = index;
-  }
-  writeCollectionDragPayload(event.dataTransfer, {
-    kind: "online",
-    tracks: [...selectedTracks.value],
-  });
-  closeContextMenu();
-}
-
 function viewComments() {
   const [track] = selectedTracks.value;
   if (selectionSupportsComments.value && track) emit("viewComments", track);
@@ -238,12 +211,10 @@ function artistActionId(track: OnlineTrack, artist: string) {
             :aria-current="isActiveTrack(track) ? 'true' : undefined"
             :data-playing-track="isActiveTrack(track) ? '' : undefined"
             tabindex="0"
-            draggable="true"
             @click="selectTrack($event, index)"
             @dblclick="$emit('play', track)"
             @keydown.enter.prevent="$emit('play', track)"
             @contextmenu.prevent.stop="openContextMenu($event, index)"
-            @dragstart="beginTrackDrag($event, index)"
           >
           <td class="max-w-56">
             <div class="flex min-w-0 items-center gap-2">
@@ -411,12 +382,6 @@ function artistActionId(track: OnlineTrack, artist: string) {
         </button>
       </li>
       <li>
-              <button type="button" @click="queueSelection">
-          <ListPlus :size="16" aria-hidden="true" />
-          {{ t("Play next") }}
-        </button>
-      </li>
-      <li>
         <button
           type="button"
           :disabled="!selectionSupportsPlaylist"
@@ -424,18 +389,6 @@ function artistActionId(track: OnlineTrack, artist: string) {
         >
         <ListPlus :size="16" aria-hidden="true" />
           {{ t("Add to Playlist") }}
-        </button>
-      </li>
-      <li>
-        <button type="button" @click="requestCollectionAction(false)">
-          <ListPlus :size="16" aria-hidden="true" />
-          {{ t("Add to Collection") }}
-        </button>
-      </li>
-      <li>
-        <button type="button" @click="requestCollectionAction(true)">
-          <FolderPlus :size="16" aria-hidden="true" />
-          {{ t("New Collection from selection") }}
         </button>
       </li>
       <li>

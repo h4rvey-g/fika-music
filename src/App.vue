@@ -198,7 +198,6 @@ import {
   COLLECTION_DRAG_TYPE,
   addMusicCollectionItemsToMusicCollection,
   addLocalSelectionToMusicCollection,
-  addOnlineTracksToMusicCollection,
   createMusicCollection,
   deleteMusicCollection,
   listMusicCollections,
@@ -1198,14 +1197,6 @@ function createCollectionFromLocalSelection(source: LocalCollectionSelection) {
   openCreateCollection({ kind: "local", ...source });
 }
 
-function addOnlineTracksToCollection(tracks: OnlineTrack[]) {
-  if (tracks.length) openCollectionPicker({ kind: "online", tracks: [...tracks] });
-}
-
-function createCollectionFromOnlineTracks(tracks: OnlineTrack[]) {
-  if (tracks.length) openCreateCollection({ kind: "online", tracks: [...tracks] });
-}
-
 function addCollectionItemsToCollection(source: CollectionItemSelection) {
   if (source.itemIds.length) openCollectionPicker({ kind: "collection", ...source });
 }
@@ -1295,9 +1286,6 @@ function addCollectionSeed(collectionId: string, seed: CollectionSeed) {
   if (seed.kind === "local") {
     return addLocalSelectionToMusicCollection(collectionId, seed);
   }
-  if (seed.kind === "online") {
-    return addOnlineTracksToMusicCollection(collectionId, seed.tracks);
-  }
   if (seed.kind === "collection") {
     return addMusicCollectionItemsToMusicCollection(collectionId, seed);
   }
@@ -1306,7 +1294,6 @@ function addCollectionSeed(collectionId: string, seed: CollectionSeed) {
 
 function collectionSeedCount(seed: CollectionSeed | null) {
   if (!seed || seed.kind === "empty") return 0;
-  if (seed.kind === "online") return seed.tracks.length;
   if (seed.kind === "collection") return seed.itemIds.length;
   if (seed.selection.selectAll) return null;
   return seed.selection.ranges.reduce(
@@ -2820,8 +2807,6 @@ function trackSubtitle(track: LocalTrack) {
               :local-music-folder="selectedFolder"
               @play-request="handleOnlinePlayRequest"
               @queue-tracks="queueOnlineTracks"
-              @add-to-collection="addOnlineTracksToCollection"
-              @create-collection="createCollectionFromOnlineTracks"
               @open-audio-sources="selectSection('sources')"
               @open-plugin="selectPlugin"
           @toggle-playback="togglePlayback"

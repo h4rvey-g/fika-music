@@ -50,19 +50,12 @@ describe("Collection drag payload", () => {
     });
   });
 
-  it("round-trips selected online tracks", () => {
+  it("rejects selected online tracks", () => {
     const dataTransfer = new TestDataTransfer();
     const tracks = [createOnlineTrack({ key: "one" }), createOnlineTrack({ key: "two" })];
+    dataTransfer.setData(COLLECTION_DRAG_TYPE, JSON.stringify({ kind: "online", tracks }));
 
-    writeCollectionDragPayload(dataTransfer as unknown as DataTransfer, {
-      kind: "online",
-      tracks,
-    });
-
-    expect(readCollectionDragPayload(dataTransfer as unknown as DataTransfer)).toEqual({
-      kind: "online",
-      tracks,
-    });
+    expect(readCollectionDragPayload(dataTransfer as unknown as DataTransfer)).toBeNull();
   });
 
   it("round-trips selected Collection items", () => {

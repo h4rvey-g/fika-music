@@ -6,7 +6,6 @@ import type {
   MusicCollectionDetail,
   MusicCollectionMutation,
   MusicCollectionSummary,
-  OnlineTrack,
   SmartCollectionRules,
 } from "../generated/bindings";
 
@@ -37,7 +36,6 @@ export type CollectionItemSelection = {
 export type CollectionSeed =
   | { kind: "empty" }
   | ({ kind: "local" } & LocalCollectionSelection)
-  | { kind: "online"; tracks: OnlineTrack[] }
   | ({ kind: "collection" } & CollectionItemSelection);
 
 export type CollectionDragPayload = Exclude<CollectionSeed, { kind: "empty" }>;
@@ -76,16 +74,6 @@ export function addLocalSelectionToMusicCollection(
     collectionId,
     snapshotId: source.snapshotId,
     selection: source.selection,
-  });
-}
-
-export function addOnlineTracksToMusicCollection(
-  collectionId: string,
-  tracks: OnlineTrack[],
-) {
-  return invoke<MusicCollectionMutation>(TAURI_COMMANDS.addOnlineTracksToMusicCollection, {
-    collectionId,
-    tracks,
   });
 }
 
@@ -129,10 +117,8 @@ export function writeCollectionDragPayload(
   dataTransfer.setData(COLLECTION_DRAG_TYPE, JSON.stringify(payload));
   dataTransfer.setData(
     "text/plain",
-    payload.kind === "online"
-      ? `${payload.tracks.length} online track${payload.tracks.length === 1 ? "" : "s"}`
-      : payload.kind === "collection"
-        ? `${payload.itemIds.length} Collection track${payload.itemIds.length === 1 ? "" : "s"}`
+    payload.kind === "collection"
+      ? `${payload.itemIds.length} Collection track${payload.itemIds.length === 1 ? "" : "s"}`
       : "Local Music selection",
   );
   return true;
@@ -150,12 +136,6 @@ export function readCollectionDragPayload(
     if (!isObject(payload)) return null;
     if (payload.kind === "local") {
       return isLocalCollectionSelection(payload) ? payload : null;
-    }
-    if (payload.kind === "online" && Array.isArray(payload.tracks)) {
-      const tracks = payload.tracks.filter(isOnlineTrack);
-      return tracks.length === payload.tracks.length && tracks.length
-        ? { kind: "online", tracks }
-        : null;
     }
     if (payload.kind === "collection") {
       return isCollectionItemSelection(payload) ? payload : null;
@@ -187,16 +167,6 @@ function isLocalCollectionSelection(
     typeof selection.selectAll === "boolean"
     && Array.isArray(selection.ranges)
     && Array.isArray(selection.excludedRanges)
-  );
-}
-
-function isOnlineTrack(value: unknown): value is OnlineTrack {
-  return (
-    isObject(value)
-    && typeof value.key === "string"
-    && typeof value.title === "string"
-    && typeof value.artist === "string"
-    && Array.isArray(value.candidates)
   );
 }
 

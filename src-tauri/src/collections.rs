@@ -25,6 +25,8 @@ pub enum CollectionError {
     NotFound(String),
     #[error("collection item is invalid: {0}")]
     InvalidItem(String),
+    #[error("collections only accept local music")]
+    LocalTracksOnly,
     #[error("smart collection rules are invalid: {0}")]
     InvalidSmartRules(String),
     #[error("smart collection members are managed by its rules")]
@@ -477,47 +479,13 @@ pub fn add_local_tracks(
     )
 }
 
+// Retained for older clients; online tracks belong in playlists.
 pub fn add_online_tracks(
-    connection: &mut Connection,
-    collection_id: &str,
-    tracks: &[OnlineTrack],
+    _connection: &mut Connection,
+    _collection_id: &str,
+    _tracks: &[OnlineTrack],
 ) -> Result<MusicCollectionMutation, CollectionError> {
-    let transaction = connection.transaction()?;
-    ensure_manual_collection(&transaction, collection_id)?;
-    let mut position = next_position(&transaction, collection_id)?;
-    let mut added = 0_i64;
-    for track in tracks {
-        if track.key.trim().is_empty() {
-            return Err(CollectionError::InvalidItem(
-                "online track key cannot be empty".to_owned(),
-            ));
-        }
-        let inserted = transaction.execute(
-            "INSERT OR IGNORE INTO music_collection_items (
-                id, collection_id, position, item_kind, entry_key,
-                local_track_id, online_track_json, added_at
-             ) VALUES (?1, ?2, ?3, 'online', ?4, NULL, ?5, ?6)",
-            params![
-                Uuid::new_v4().to_string(),
-                collection_id,
-                position,
-                format!("online:{}", track.key),
-                serde_json::to_string(track)?,
-                now_timestamp(),
-            ],
-        )?;
-        if inserted > 0 {
-            added += 1;
-            position += 1;
-        }
-    }
-    finish_mutation(
-        transaction,
-        collection_id,
-        added,
-        i64::try_from(tracks.len()).unwrap_or(i64::MAX) - added,
-        0,
-    )
+    Err(CollectionError::LocalTracksOnly)
 }
 
 pub fn copy_items(
@@ -548,22 +516,14 @@ pub fn copy_items(
                         item.id
                     ))
                 })?;
-                ("local", format!("local:{track_id}"), Some(track_id), None)
-            }
-            MusicCollectionItemKind::Online => {
-                let track = item.online_track.ok_or_else(|| {
-                    CollectionError::InvalidItem(format!(
-                        "online item {} has no track snapshot",
-                        item.id
-                    ))
-                })?;
                 (
-                    "online",
-                    format!("online:{}", track.key),
-                    None,
-                    Some(serde_json::to_string(&track)?),
+                    "local",
+                    format!("local:{track_id}"),
+                    Some(track_id),
+                    None::<String>,
                 )
             }
+            MusicCollectionItemKind::Online => return Err(CollectionError::LocalTracksOnly),
         };
         let inserted = transaction.execute(
             "INSERT OR IGNORE INTO music_collection_items (
@@ -1113,6 +1073,26 @@ mod tests {
         }
     }
 
+    fn insert_legacy_online_track(connection: &Connection, collection_id: &str) {
+        let track = online_track();
+        connection
+            .execute(
+                "INSERT INTO music_collection_items (
+                    id, collection_id, position, item_kind, entry_key,
+                    local_track_id, online_track_json, added_at
+                 ) VALUES (?1, ?2, ?3, 'online', ?4, NULL, ?5, ?6)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    collection_id,
+                    next_position(connection, collection_id).expect("position should resolve"),
+                    format!("online:{}", track.key),
+                    serde_json::to_string(&track).expect("legacy track should serialize"),
+                    now_timestamp(),
+                ],
+            )
+            .expect("legacy online track should insert");
+    }
+
     #[test]
     fn create_collection_should_trim_name_and_reject_case_insensitive_duplicate() {
         let mut connection = test_connection();
@@ -1129,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn add_tracks_should_persist_local_and_online_items_without_duplicates() {
+    fn add_tracks_should_accept_local_tracks_and_reject_online_tracks() {
         let mut connection = test_connection();
         let track_id = insert_local_track(&connection);
         let collection = create_collection(&mut connection, "Mixed", None)
@@ -1137,12 +1117,13 @@ mod tests {
 
         add_local_tracks(&mut connection, &collection.id, &[track_id, track_id])
             .expect("local tracks should be added");
-        add_online_tracks(
+        let error = add_online_tracks(
             &mut connection,
             &collection.id,
             &[online_track(), online_track()],
         )
-        .expect("online tracks should be added");
+        .expect_err("online tracks should be rejected");
+        assert!(matches!(error, CollectionError::LocalTracksOnly));
         let detail =
             collection_detail(&connection, &collection.id).expect("collection should load");
 
@@ -1153,7 +1134,7 @@ mod tests {
                 detail.collection.online_count,
                 detail.items.len(),
             ),
-            (2, 1, 1, 2),
+            (1, 1, 0, 1),
         );
     }
 
@@ -1162,8 +1143,7 @@ mod tests {
         let mut connection = test_connection();
         let collection = create_collection(&mut connection, "Temporary", None)
             .expect("collection should be created");
-        add_online_tracks(&mut connection, &collection.id, &[online_track()])
-            .expect("online track should be added");
+        insert_legacy_online_track(&connection, &collection.id);
         let item_id = collection_detail(&connection, &collection.id)
             .expect("collection should load")
             .items[0]
@@ -1178,7 +1158,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_items_should_preserve_mixed_items_and_skip_duplicates() {
+    fn copy_items_should_reject_online_items_and_copy_only_local_tracks() {
         let mut connection = test_connection();
         let track_id = insert_local_track(&connection);
         let source =
@@ -1187,8 +1167,7 @@ mod tests {
             create_collection(&mut connection, "Target", None).expect("target should be created");
         add_local_tracks(&mut connection, &source.id, &[track_id])
             .expect("local track should be added");
-        add_online_tracks(&mut connection, &source.id, &[online_track()])
-            .expect("online track should be added");
+        insert_legacy_online_track(&connection, &source.id);
         let item_ids = collection_detail(&connection, &source.id)
             .expect("source should load")
             .items
@@ -1196,9 +1175,20 @@ mod tests {
             .map(|item| item.id)
             .collect::<Vec<_>>();
 
-        let first = copy_items(&mut connection, &target.id, &source.id, &item_ids)
-            .expect("items should copy");
-        let second = copy_items(&mut connection, &target.id, &source.id, &item_ids)
+        let error = copy_items(&mut connection, &target.id, &source.id, &item_ids)
+            .expect_err("mixed selection should be rejected");
+        assert!(matches!(error, CollectionError::LocalTracksOnly));
+        assert_eq!(
+            collection_detail(&connection, &target.id)
+                .expect("target should load")
+                .collection
+                .item_count,
+            0,
+        );
+
+        let first = copy_items(&mut connection, &target.id, &source.id, &item_ids[..1])
+            .expect("local item should copy");
+        let second = copy_items(&mut connection, &target.id, &source.id, &item_ids[..1])
             .expect("duplicate copy should be accepted");
 
         assert_eq!(
@@ -1209,7 +1199,7 @@ mod tests {
                 second.added,
                 second.skipped,
             ),
-            (2, 1, 1, 0, 2),
+            (1, 1, 0, 0, 1),
         );
     }
 
@@ -1221,8 +1211,7 @@ mod tests {
             .expect("collection should be created");
         add_local_tracks(&mut connection, &collection.id, &[track_id])
             .expect("local track should be added");
-        add_online_tracks(&mut connection, &collection.id, &[online_track()])
-            .expect("online track should be added");
+        insert_legacy_online_track(&connection, &collection.id);
         let item_ids = collection_detail(&connection, &collection.id)
             .expect("collection should load")
             .items

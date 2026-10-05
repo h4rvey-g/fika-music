@@ -22,6 +22,9 @@ describe("i18n", () => {
     expect(currentLocale.value).toBe("zh-CN");
     expect(t("Simplified Chinese")).toBe("简体中文");
     expect(t("{count} tracks", { count: 12 })).toBe("12 首歌曲");
+    expect(t("Playlists")).toBe("歌单");
+    expect(t("Add to Playlist")).toBe("添加到歌单");
+    expect(t("Add {title} to a Playlist", { title: "Song" })).toBe("将 Song 添加到歌单");
   });
 
   it("validates supported locales and updates the document language", () => {

@@ -6,6 +6,7 @@ import type {
   MusicCollectionMutation,
 } from "../lib/collection-api";
 import { createLocalTrack, createOnlineTrack } from "../test/fixtures";
+import { COLLECTION_DRAG_TYPE } from "../lib/collection-api";
 
 const tauriMocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -232,6 +233,9 @@ describe("CollectionBrowser", () => {
     await local.trigger("click");
     await online.trigger("click", { ctrlKey: true });
     await online.trigger("contextmenu", { clientX: 20, clientY: 20 });
+    const menu = wrapper.get('[aria-label="Collection track actions"]');
+    expect(menu.text()).not.toContain("Add selection to Collection");
+    expect(menu.text()).not.toContain("New Collection from selection");
     const queueButton = wrapper.findAll("button").find((button) =>
       button.text().includes("Set playback queue"));
     await queueButton!.trigger("click");
@@ -251,7 +255,28 @@ describe("CollectionBrowser", () => {
     expect(wrapper.findAll("[data-track-row]")).toHaveLength(2);
   });
 
-  it("shows file actions only for a local context track", async () => {
+  it("only writes local selections into Collection drag payloads", async () => {
+    const wrapper = mountCollection();
+    await flushPromises();
+    const local = wrapper.get('[data-collection-item-id="item-local"]');
+    const online = wrapper.get('[data-collection-item-id="item-online"]');
+    const setData = vi.fn();
+    const dataTransfer = { effectAllowed: "none", setData };
+
+    await local.trigger("dragstart", { dataTransfer });
+    expect(setData).toHaveBeenCalledWith(COLLECTION_DRAG_TYPE, JSON.stringify({
+      kind: "collection",
+      sourceCollectionId: collection.id,
+      itemIds: ["item-local"],
+    }));
+    setData.mockClear();
+    await online.trigger("click", { ctrlKey: true });
+    await online.trigger("dragstart", { dataTransfer });
+    await wrapper.get("[data-album-row]").trigger("dragstart", { dataTransfer });
+    expect(setData).not.toHaveBeenCalled();
+  });
+
+  it("shows file and Collection actions only for a local context track", async () => {
     const wrapper = mountCollection();
     await flushPromises();
 
@@ -261,6 +286,10 @@ describe("CollectionBrowser", () => {
     });
     expect(wrapper.get('[aria-label="Collection track actions"]').text())
       .not.toContain("Show in file manager");
+    expect(wrapper.get('[aria-label="Collection track actions"]').text())
+      .not.toContain("Add selection to Collection");
+    expect(wrapper.get('[aria-label="Collection track actions"]').text())
+      .not.toContain("New Collection from selection");
 
     await wrapper.get('[data-collection-item-id="item-local"]').trigger("contextmenu", {
       clientX: 20,
@@ -268,5 +297,21 @@ describe("CollectionBrowser", () => {
     });
     expect(wrapper.get('[aria-label="Collection track actions"]').text())
       .toContain("Show in file manager");
+    const add = wrapper.findAll('[aria-label="Collection track actions"] button')
+      .find((button) => button.text() === "Add selection to Collection")!;
+    await add.trigger("click");
+    expect(wrapper.emitted("addToCollection")?.[0]).toEqual([{
+      sourceCollectionId: collection.id,
+      itemIds: ["item-local"],
+    }]);
+
+    await wrapper.get('[data-collection-item-id="item-local"]').trigger("contextmenu", {
+      clientX: 20,
+      clientY: 20,
+    });
+    const create = wrapper.findAll('[aria-label="Collection track actions"] button')
+      .find((button) => button.text() === "New Collection from selection")!;
+    await create.trigger("click");
+    expect(wrapper.emitted("createCollection")?.[0]).toEqual(wrapper.emitted("addToCollection")?.[0]);
   });
 });

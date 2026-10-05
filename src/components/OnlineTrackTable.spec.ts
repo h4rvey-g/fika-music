@@ -2,7 +2,6 @@ import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import OnlineTrackTable from "./OnlineTrackTable.vue";
 import { createOnlineTrack } from "../test/fixtures";
-import { COLLECTION_DRAG_TYPE } from "../lib/collection-api";
 
 const track = createOnlineTrack({ key: "song-1", title: "Song 1" });
 
@@ -103,18 +102,12 @@ describe("OnlineTrackTable", () => {
     expect(wrapper.emitted("addSelectionToPlaylist")?.[0]).toEqual([[tracks[0], tracks[2]]]);
 
     await rows[2].trigger("contextmenu", { clientX: 100, clientY: 100 });
-    const addToCollection = wrapper
-      .findAll("[data-online-track-menu] button")
-      .find((button) => button.text().includes("Add to Collection"));
-    await addToCollection?.trigger("click");
-    expect(wrapper.emitted("addToCollection")?.[0]).toEqual([[tracks[0], tracks[2]]]);
-
-    await rows[2].trigger("contextmenu", { clientX: 100, clientY: 100 });
-    const createCollection = wrapper
-      .findAll("[data-online-track-menu] button")
-      .find((button) => button.text().includes("New Collection"));
-    await createCollection?.trigger("click");
-    expect(wrapper.emitted("createCollection")?.[0]).toEqual([[tracks[0], tracks[2]]]);
+    const menu = wrapper.get("[data-online-track-menu]");
+    expect(menu.text()).not.toContain("Collection");
+    const playNext = menu.findAll("button").filter((button) => button.text() === "Play next");
+    expect(playNext).toHaveLength(1);
+    await playNext[0].trigger("click");
+    expect(wrapper.emitted("queueTracks")?.[0]).toEqual([[tracks[0], tracks[2]]]);
   });
 
   it("selects a contiguous range with shift-click", async () => {
@@ -132,7 +125,7 @@ describe("OnlineTrackTable", () => {
     expect(rows.every((row) => row.attributes("aria-selected") === "true")).toBe(true);
   });
 
-  it("writes selected search results to the Collection drag payload", async () => {
+  it("does not make online tracks draggable into Collections", async () => {
     const tracks = [track, createOnlineTrack({ key: "song-2", title: "Song 2" })];
     const wrapper = mountTable(true, false, tracks);
     const rows = wrapper.findAll("tbody tr");
@@ -144,10 +137,8 @@ describe("OnlineTrackTable", () => {
       dataTransfer: { effectAllowed: "none", setData },
     });
 
-    const payload = JSON.parse(
-      setData.mock.calls.find(([type]) => type === COLLECTION_DRAG_TYPE)?.[1] ?? "null",
-    );
-    expect(payload).toEqual({ kind: "online", tracks });
+    expect(rows[1].attributes("draggable")).toBeUndefined();
+    expect(setData).not.toHaveBeenCalled();
   });
 
   it("opens comments for the single track selected from its context menu", async () => {
