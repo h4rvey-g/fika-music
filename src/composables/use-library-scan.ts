@@ -28,13 +28,17 @@ export function useLibraryScan(updateError: (message: string | null) => void) {
 
   async function initialize(): Promise<void> {
     disposed = false;
-    await Promise.all([loadStatus(), bindProgress()]);
+    await bindProgress();
+    if (!disposed) await loadStatus();
   }
 
   async function loadStatus(): Promise<void> {
+    const previousStatus = scanStatus.value;
     try {
-      scanStatus.value = await invoke<ScanStatus>(TAURI_COMMANDS.getScanStatus);
-      selectedFolder.value = scanStatus.value.folderPath;
+      const status = await invoke<ScanStatus>(TAURI_COMMANDS.getScanStatus);
+      if (disposed || scanStatus.value !== previousStatus) return;
+      scanStatus.value = status;
+      selectedFolder.value = status.folderPath;
     } catch (error) {
       updateError(normalizeError(error));
     }
@@ -46,6 +50,7 @@ export function useLibraryScan(updateError: (message: string | null) => void) {
         "library:scan-progress",
         (event) => {
           scanStatus.value = event.payload.status;
+          selectedFolder.value = event.payload.status.folderPath;
           scanMessage.value = event.payload.message;
           if (
             !event.payload.status.isRunning &&
@@ -86,10 +91,12 @@ export function useLibraryScan(updateError: (message: string | null) => void) {
     if (!selectedFolder.value) return;
     updateError(null);
     scanMessage.value = null;
+    const previousStatus = scanStatus.value;
     try {
-      scanStatus.value = await invoke<ScanStatus>(TAURI_COMMANDS.startLibraryScan, {
+      const status = await invoke<ScanStatus>(TAURI_COMMANDS.startLibraryScan, {
         folderPath: selectedFolder.value,
       });
+      if (!disposed && scanStatus.value === previousStatus) scanStatus.value = status;
     } catch (error) {
       updateError(normalizeError(error));
     }
